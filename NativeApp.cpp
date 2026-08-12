@@ -1681,6 +1681,10 @@ void drawActiveSeed() {
     page.drawString("PASSPHRASE: ACTIVA EN RAM", 270, footerY);
     footerY += 40;
   }
+  if (sessionUnlocked && loadedSeedCount > 1) {
+    page.drawString("Toca el FINGERPRINT para cambiar de semilla", 270, footerY);
+    footerY += 40;
+  }
   page.drawString("La semilla seguira activa", 270, footerY);
   page.drawString("hasta que decidas descartarla", 270, footerY + 40);
   page.setTextDatum(TL_DATUM);
