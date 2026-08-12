@@ -209,6 +209,8 @@ String activeAddress;
 uint8_t addressChange = 0;
 uint32_t addressIndex = 0;
 char indexBuffer[7] = {};
+char toastMessage[48] = {};
+uint32_t toastUntil = 0;
 QRCode addressQr;
 uint8_t addressQrBuffer[256] = {};
 
@@ -575,6 +577,23 @@ void storeProgress(uint32_t done, uint32_t total) {
   if (pct != progressPercent) {
     progressPercent = pct;
     drawProgressBar(340, pct);
+  }
+}
+
+void showToast(const char* msg) {
+  strncpy(toastMessage, msg, sizeof(toastMessage) - 1);
+  toastMessage[sizeof(toastMessage) - 1] = '\0';
+  toastUntil = millis() + 1600;
+  M5EPD_Canvas t(&M5.EPD);
+  if (t.createCanvas(500, 50)) {
+    t.fillCanvas(kBlack);
+    t.setTextColor(kWhite, kBlack);
+    t.setTextSize(2);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(toastMessage, 250, 25);
+    t.setTextDatum(TL_DATUM);
+    t.pushCanvas(20, 15, UPDATE_MODE_A2);
+    t.deleteCanvas();
   }
 }
 
@@ -1019,13 +1038,13 @@ char* currentPassphraseEntry() {
 
 void drawPassphraseInput() {
   blankPage();
-  title("BIP39 PASSPHRASE", passphraseConfirmPhase ? "Repite exactamente la passphrase" :
-        "ASCII: mayusculas, minusculas y simbolos");
+  title("BIP39 PASSPHRASE", passphraseConfirmPhase ? "Repite EXACTAMENTE: mayusculas incluidas" :
+        "Las mayusculas importan (ASCII)");
   char* value = currentPassphraseEntry(); const size_t length = strlen(value);
   textStyle(page, 2); page.setCursor(20, 150);
   page.println(passphraseMismatch ? "NO COINCIDEN. REPITE LA CONFIRMACION." :
                passphraseActive ? "Hay una passphrase activa en RAM." :
-               "No se guardara en la tarjeta SD.");
+               "No se guardara. 'Casa' y 'casa' son distintas.");
   page.drawRoundRect(20, 195, 500, 52, 8, kBlack); page.setCursor(35, 204);
   if (passphraseReveal) page.print(value);
   else for (size_t i = 0; i < length; ++i) page.print('*');
@@ -2640,6 +2659,7 @@ void click(int x, int y) {
     } else if (kPassRemove.contains(x, y) && passphraseActive) {
       clearPassphrase(); clearDerivedData(); updateFingerprint();
       screen = Screen::active_seed; focusIndex = 2; drawScreen();
+      showToast("PASSPHRASE QUITADA");
     } else if ((kAdd.contains(x, y) || kAction.contains(x, y)) && length) {
       if (!passphraseConfirmPhase) {
         passphraseConfirmPhase = true; passphraseReveal = false;
@@ -2656,6 +2676,7 @@ void click(int x, int y) {
         passphraseMismatch = false; passphraseReveal = false;
         clearDerivedData(); updateFingerprint();
         screen = Screen::active_seed; focusIndex = 2; drawScreen();
+        showToast("PASSPHRASE ACTIVA");
       }
     } else if (kBack.contains(x, y)) {
       encrypted_seed_store::wipe(passphraseEntry, sizeof(passphraseEntry));
@@ -3219,6 +3240,10 @@ void loop() {
     updateVaultPasswordDynamic();
     updateButton(kVaultReveal, "MOSTRAR 3 SEG.",
                  strlen(activeVaultPassword()) > 0, false, Icon::eye, UPDATE_MODE_A2);
+  }
+  if (toastUntil && static_cast<int32_t>(millis() - toastUntil) >= 0) {
+    toastUntil = 0; toastMessage[0] = '\0';
+    drawScreen();
   }
   delay(8);
 }
