@@ -9,6 +9,7 @@
 #include "session_vault_store.hpp"
 #include "qr_ble_client.hpp"
 #include "qr_wifi_server.hpp"
+#include "psbt_parser.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -2557,6 +2558,8 @@ void renderScanQrDynamic() {
 
 qr_wifi::QRWiFiServer wifiServer;
 bool wifiResultShown = false;
+psbt::ParsedTx parsedTx;
+bool txIsPsbt = false;
 
 void drawWifiResult() {
   const std::vector<uint8_t>& d = wifiServer.data();
@@ -2583,12 +2586,61 @@ bool buildWifiQr() {
                          wifiServer.wifiQrText().c_str()) == 0;
 }
 
+void drawTxInfo() {
+  title("TRANSACCION", "PSBT decodificado (sin firmar)");
+  textStyle(page, 2);
+  int y = 165;
+  page.setCursor(30, y);
+  page.printf("Entradas: %u   Salidas: %u", static_cast<unsigned>(parsedTx.inputs.size()),
+              static_cast<unsigned>(parsedTx.outputs.size()));
+  y += 42;
+  page.setCursor(30, y);
+  page.printf("Total salidas: %s BTC", psbt::formatSats(parsedTx.totalOut).c_str());
+  y += 42;
+  if (parsedTx.inputsComplete) {
+    page.setCursor(30, y);
+    page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
+    y += 42;
+    page.setCursor(30, y);
+    page.printf("Total a gastar: %s BTC", psbt::formatSats(parsedTx.totalIn).c_str());
+    y += 42;
+  } else {
+    page.setCursor(30, y); page.println("Comision: desconocida (sin UTXOs)");
+    y += 42;
+  }
+  page.drawLine(20, y, 520, y, kBlack);
+  y += 12;
+  textStyle(page, 2);
+  page.setCursor(30, y); page.println("Salidas:");
+  y += 34;
+  const size_t maxShow = 5;
+  for (size_t i = 0; i < parsedTx.outputs.size() && i < maxShow; ++i) {
+    const auto& o = parsedTx.outputs[i];
+    page.setCursor(30, y);
+    page.printf("#%u  %s BTC", static_cast<unsigned>(i + 1), psbt::formatSats(o.value).c_str());
+    y += 34;
+    textStyle(page, 1);
+    page.setCursor(30, y);
+    page.print(o.address.length() ? o.address : "direccion no estandar");
+    y += 28;
+    textStyle(page, 2);
+  }
+  if (parsedTx.outputs.size() > maxShow) {
+    page.setCursor(30, y);
+    page.printf("... y %u salidas mas", static_cast<unsigned>(parsedTx.outputs.size() - maxShow));
+  }
+  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+}
+
 void drawWifiReceive() {
   blankPage();
   const auto p = wifiServer.phase();
   if (p == qr_wifi::Phase::Received) {
-    title("RECIBIDO", "Datos recibidos por WiFi");
-    drawWifiResult();
+    if (txIsPsbt) drawTxInfo();
+    else {
+      title("RECIBIDO", "Datos recibidos por WiFi");
+      drawWifiResult();
+    }
   } else if (p == qr_wifi::Phase::Failed) {
     title("RECIBIR POR WIFI", "No se pudo activar el punto de acceso");
     warningIcon(page, 270, 200);
@@ -2622,6 +2674,7 @@ void drawWifiReceive() {
 
 void beginWifiReceive() {
   wifiResultShown = false;
+  txIsPsbt = false;
   wifiServer.clear();
   wifiServer.start();
   buildWifiQr();
@@ -3546,6 +3599,8 @@ void setup() {
                 fingerprintSelfTest ? "OK" : "ERROR");
   Serial.printf("PBKDF2-HMAC-SHA256 self-test: %s\n",
                 encrypted_seed_store::self_test() ? "OK" : "ERROR");
+  Serial.printf("PSBT parser self-test: %s\n",
+                psbt::self_test() ? "OK" : "ERROR");
   hdSelfTest = bitcoin_hd::self_test() && bitcoin_hd::self_test_passphrase();
   Serial.printf("BIP32 xpub/zpub self-test: %s\n", hdSelfTest ? "OK" : "ERROR");
   addressBip84SelfTest = bitcoin_address::self_test_bip84();
@@ -3577,6 +3632,7 @@ void loop() {
       screen = Screen::menu; focusIndex = 4; drawScreen();
     } else if (wp == qr_wifi::Phase::Received && !wifiResultShown) {
       wifiResultShown = true;
+      txIsPsbt = psbt::tryParsePsbt(wifiServer.data(), parsedTx);
       drawWifiReceive();
     }
   }
