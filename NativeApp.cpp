@@ -2099,7 +2099,7 @@ void drawDiagnostics() {
   page.printf("BIP32 xpub/zpub: %s", hdSelfTest ? "OK" : "ERROR");
   page.setCursor(25, 455);
   page.printf("microSD: %s", SD.cardType() == CARD_NONE ? "NO DETECTADA" : "OK");
-  buttonOn(page, kBack, "VOLVER", true, true);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
   fullRefresh();
 }
 
@@ -2601,7 +2601,6 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::security_warning) {
     if (kBack.contains(x, y)) {
-      newSeedIntent = NewSeedIntent::none;
       screen = securityWarningReturn; focusIndex = 0; drawScreen();
     } else if (kAction.contains(x, y)) {
       screen = securityWarningTarget; focusIndex = 0; drawScreen();
