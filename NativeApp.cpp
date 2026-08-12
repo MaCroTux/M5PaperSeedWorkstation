@@ -7,6 +7,7 @@
 #include "bitcoin_address.hpp"
 #include "encrypted_seed_store.hpp"
 #include "session_vault_store.hpp"
+#include "qr_ble_client.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -25,10 +26,10 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                     seedqr, public_key, public_key_qr, entropy_length, entropy, dice,
                     security_warning, vault_password, vault_result,
                     vault_label, address_explorer, address_index_input, address_qr,
-                    vault_list, vault_unlock, vault_loaded,
-                    session_menu, session_meta_list, session_seed_list,
-                    delete_confirm, discard_confirm, session_lock_warning,
-                    help, unlock_confirm, diagnostics };
+                     vault_list, vault_unlock, vault_loaded,
+                     session_menu, session_meta_list, session_seed_list,
+                     delete_confirm, discard_confirm, session_lock_warning,
+                     help, unlock_confirm, diagnostics, scan_qr };
 
 struct Rect {
   int x, y, w, h;
@@ -39,10 +40,10 @@ struct Rect {
 
 constexpr Rect kMenu[] = {{40, 165, 460, 80}, {40, 260, 460, 80},
                           {40, 355, 460, 80}, {40, 450, 460, 80},
-                          {40, 545, 460, 80}};
+                          {40, 545, 460, 80}, {40, 640, 460, 80}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "DIAGNOSTICO", "AYUDA"};
+                                       "DIAGNOSTICO", "AYUDA", "SCAN QR"};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
@@ -625,7 +626,8 @@ const char* menuHint(uint8_t index) {
                                     : "Genera una semilla aleatoria con entropia propia";
     case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
     case 3: return "Pruebas del dispositivo y self-tests";
-    default: return "Conceptos basicos y glosario";
+    case 4: return "Conceptos basicos y glosario";
+    default: return "Recibe un QR por Bluetooth desde una camara (Raspberry Pi)";
   }
 }
 
@@ -646,8 +648,8 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::wrench, Icon::none};
-  for (uint8_t i = 0; i < 5; ++i) {
+                                    Icon::wrench, Icon::none, Icon::qr};
+  for (uint8_t i = 0; i < 6; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
@@ -2298,6 +2300,252 @@ void drawHelp() {
   fullRefresh();
 }
 
+qr_ble::QRBLEClient qrClient;
+qr_ble::Phase lastQrPhase = qr_ble::Phase::Idle;
+uint16_t lastQrChunks = 0;
+uint8_t lastQrProgress = 255;
+String lastQrStatus;
+
+bool scanQrActive() {
+  const auto p = qrClient.phase();
+  return p == qr_ble::Phase::Scanning || p == qr_ble::Phase::Connecting ||
+         p == qr_ble::Phase::Waiting || p == qr_ble::Phase::Receiving;
+}
+
+const char* scanSubtitle() {
+  switch (qrClient.phase()) {
+    case qr_ble::Phase::Scanning: return "Buscando camara...";
+    case qr_ble::Phase::Connecting: return "Camara encontrada. Conectando...";
+    case qr_ble::Phase::Waiting: return "Camara conectada. Esperando QR...";
+    case qr_ble::Phase::Receiving: return "Recibiendo el QR...";
+    case qr_ble::Phase::Success: return "Transferencia completada";
+    case qr_ble::Phase::Failed: return "La transferencia ha fallado";
+    default: return "";
+  }
+}
+
+String scanStatusLine() {
+  const auto p = qrClient.phase();
+  if (p == qr_ble::Phase::Scanning) return "Buscando camara...";
+  if (p == qr_ble::Phase::Connecting) return "Conectando...";
+  if (p == qr_ble::Phase::Waiting) {
+    const String& s = qrClient.statusText();
+    if (s == "QR_DETECTED") return "QR detectado";
+    if (s == "SCANNING") return "Camara escaneando...";
+    if (s == "TRANSFER_START") return "Iniciando transferencia...";
+    return "Esperando QR...";
+  }
+  if (p == qr_ble::Phase::Receiving) return "Recibiendo...";
+  return "";
+}
+
+const char* scanErrorText(qr_ble::Error e) {
+  switch (e) {
+    case qr_ble::Error::BleInit: return "Error de inicializacion BLE";
+    case qr_ble::Error::ScanTimeout: return "No se encontro la camara";
+    case qr_ble::Error::ConnectTimeout:
+    case qr_ble::Error::ConnectFailed: return "No se pudo conectar";
+    case qr_ble::Error::ServiceNotFound: return "Servicio BLE no encontrado";
+    case qr_ble::Error::SubscribeFailed: return "No se pudo suscribir";
+    case qr_ble::Error::Disconnected: return "Camara desconectada";
+    case qr_ble::Error::PayloadTooLarge: return "PAYLOAD DEMASIADO GRANDE";
+    case qr_ble::Error::InvalidTransfer: return "TRANSFERENCIA INVALIDA";
+    case qr_ble::Error::TransferTimeout: return "Transferencia agotada";
+    default: return "ERROR";
+  }
+}
+
+bool isValidUtf8(const std::vector<uint8_t>& d) {
+  size_t i = 0;
+  while (i < d.size()) {
+    const uint8_t c = d[i];
+    if (c < 0x80) { ++i; continue; }
+    if ((c & 0xE0) == 0xC0) {
+      if (i + 1 >= d.size() || (d[i + 1] & 0xC0) != 0x80) return false;
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0) {
+      if (i + 2 >= d.size() || (d[i + 1] & 0xC0) != 0x80 ||
+          (d[i + 2] & 0xC0) != 0x80) return false;
+      i += 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      if (i + 3 >= d.size() || (d[i + 1] & 0xC0) != 0x80 ||
+          (d[i + 2] & 0xC0) != 0x80 || (d[i + 3] & 0xC0) != 0x80) return false;
+      i += 4;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+String scanPayloadText(const std::vector<uint8_t>& d) {
+  String s;
+  s.reserve(d.size());
+  for (uint8_t c : d) {
+    if (c == '\r') s += '\n';
+    else if (c >= 0x20 || c == '\n') s += static_cast<char>(c);
+  }
+  return s;
+}
+
+void drawWrappedText(M5EPD_Canvas& c, const String& text, int x, int y,
+                     int width, int lineHeight, int maxLines) {
+  textStyle(c, 1);
+  size_t pos = 0;
+  const size_t len = text.length();
+  int line = 0;
+  while (pos < len && line < maxLines) {
+    size_t end = pos;
+    String lineStr;
+    while (end < len && text[end] != '\n') {
+      const String sub = text.substring(pos, end + 1);
+      if (c.textWidth(sub) > width) break;
+      lineStr = sub;
+      ++end;
+    }
+    if (end == pos && end < len) {
+      lineStr = text.substring(pos, pos + 1);
+      ++end;
+    }
+    c.setCursor(x, y + line * lineHeight);
+    c.print(lineStr);
+    ++line;
+    if (end < len && text[end] == '\n') ++end;
+    pos = end;
+  }
+  if (pos < len) {
+    c.setCursor(x, y + line * lineHeight);
+    c.print("...");
+  }
+}
+
+void drawScanStatusInto(M5EPD_Canvas& c, int ox, int oy) {
+  const auto p = qrClient.phase();
+  if (p == qr_ble::Phase::Receiving) {
+    textStyle(c, 2);
+    c.setTextDatum(MC_DATUM);
+    c.drawString("Recibiendo...", ox + 250, oy + 40);
+    c.drawString(String(qrClient.receivedChunks()) + " / " +
+                     qrClient.totalChunks(), ox + 250, oy + 90);
+    c.setTextDatum(TL_DATUM);
+  } else {
+    textStyle(c, 3);
+    c.setTextDatum(MC_DATUM);
+    c.drawString(scanStatusLine(), ox + 250, oy + 80);
+    c.setTextDatum(TL_DATUM);
+  }
+}
+
+void drawScanQrSuccess() {
+  const qr_ble::QRPayload& pl = qrClient.payload();
+  textStyle(page, 2);
+  page.setCursor(30, 175);
+  page.printf("Format: %s", pl.format.c_str());
+  page.setCursor(30, 220);
+  page.printf("Type: %s", pl.type.c_str());
+  page.setCursor(30, 265);
+  page.printf("Size: %u bytes", static_cast<unsigned>(pl.data.size()));
+  page.setCursor(30, 310);
+  page.println("Content:");
+  page.drawRoundRect(20, 345, 500, 385, 8, kBlack);
+  if (!pl.data.empty() && isValidUtf8(pl.data)) {
+    drawWrappedText(page, scanPayloadText(pl.data), 32, 358, 470, 22, 14);
+  } else {
+    textStyle(page, 2);
+    page.setTextDatum(MC_DATUM);
+    page.drawString("Binary payload / " + String(pl.data.size()) + " bytes",
+                    270, 520);
+    page.setTextDatum(TL_DATUM);
+  }
+  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+}
+
+void drawScanQr() {
+  blankPage();
+  title("QR SCANNER", scanSubtitle());
+  const auto p = qrClient.phase();
+  if (p == qr_ble::Phase::Success) {
+    drawScanQrSuccess();
+    fullRefresh();
+  } else if (p == qr_ble::Phase::Failed) {
+    warningIcon(page, 270, 200);
+    centeredFit(page, "ERROR", 320, 500, 3);
+    centeredFit(page, scanErrorText(qrClient.error()), 400);
+    centeredFit(page, "La camara no ha podido entregar el QR.", 470);
+    buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+    buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
+    fullRefresh();
+  } else {
+    drawScanStatusInto(page, 20, 340);
+    buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
+    fullRefresh();
+    if (p == qr_ble::Phase::Receiving) {
+      const uint16_t total = qrClient.totalChunks();
+      const uint8_t pct =
+          total ? static_cast<uint8_t>((qrClient.receivedChunks() * 100) / total)
+                : 0;
+      drawProgressBar(500, pct);
+      lastQrProgress = pct;
+    }
+  }
+}
+
+void beginScanQr() {
+  lastQrPhase = qr_ble::Phase::Idle;
+  lastQrChunks = 0;
+  lastQrProgress = 255;
+  lastQrStatus = "";
+  qrClient.clear();
+  qrClient.start();
+  screen = Screen::scan_qr;
+  focusIndex = 0;
+  drawScanQr();
+}
+
+void renderScanQrDynamic() {
+  const auto p = qrClient.phase();
+  if (p != lastQrPhase) {
+    lastQrPhase = p;
+    lastQrChunks = 0;
+    lastQrProgress = 255;
+    lastQrStatus = "";
+    drawScanQr();
+    return;
+  }
+  if (p == qr_ble::Phase::Receiving) {
+    const uint16_t rcvd = qrClient.receivedChunks();
+    if (rcvd != lastQrChunks) {
+      lastQrChunks = rcvd;
+      M5EPD_Canvas region(&M5.EPD);
+      if (region.createCanvas(500, 160)) {
+        region.fillCanvas(kWhite);
+        drawScanStatusInto(region, 0, 0);
+        region.pushCanvas(20, 340, UPDATE_MODE_DU4);
+        region.deleteCanvas();
+      }
+      const uint16_t total = qrClient.totalChunks();
+      const uint8_t pct =
+          total ? static_cast<uint8_t>((rcvd * 100) / total) : 0;
+      if (pct != lastQrProgress) {
+        lastQrProgress = pct;
+        drawProgressBar(500, pct);
+      }
+    }
+  } else if (p == qr_ble::Phase::Waiting) {
+    const String s = scanStatusLine();
+    if (s != lastQrStatus) {
+      lastQrStatus = s;
+      M5EPD_Canvas region(&M5.EPD);
+      if (region.createCanvas(500, 160)) {
+        region.fillCanvas(kWhite);
+        drawScanStatusInto(region, 0, 0);
+        region.pushCanvas(20, 340, UPDATE_MODE_DU4);
+        region.deleteCanvas();
+      }
+    }
+  }
+}
+
 void drawScreen() {
   switch (screen) {
     case Screen::menu: drawMenu(); break;
@@ -2335,6 +2583,7 @@ void drawScreen() {
     case Screen::session_lock_warning: drawSessionLockWarning(); break;
     case Screen::help: drawHelp(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
+    case Screen::scan_qr: drawScanQr(); break;
   }
 }
 
@@ -2342,7 +2591,7 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                        Icon::wrench, Icon::none};
+                                        Icon::wrench, Icon::none, Icon::qr};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -2535,6 +2784,18 @@ void updateFocusButton(uint8_t index) {
                    true, index == focusIndex,
                    index == 0 ? Icon::none : Icon::folder); break;
     case Screen::diagnostics: break;
+    case Screen::scan_qr: {
+      const auto p = qrClient.phase();
+      if (p == qr_ble::Phase::Failed) {
+        if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+        else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
+      } else if (p == qr_ble::Phase::Success) {
+        updateButton(kAction, "VOLVER", true, index == focusIndex);
+      } else {
+        updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
+      }
+      break;
+    }
   }
 }
 
@@ -2546,7 +2807,9 @@ void moveFocus(int direction) {
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 5;
+  else if (screen == Screen::menu) count = 6;
+  else if (screen == Screen::scan_qr)
+    count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 3;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
@@ -2606,6 +2869,7 @@ void click(int x, int y) {
   if (fingerprintValid && screen != Screen::vault_password &&
       screen != Screen::vault_label && screen != Screen::vault_unlock &&
       screen != Screen::passphrase_input &&
+      screen != Screen::scan_qr &&
       kFingerprintBadge.contains(x, y)) {
     if (sessionUnlocked) {
       cacheCurrentSeed();
@@ -2625,6 +2889,7 @@ void click(int x, int y) {
     } else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::diagnostics; focusIndex = 0; drawScreen(); }
     else if (kMenu[4].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
+    else if (kMenu[5].contains(x, y)) { beginScanQr(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
     else if (kActiveMenu[1].contains(x, y)) {
@@ -3022,6 +3287,21 @@ void click(int x, int y) {
       if (unlockConfirmIsSession) unlockSessionVault();
       else loadSelectedVault();
     }
+  } else if (screen == Screen::scan_qr) {
+    const auto p = qrClient.phase();
+    if (p == qr_ble::Phase::Failed) {
+      if (kBack.contains(x, y)) {
+        qrClient.clear(); screen = Screen::menu; focusIndex = 5; drawScreen();
+      } else if (kAction.contains(x, y)) {
+        beginScanQr();
+      }
+    } else if (p == qr_ble::Phase::Success) {
+      if (kAction.contains(x, y)) {
+        qrClient.clear(); screen = Screen::menu; focusIndex = 5; drawScreen();
+      }
+    } else if (kAction.contains(x, y)) {
+      qrClient.cancel(); screen = Screen::menu; focusIndex = 5; drawScreen();
+    }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
@@ -3128,6 +3408,10 @@ void activateFocus() {
   } else if (screen == Screen::unlock_confirm) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::scan_qr) {
+    const auto p = qrClient.phase();
+    const Rect& r = (p == qr_ble::Phase::Failed && focusIndex == 0) ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
@@ -3162,6 +3446,18 @@ void setup() {
 }
 
 void loop() {
+  qrClient.update();
+  if (screen == Screen::scan_qr) {
+    const auto qp = qrClient.phase();
+    if (qp == qr_ble::Phase::Cancelled || qp == qr_ble::Phase::Idle) {
+      screen = Screen::menu; focusIndex = 5; drawScreen();
+    } else {
+      renderScanQrDynamic();
+    }
+  } else if (scanQrActive()) {
+    qrClient.cancel();
+  }
+
   if (sessionUnlocked && static_cast<uint32_t>(millis() - lastUserActivity) >= kSessionTimeoutMs) {
     Serial.println("Vault de sesion bloqueado por inactividad");
     lastWarnSecond = 0;

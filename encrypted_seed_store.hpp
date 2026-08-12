@@ -87,21 +87,19 @@ inline bool derive(const char* password, const uint8_t salt[16],
 }
 
 inline bool self_test() {
-  uint8_t out[32] = {};
-  static const uint8_t salt[16] = {'s', 'a', 'l', 't'};
-  static const uint8_t expect1[32] = {
-      0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52,
-      0x56, 0xc4, 0xf8, 0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48,
-      0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b, 0xe1, 0x7b};
-  static const uint8_t expect2[32] = {
-      0xae, 0x4d, 0x0c, 0x95, 0xaf, 0x6b, 0x46, 0xd3, 0x2d, 0x0a, 0xdf, 0xf9,
-      0x28, 0xf0, 0x6d, 0xd0, 0x2a, 0x30, 0x3f, 0x8e, 0xf3, 0xc2, 0x51, 0xdf,
-      0xd6, 0xe2, 0xd8, 0x5a, 0x95, 0x47, 0x4c, 0x43};
-  bool ok = pbkdf2_sha256("password", salt, 1, out);
-  ok = ok && memcmp(out, expect1, 32) == 0;
-  ok = pbkdf2_sha256("password", salt, 2, out) && ok;
-  ok = ok && memcmp(out, expect2, 32) == 0;
-  wipe(out, sizeof(out));
+  uint8_t manual[32] = {}, reference[32] = {};
+  static const uint8_t salt[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                   '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+  if (!pbkdf2_sha256("password", salt, 1000, manual)) return false;
+  mbedtls_md_context_t ctx; mbedtls_md_init(&ctx);
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  bool ok = info && mbedtls_md_setup(&ctx, info, 1) == 0 &&
+      mbedtls_pkcs5_pbkdf2_hmac(&ctx,
+          reinterpret_cast<const unsigned char*>("password"), 8,
+          salt, 16, 1000, 32, reference) == 0;
+  mbedtls_md_free(&ctx);
+  ok = ok && memcmp(manual, reference, 32) == 0;
+  wipe(manual, sizeof(manual)); wipe(reference, sizeof(reference));
   return ok;
 }
 
