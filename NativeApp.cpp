@@ -28,7 +28,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                     vault_list, vault_unlock, vault_loaded,
                     session_menu, session_meta_list, session_seed_list,
                     delete_confirm, discard_confirm, session_lock_warning,
-                    help, diagnostics };
+                    help, unlock_confirm, diagnostics };
 
 struct Rect {
   int x, y, w, h;
@@ -172,6 +172,7 @@ bool vaultDeleteMode = false;
 bool sessionDeleteMode = false;
 bool deleteFailed = false;
 bool pendingDeleteSession = false;
+bool unlockConfirmIsSession = false;
 char pendingDeletePath[64] = {};
 enum class VaultFlow { individual, session_create, session_unlock, session_save_seed };
 VaultFlow vaultFlow = VaultFlow::individual;
@@ -2212,6 +2213,20 @@ void drawDiscardConfirm() {
   fullRefresh();
 }
 
+void drawUnlockConfirm() {
+  blankPage();
+  title("ABRIR VAULT", "Hay una semilla activa en RAM");
+  warningIcon(page, 270, 200);
+  textStyle(page, 2); page.setTextDatum(MC_DATUM);
+  page.drawString("Al abrir el vault se descartara", 270, 360);
+  page.drawString("la semilla que esta activa ahora.", 270, 405);
+  page.drawString("Si no esta guardada, se perdera.", 270, 460);
+  page.setTextDatum(TL_DATUM);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, "CONTINUAR", true, focusIndex == 1, Icon::folder);
+  fullRefresh();
+}
+
 void drawDiagnostics() {
   blankPage();
   title("DIAGNOSTICO", "Controlador nativo M5EPD");
@@ -2297,6 +2312,7 @@ void drawScreen() {
     case Screen::address_index_input: drawAddressIndexInput(); break;
     case Screen::address_qr: drawAddressQr(); break;
     case Screen::discard_confirm: drawDiscardConfirm(); break;
+    case Screen::unlock_confirm: drawUnlockConfirm(); break;
     case Screen::session_lock_warning: drawSessionLockWarning(); break;
     case Screen::help: drawHelp(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
@@ -2494,6 +2510,11 @@ void updateFocusButton(uint8_t index) {
                    index == 0 ? "CANCELAR" : "CONFIRMAR DESCARTE",
                    true, index == focusIndex,
                    index == 0 ? Icon::none : Icon::trash); break;
+    case Screen::unlock_confirm:
+      updateButton(index == 0 ? kBack : kAction,
+                   index == 0 ? "CANCELAR" : "CONTINUAR",
+                   true, index == focusIndex,
+                   index == 0 ? Icon::none : Icon::folder); break;
     case Screen::diagnostics: break;
   }
 }
@@ -2520,7 +2541,8 @@ void moveFocus(int direction) {
            screen == Screen::vault_label || screen == Screen::vault_unlock ||
            screen == Screen::passphrase_input ||
            screen == Screen::address_index_input ||
-           screen == Screen::delete_confirm || screen == Screen::discard_confirm) count = 2;
+           screen == Screen::delete_confirm || screen == Screen::discard_confirm ||
+           screen == Screen::unlock_confirm) count = 2;
   else if (screen == Screen::address_explorer) count = 7;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
   if (screen == Screen::menu && fingerprintValid && focusIndex == 1) {
@@ -2826,7 +2848,10 @@ void click(int x, int y) {
     } else if (kDelete.contains(x, y) && length) {
       vaultPassword[length - 1] = '\0'; updateVaultPasswordDynamic(length == 1);
     } else if ((kAdd.contains(x, y) || kAction.contains(x, y)) && length) {
-      if (vaultFlow == VaultFlow::session_unlock) unlockSessionVault();
+      if (fingerprintValid) {
+        unlockConfirmIsSession = (vaultFlow == VaultFlow::session_unlock);
+        screen = Screen::unlock_confirm; focusIndex = 0; drawScreen();
+      } else if (vaultFlow == VaultFlow::session_unlock) unlockSessionVault();
       else loadSelectedVault();
     } else if (kVaultReveal.contains(x, y) && length) {
       vaultRevealUntil = millis() + 3000; updateVaultPasswordDynamic();
@@ -2970,6 +2995,12 @@ void click(int x, int y) {
       screen = anotherActive ? Screen::active_seed : Screen::menu;
       focusIndex = 0; drawScreen();
     }
+  } else if (screen == Screen::unlock_confirm) {
+    if (kBack.contains(x, y)) { screen = Screen::vault_unlock; focusIndex = 1; drawScreen(); }
+    else if (kAction.contains(x, y)) {
+      if (unlockConfirmIsSession) unlockSessionVault();
+      else loadSelectedVault();
+    }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
@@ -3071,6 +3102,9 @@ void activateFocus() {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::discard_confirm) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::unlock_confirm) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
