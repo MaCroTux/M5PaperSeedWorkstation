@@ -96,6 +96,7 @@ void QRBLEClient::start() {
   Serial.println("[BLE] scanning");
   NimBLEDevice::init(kDeviceName);
   bleOn_ = true;
+  Serial.printf("[BLE] free heap=%u\n", static_cast<unsigned>(ESP.getFreeHeap()));
   scan_ = NimBLEDevice::getScan();
   scan_->setActiveScan(true);
   scan_->setInterval(100);

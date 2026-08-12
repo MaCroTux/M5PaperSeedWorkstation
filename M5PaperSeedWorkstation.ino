@@ -2,7 +2,7 @@
 
 #ifdef LEGACY_M5GFX_BUILD
 
-#ifndef ARDUINO_M5STACK_PAPERcomo 
+#ifndef ARDUINO_M5STACK_PAPER
 #define ARDUINO_M5STACK_PAPER
 #endif
 
