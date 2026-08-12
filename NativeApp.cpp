@@ -28,7 +28,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                     vault_list, vault_unlock, vault_loaded,
                     session_menu, session_meta_list, session_seed_list,
                     delete_confirm, discard_confirm, session_lock_warning,
-                    diagnostics };
+                    help, diagnostics };
 
 struct Rect {
   int x, y, w, h;
@@ -42,7 +42,7 @@ constexpr Rect kMenu[] = {{40, 165, 460, 80}, {40, 260, 460, 80},
                           {40, 545, 460, 80}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "DIAGNOSTICO"};
+                                       "DIAGNOSTICO", "AYUDA"};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
@@ -597,14 +597,42 @@ bool menuEnabled(uint8_t index) {
   return !(index == 1 && fingerprintValid);
 }
 
+const char* menuHint(uint8_t index) {
+  switch (index) {
+    case 0: return fingerprintValid ? "Abre el menu de la semilla que ya esta activa"
+                                    : "Escribe una semilla BIP39 palabra a palabra";
+    case 1: return fingerprintValid ? "Descarta la semilla activa para crear otra"
+                                    : "Genera una semilla aleatoria con entropia propia";
+    case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
+    case 3: return "Pruebas del dispositivo y self-tests";
+    default: return "Conceptos basicos y glosario";
+  }
+}
+
+const char* activeHint(uint8_t index) {
+  switch (index) {
+    case 0: return "Deriva la clave publica (xpub/zpub) para ver solo direcciones";
+    case 1: return "Copia y comprueba la semilla (palabras, QR o SEEDQR)";
+    case 2: return "Anade una passphrase BIP39 (cambia todas las direcciones)";
+    case 3: return "Deriva direcciones concretas para recibir o para cambio";
+    case 4: return sessionUnlocked ? "Cargar o guardar semillas en el vault de sesion"
+                                   : "Borra la semilla de la memoria RAM";
+    default: return "Cierra el vault y borra la clave maestra de RAM";
+  }
+}
+
 void drawMenu() {
   blankPage();
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
-  static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock, Icon::wrench};
-  for (uint8_t i = 0; i < 4; ++i) {
+  static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
+                                    Icon::wrench, Icon::none};
+  for (uint8_t i = 0; i < 5; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
+  textStyle(page, 1); page.setTextDatum(MC_DATUM);
+  page.drawString(menuHint(focusIndex), 270, 660);
+  page.setTextDatum(TL_DATUM);
   fullRefresh();
 }
 
@@ -1735,6 +1763,9 @@ void drawActiveSeed() {
   }
   page.drawString("La semilla seguira activa", 270, footerY);
   page.drawString("hasta que decidas descartarla", 270, footerY + 40);
+  textStyle(page, 1);
+  page.drawString(activeHint(focusIndex), 270, 895);
+  textStyle(page, 2);
   page.setTextDatum(TL_DATUM);
   fullRefresh();
 }
@@ -2201,6 +2232,38 @@ void drawDiagnostics() {
   fullRefresh();
 }
 
+void drawHelp() {
+  blankPage();
+  title("AYUDA", "Conceptos basicos");
+  static const char* lines[] = {
+    "VAULT DE SESION: varias semillas cifradas",
+    "bajo una unica contrasena maestra.",
+    "",
+    "VAULT INDIVIDUAL: una sola semilla cifrada",
+    "con su propia contrasena (archivo .vlt).",
+    "",
+    "SOLO RAM: la semilla no se guarda y se",
+    "borra al apagar o al descartarla.",
+    "",
+    "PASSPHRASE: palabra extra (BIP39) que",
+    "cambia TODAS tus direcciones.",
+    "",
+    "FINGERPRINT: identificador corto de tu",
+    "semilla para verificarla visualmente.",
+    "",
+    "ENTROPIA: aleatoriedad que genera la",
+    "semilla dibujando o tirando dados.",
+  };
+  int y = 165;
+  for (const char* line : lines) {
+    page.setCursor(20, y);
+    page.println(line);
+    y += 38;
+  }
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+  fullRefresh();
+}
+
 void drawScreen() {
   switch (screen) {
     case Screen::menu: drawMenu(); break;
@@ -2235,6 +2298,7 @@ void drawScreen() {
     case Screen::address_qr: drawAddressQr(); break;
     case Screen::discard_confirm: drawDiscardConfirm(); break;
     case Screen::session_lock_warning: drawSessionLockWarning(); break;
+    case Screen::help: drawHelp(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
   }
 }
@@ -2242,7 +2306,8 @@ void drawScreen() {
 void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
-      static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock, Icon::wrench};
+      static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
+                                        Icon::wrench, Icon::none};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -2441,7 +2506,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 4;
+  else if (screen == Screen::menu) count = 5;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 3;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
@@ -2518,6 +2583,7 @@ void click(int x, int y) {
       if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
     } else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::diagnostics; focusIndex = 0; drawScreen(); }
+    else if (kMenu[4].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
     else if (kActiveMenu[1].contains(x, y)) {
@@ -2906,6 +2972,8 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
+  } else if (screen == Screen::help && kBack.contains(x, y)) {
+    screen = Screen::menu; focusIndex = 4; drawScreen();
   }
 }
 
@@ -3006,6 +3074,7 @@ void activateFocus() {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
+  else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
 
 }  // namespace
