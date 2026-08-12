@@ -44,7 +44,7 @@ constexpr Rect kMenu[] = {{40, 165, 460, 80}, {40, 260, 460, 80},
                           {40, 545, 460, 80}, {40, 640, 460, 80}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "DIAGNOSTICO", "AYUDA", "RECIBIR POR WIFI"};
+                                       "AYUDA", "RECIBIR POR WIFI"};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
@@ -633,8 +633,7 @@ const char* menuHint(uint8_t index) {
     case 1: return fingerprintValid ? "Descarta la semilla activa para crear otra"
                                     : "Genera una semilla aleatoria con entropia propia";
     case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
-    case 3: return "Pruebas del dispositivo y self-tests";
-    case 4: return "Conceptos basicos y glosario";
+    case 3: return "Conceptos basicos y glosario";
     default: return "Recibe un archivo o QR por WiFi desde tu movil";
   }
 }
@@ -656,8 +655,8 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::wrench, Icon::none, Icon::wifi};
-  for (uint8_t i = 0; i < 6; ++i) {
+                                    Icon::none, Icon::wifi};
+  for (uint8_t i = 0; i < 5; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
@@ -2658,7 +2657,7 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                        Icon::wrench, Icon::none, Icon::wifi};
+                                        Icon::none, Icon::wifi};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -2886,7 +2885,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 6;
+  else if (screen == Screen::menu) count = 5;
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive)
@@ -2967,10 +2966,9 @@ void click(int x, int y) {
       else { newSeedIntent = NewSeedIntent::none; screen = Screen::length; focusIndex = 0; drawScreen(); }
     } else if (kMenu[1].contains(x, y)) {
       if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
-    } else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
-    else if (kMenu[3].contains(x, y)) { screen = Screen::diagnostics; focusIndex = 0; drawScreen(); }
-    else if (kMenu[4].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
-    else if (kMenu[5].contains(x, y)) { beginWifiReceive(); }
+    }     else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
+    else if (kMenu[3].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
+    else if (kMenu[4].contains(x, y)) { beginWifiReceive(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
     else if (kActiveMenu[1].contains(x, y)) {
@@ -3372,31 +3370,31 @@ void click(int x, int y) {
     const auto p = qrClient.phase();
     if (p == qr_ble::Phase::Failed) {
       if (kBack.contains(x, y)) {
-        qrClient.clear(); screen = Screen::menu; focusIndex = 5; drawScreen();
+        qrClient.clear(); screen = Screen::menu; focusIndex = 4; drawScreen();
       } else if (kAction.contains(x, y)) {
         beginScanQr();
       }
     } else if (p == qr_ble::Phase::Success) {
       if (kAction.contains(x, y)) {
-        qrClient.clear(); screen = Screen::menu; focusIndex = 5; drawScreen();
+        qrClient.clear(); screen = Screen::menu; focusIndex = 4; drawScreen();
       }
     } else if (kAction.contains(x, y)) {
-      qrClient.cancel(); screen = Screen::menu; focusIndex = 5; drawScreen();
+      qrClient.cancel(); screen = Screen::menu; focusIndex = 4; drawScreen();
     }
   } else if (screen == Screen::wifi_receive) {
     const auto p = wifiServer.phase();
     if (p == qr_wifi::Phase::Received) {
-      if (kAction.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 5; drawScreen(); }
+      if (kAction.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
     } else if (p == qr_wifi::Phase::Failed) {
-      if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 5; drawScreen(); }
+      if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
       else if (kAction.contains(x, y)) { beginWifiReceive(); }
     } else if (kAction.contains(x, y)) {
-      wifiServer.cancel(); screen = Screen::menu; focusIndex = 5; drawScreen();
+      wifiServer.cancel(); screen = Screen::menu; focusIndex = 4; drawScreen();
     }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
-    screen = Screen::menu; focusIndex = 4; drawScreen();
+    screen = Screen::menu; focusIndex = 3; drawScreen();
   }
 }
 
@@ -3545,7 +3543,7 @@ void loop() {
   if (screen == Screen::scan_qr) {
     const auto qp = qrClient.phase();
     if (qp == qr_ble::Phase::Cancelled || qp == qr_ble::Phase::Idle) {
-      screen = Screen::menu; focusIndex = 5; drawScreen();
+      screen = Screen::menu; focusIndex = 4; drawScreen();
     } else {
       renderScanQrDynamic();
     }
@@ -3557,7 +3555,7 @@ void loop() {
   if (screen == Screen::wifi_receive) {
     const auto wp = wifiServer.phase();
     if (wp == qr_wifi::Phase::Cancelled || wp == qr_wifi::Phase::Idle) {
-      screen = Screen::menu; focusIndex = 5; drawScreen();
+      screen = Screen::menu; focusIndex = 4; drawScreen();
     } else if (wp == qr_wifi::Phase::Received && !wifiResultShown) {
       wifiResultShown = true;
       drawWifiReceive();
