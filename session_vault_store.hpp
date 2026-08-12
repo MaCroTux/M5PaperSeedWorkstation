@@ -30,7 +30,8 @@ inline bool write_file(const char* path, const uint8_t* header,
 }
 
 inline Result create(const char* path, const char* label, const char* password,
-                     uint8_t master[kMasterSize], uint8_t vaultId[4]) {
+                     uint8_t master[kMasterSize], uint8_t vaultId[4],
+                     encrypted_seed_store::ProgressFn progress = nullptr) {
   if (SD.cardType() == CARD_NONE) return Result::no_sd;
   if (SD.exists(path)) return Result::exists;
   if (!label || !label[0] || strlen(label) > 16) return Result::invalid_file;
@@ -42,7 +43,7 @@ inline Result create(const char* path, const char* label, const char* password,
   memcpy(header + 42, label, strlen(label)); esp_fill_random(master, kMasterSize);
   Result result = Result::crypto_error;
   if (encrypted_seed_store::derive(password, header + 10,
-          encrypted_seed_store::kIterations, key)) {
+          encrypted_seed_store::kIterations, key, progress)) {
     mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
     if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0 &&
         mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, kMasterSize,
@@ -60,7 +61,8 @@ inline Result create(const char* path, const char* label, const char* password,
 
 inline Result unlock(const char* path, const char* password,
                      uint8_t master[kMasterSize], uint8_t vaultId[4],
-                     char label[17]) {
+                     char label[17],
+                     encrypted_seed_store::ProgressFn progress = nullptr) {
   if (SD.cardType() == CARD_NONE) return Result::no_sd;
   File file = SD.open(path, FILE_READ); if (!file) return Result::io_error;
   uint8_t header[kHeaderSize] = {}, cipher[kMasterSize] = {}, key[32] = {}, tag[16] = {};
@@ -70,7 +72,7 @@ inline Result unlock(const char* path, const char* password,
       header[4] != kVersion || header[5] == 0 || header[5] > 16 ||
       file.read(cipher, kMasterSize) != kMasterSize || file.read(tag, 16) != 16) goto cleanup;
   if (!encrypted_seed_store::derive(password, header + 10,
-          encrypted_seed_store::get32(header + 6), key)) { result = Result::crypto_error; goto cleanup; }
+          encrypted_seed_store::get32(header + 6), key, progress)) { result = Result::crypto_error; goto cleanup; }
   {
     mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
     const int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0

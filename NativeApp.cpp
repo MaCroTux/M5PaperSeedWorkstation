@@ -543,6 +543,29 @@ void fullRefresh(m5epd_update_mode_t mode = UPDATE_MODE_GL16) {
   page.pushCanvas(0, 0, mode);
 }
 
+uint8_t progressPercent = 255;
+
+void drawProgressBar(int y, uint8_t percent) {
+  M5EPD_Canvas bar(&M5.EPD);
+  if (bar.createCanvas(500, 34)) {
+    bar.fillCanvas(kWhite);
+    bar.drawRoundRect(0, 0, 500, 34, 8, kBlack);
+    const int w = (percent * 496) / 100;
+    if (w > 4) bar.fillRoundRect(2, 2, w - 4, 30, 6, kBlack);
+    bar.pushCanvas(20, y, UPDATE_MODE_A2);
+    bar.deleteCanvas();
+  }
+}
+
+void storeProgress(uint32_t done, uint32_t total) {
+  const uint8_t pct = total ? static_cast<uint8_t>(
+      (static_cast<uint64_t>(done) * 100) / total) : 100;
+  if (pct != progressPercent) {
+    progressPercent = pct;
+    drawProgressBar(340, pct);
+  }
+}
+
 void blankPage() {
   page.fillCanvas(kWhite);
   page.drawFastHLine(20, 930, kWidth - 40, kBlack);
@@ -1157,12 +1180,16 @@ void saveVault() {
   title("VAULT SEGURO", "Cifrando y verificando la tarjeta SD...");
   textStyle(page, 2); page.setCursor(30, 260);
   page.println("Puede tardar. No retires la tarjeta.");
+  page.setCursor(30, 300);
+  page.println("Derivando clave (PBKDF2)...");
   fullRefresh(UPDATE_MODE_DU4);
-  vaultResult = encrypted_seed_store::save(vaultPath, vaultPassword, words, targetWords);
+  drawProgressBar(340, 0); progressPercent = 0;
+  vaultResult = encrypted_seed_store::save(vaultPath, vaultPassword, words, targetWords, storeProgress);
   if (vaultResult == encrypted_seed_store::Result::ok) {
     uint16_t verifiedWords[24] = {}; uint8_t verifiedCount = 0;
+    progressPercent = 0;
     const encrypted_seed_store::Result check = encrypted_seed_store::load(
-        vaultPath, vaultPassword, verifiedWords, verifiedCount);
+        vaultPath, vaultPassword, verifiedWords, verifiedCount, storeProgress);
     if (check != encrypted_seed_store::Result::ok || verifiedCount != targetWords ||
         memcmp(verifiedWords, words, targetWords * sizeof(uint16_t)) != 0) {
       SD.remove(vaultPath);
@@ -1303,10 +1330,12 @@ void drawVaultLoaded() {
 void loadSelectedVault() {
   blankPage(); title("ABRIR VAULT", "Descifrando y verificando...");
   textStyle(page, 2); page.setCursor(30, 260); page.println("No retires la tarjeta SD.");
+  page.setCursor(30, 300); page.println("Derivando clave (PBKDF2)...");
   fullRefresh(UPDATE_MODE_DU4);
+  drawProgressBar(340, 0); progressPercent = 0;
   uint16_t recovered[24] = {}; uint8_t recoveredCount = 0;
   const encrypted_seed_store::Result result = encrypted_seed_store::load(
-      vaultFiles[selectedVaultFile], vaultPassword, recovered, recoveredCount);
+      vaultFiles[selectedVaultFile], vaultPassword, recovered, recoveredCount, storeProgress);
   bool valid = result == encrypted_seed_store::Result::ok &&
       bip39::checksum_valid(recovered, recoveredCount);
   if (valid) {
@@ -1482,8 +1511,15 @@ void lockSessionVault() {
 
 void createSessionVault() {
   snprintf(sessionMetaPath, sizeof(sessionMetaPath), "/SESSION-%s.svm", vaultLabel);
+  blankPage();
+  title("VAULT DE SESION", "Creando vault seguro...");
+  textStyle(page, 2); page.setCursor(30, 260);
+  page.println("Derivando la clave maestra (PBKDF2).");
+  page.setCursor(30, 300); page.println("Puede tardar varios segundos.");
+  fullRefresh(UPDATE_MODE_DU4);
+  drawProgressBar(340, 0); progressPercent = 0;
   const auto result = session_vault_store::create(sessionMetaPath, vaultLabel,
-      vaultPassword, sessionMasterKey, sessionVaultId);
+      vaultPassword, sessionMasterKey, sessionVaultId, storeProgress);
   encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
   encrypted_seed_store::wipe(vaultConfirmation, sizeof(vaultConfirmation));
   if (result != encrypted_seed_store::Result::ok) {
@@ -1505,8 +1541,9 @@ void unlockSessionVault() {
   fullRefresh(UPDATE_MODE_DU4);
   delay(80);
   char unlockedLabel[17] = {};
+  drawProgressBar(340, 0); progressPercent = 0;
   const auto result = session_vault_store::unlock(sessionMetaFiles[selectedSessionFile],
-      vaultPassword, sessionMasterKey, sessionVaultId, unlockedLabel);
+      vaultPassword, sessionMasterKey, sessionVaultId, unlockedLabel, storeProgress);
   encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword)); vaultRevealUntil = 0;
   if (result != encrypted_seed_store::Result::ok) {
     vaultUnlockError = true; screen = Screen::vault_unlock; drawVaultUnlock(); return;
@@ -2895,6 +2932,8 @@ void setup() {
   fingerprintSelfTest = bitcoin_fingerprint::self_test();
   Serial.printf("Fingerprint BIP32 self-test: %s\n",
                 fingerprintSelfTest ? "OK" : "ERROR");
+  Serial.printf("PBKDF2-HMAC-SHA256 self-test: %s\n",
+                encrypted_seed_store::self_test() ? "OK" : "ERROR");
   hdSelfTest = bitcoin_hd::self_test() && bitcoin_hd::self_test_passphrase();
   Serial.printf("BIP32 xpub/zpub self-test: %s\n", hdSelfTest ? "OK" : "ERROR");
   addressBip84SelfTest = bitcoin_address::self_test_bip84();

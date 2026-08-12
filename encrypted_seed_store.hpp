@@ -28,21 +28,86 @@ inline uint32_t get32(const uint8_t* in) {
          (uint32_t(in[2]) << 16) | (uint32_t(in[3]) << 24);
 }
 
-inline bool derive(const char* password, const uint8_t salt[16],
-                   uint32_t iterations, uint8_t key[32]) {
-  if (!password || !password[0] || iterations < 100000) return false;
+using ProgressFn = void (*)(uint32_t done, uint32_t total);
+
+// PBKDF2-HMAC-SHA256 (RFC 2898) para un unico bloque de 32 bytes (dkLen = 32).
+// Implementado manualmente para poder informar del progreso durante la
+// derivacion, que en este dispositivo tarda varios segundos.
+inline bool pbkdf2_sha256(const char* password, const uint8_t salt[16],
+                          uint32_t iterations, uint8_t key[32],
+                          ProgressFn progress = nullptr) {
+  if (!password || !password[0] || iterations == 0) return false;
+  const size_t plen = strlen(password);
   mbedtls_md_context_t ctx; mbedtls_md_init(&ctx);
   const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-  const bool ok = info && mbedtls_md_setup(&ctx, info, 1) == 0 &&
-      mbedtls_pkcs5_pbkdf2_hmac(&ctx,
-          reinterpret_cast<const unsigned char*>(password), strlen(password),
-          salt, 16, iterations, 32, key) == 0;
+  if (!info || mbedtls_md_setup(&ctx, info, 1) != 0 ||
+      mbedtls_md_hmac_starts(&ctx,
+          reinterpret_cast<const unsigned char*>(password), plen) != 0) {
+    mbedtls_md_free(&ctx);
+    return false;
+  }
+  uint8_t u[32] = {}, t[32] = {}, msg[20] = {};
+  memcpy(msg, salt, 16);
+  msg[16] = msg[17] = msg[18] = 0; msg[19] = 1;  // INT_32_BE(1)
+  if (mbedtls_md_hmac_update(&ctx, msg, sizeof(msg)) != 0 ||
+      mbedtls_md_hmac_finish(&ctx, u) != 0) {
+    wipe(u, sizeof(u)); wipe(t, sizeof(t)); wipe(msg, sizeof(msg));
+    mbedtls_md_free(&ctx);
+    return false;
+  }
+  memcpy(t, u, 32);
+  const uint32_t reportEvery = iterations / 50 > 0 ? iterations / 50 : 1;
+  uint32_t lastReported = 0;
+  for (uint32_t i = 2; i <= iterations; ++i) {
+    mbedtls_md_hmac_reset(&ctx);
+    if (mbedtls_md_hmac_update(&ctx, u, 32) != 0 ||
+        mbedtls_md_hmac_finish(&ctx, u) != 0) {
+      wipe(u, sizeof(u)); wipe(t, sizeof(t)); wipe(msg, sizeof(msg));
+      mbedtls_md_free(&ctx);
+      return false;
+    }
+    for (uint8_t k = 0; k < 32; ++k) t[k] ^= u[k];
+    if (progress && (i - lastReported) >= reportEvery) {
+      lastReported = i;
+      progress(i, iterations);
+    }
+  }
+  memcpy(key, t, 32);
+  wipe(u, sizeof(u)); wipe(t, sizeof(t)); wipe(msg, sizeof(msg));
   mbedtls_md_free(&ctx);
+  if (progress) progress(iterations, iterations);
+  return true;
+}
+
+inline bool derive(const char* password, const uint8_t salt[16],
+                   uint32_t iterations, uint8_t key[32],
+                   ProgressFn progress = nullptr) {
+  if (!password || !password[0] || iterations < 100000) return false;
+  return pbkdf2_sha256(password, salt, iterations, key, progress);
+}
+
+inline bool self_test() {
+  uint8_t out[32] = {};
+  static const uint8_t salt[16] = {'s', 'a', 'l', 't'};
+  static const uint8_t expect1[32] = {
+      0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52,
+      0x56, 0xc4, 0xf8, 0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48,
+      0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b, 0xe1, 0x7b};
+  static const uint8_t expect2[32] = {
+      0xae, 0x4d, 0x0c, 0x95, 0xaf, 0x6b, 0x46, 0xd3, 0x2d, 0x0a, 0xdf, 0xf9,
+      0x28, 0xf0, 0x6d, 0xd0, 0x2a, 0x30, 0x3f, 0x8e, 0xf3, 0xc2, 0x51, 0xdf,
+      0xd6, 0xe2, 0xd8, 0x5a, 0x95, 0x47, 0x4c, 0x43};
+  bool ok = pbkdf2_sha256("password", salt, 1, out);
+  ok = ok && memcmp(out, expect1, 32) == 0;
+  ok = pbkdf2_sha256("password", salt, 2, out) && ok;
+  ok = ok && memcmp(out, expect2, 32) == 0;
+  wipe(out, sizeof(out));
   return ok;
 }
 
 inline Result save(const char* path, const char* password,
-                   const uint16_t* words, uint8_t count) {
+                   const uint16_t* words, uint8_t count,
+                   ProgressFn progress = nullptr) {
   if (SD.cardType() == CARD_NONE) return Result::no_sd;
   if (SD.exists(path)) return Result::exists;
   if ((count != 12 && count != 24) || !words) return Result::invalid_seed;
@@ -60,7 +125,7 @@ inline Result save(const char* path, const char* password,
     plain[1 + i * 2] = words[i]; plain[2 + i * 2] = words[i] >> 8;
   }
   Result result = Result::crypto_error;
-  if (!derive(password, header + 10, kIterations, key)) goto cleanup;
+  if (!derive(password, header + 10, kIterations, key, progress)) goto cleanup;
   {
     mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
     if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0 &&
@@ -85,7 +150,8 @@ cleanup:
 }
 
 inline Result load(const char* path, const char* password,
-                   uint16_t* words, uint8_t& count) {
+                   uint16_t* words, uint8_t& count,
+                   ProgressFn progress = nullptr) {
   if (SD.cardType() == CARD_NONE) return Result::no_sd;
   File file = SD.open(path, FILE_READ);
   if (!file) return Result::io_error;
@@ -102,7 +168,7 @@ inline Result load(const char* path, const char* password,
         file.size() != kHeaderSize + length + kTagSize ||
         file.read(cipher, length) != length || file.read(tag, kTagSize) != kTagSize)
       goto cleanup;
-    if (!derive(password, header + 10, iterations, key)) { result = Result::crypto_error; goto cleanup; }
+    if (!derive(password, header + 10, iterations, key, progress)) { result = Result::crypto_error; goto cleanup; }
     mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
     const int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0
         ? mbedtls_gcm_auth_decrypt(&gcm, length, header + 26, 12,
