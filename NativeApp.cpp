@@ -8,6 +8,7 @@
 #include "encrypted_seed_store.hpp"
 #include "session_vault_store.hpp"
 #include "qr_ble_client.hpp"
+#include "qr_wifi_server.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -29,7 +30,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      vault_list, vault_unlock, vault_loaded,
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
-                     help, unlock_confirm, diagnostics, scan_qr };
+                     help, unlock_confirm, diagnostics, scan_qr, wifi_receive };
 
 struct Rect {
   int x, y, w, h;
@@ -43,7 +44,7 @@ constexpr Rect kMenu[] = {{40, 165, 460, 80}, {40, 260, 460, 80},
                           {40, 545, 460, 80}, {40, 640, 460, 80}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "DIAGNOSTICO", "AYUDA", "SCAN QR"};
+                                       "DIAGNOSTICO", "AYUDA", "RECIBIR POR WIFI"};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
@@ -365,7 +366,7 @@ void title(const char* heading, const char* subtitle) {
 enum class Icon : uint8_t {
   none, key, lock, unlock, trash, eye, qr, plus, minus, save, folder, memory,
   back, forward, up, down, wrench, draw, dice, keyboard, reset, list, home,
-  shield, x, check
+  shield, x, check, wifi
 };
 
 void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, uint8_t c) {
@@ -516,6 +517,13 @@ void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, uint8_t c) {
       canvas.drawLine(cx - 8, cy - 1, cx - 2, cy + 6, c);
       canvas.drawLine(cx - 2, cy + 6, cx + 9, cy - 6, c);
       break;
+    case Icon::wifi:
+      canvas.fillCircle(cx, cy + 7, 3, c);
+      canvas.drawLine(cx - 9, cy - 1, cx, cy - 9, c);
+      canvas.drawLine(cx, cy - 9, cx + 9, cy - 1, c);
+      canvas.drawLine(cx - 4, cy - 1, cx, cy - 5, c);
+      canvas.drawLine(cx, cy - 5, cx + 4, cy - 1, c);
+      break;
     case Icon::none: break;
   }
 }
@@ -627,7 +635,7 @@ const char* menuHint(uint8_t index) {
     case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
     case 3: return "Pruebas del dispositivo y self-tests";
     case 4: return "Conceptos basicos y glosario";
-    default: return "Recibe un QR por Bluetooth desde una camara (Raspberry Pi)";
+    default: return "Recibe un archivo o QR por WiFi desde tu movil";
   }
 }
 
@@ -648,7 +656,7 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::wrench, Icon::none, Icon::qr};
+                                    Icon::wrench, Icon::none, Icon::wifi};
   for (uint8_t i = 0; i < 6; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
@@ -2546,6 +2554,64 @@ void renderScanQrDynamic() {
   }
 }
 
+qr_wifi::QRWiFiServer wifiServer;
+bool wifiResultShown = false;
+
+void drawWifiResult() {
+  const std::vector<uint8_t>& d = wifiServer.data();
+  textStyle(page, 2);
+  page.setCursor(30, 175); page.printf("Format: %s", wifiServer.format().c_str());
+  page.setCursor(30, 220); page.printf("Type: %s", wifiServer.type().c_str());
+  page.setCursor(30, 265); page.printf("Size: %u bytes", static_cast<unsigned>(d.size()));
+  page.setCursor(30, 310); page.println("Content:");
+  page.drawRoundRect(20, 345, 500, 385, 8, kBlack);
+  if (!d.empty() && isValidUtf8(d)) {
+    drawWrappedText(page, scanPayloadText(d), 32, 358, 470, 22, 14);
+  } else {
+    textStyle(page, 2);
+    page.setTextDatum(MC_DATUM);
+    page.drawString("Binary payload / " + String(d.size()) + " bytes", 270, 520);
+    page.setTextDatum(TL_DATUM);
+  }
+  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+}
+
+void drawWifiReceive() {
+  blankPage();
+  const auto p = wifiServer.phase();
+  if (p == qr_wifi::Phase::Received) {
+    title("RECIBIDO", "Datos recibidos por WiFi");
+    drawWifiResult();
+  } else if (p == qr_wifi::Phase::Failed) {
+    title("RECIBIR POR WIFI", "No se pudo activar el punto de acceso");
+    warningIcon(page, 270, 200);
+    centeredFit(page, "ERROR", 320, 500, 3);
+    centeredFit(page, "No se pudo crear la red WiFi.", 400);
+    buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+    buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
+  } else {
+    title("RECIBIR POR WIFI", "Punto de acceso activo");
+    textStyle(page, 2);
+    page.setCursor(30, 200); page.println("Conecta el movil a la red WIFI:");
+    page.setCursor(60, 265); page.printf("SSID: %s", qr_wifi::kApSsid);
+    page.setCursor(60, 310); page.printf("Clave: %s", qr_wifi::kApPassword);
+    page.setCursor(30, 380); page.println("Abre en el navegador:");
+    page.setCursor(60, 445); page.println("http://192.168.4.1");
+    page.setCursor(30, 515); page.println("y pega el texto o sube el archivo.");
+    buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
+  }
+  fullRefresh();
+}
+
+void beginWifiReceive() {
+  wifiResultShown = false;
+  wifiServer.clear();
+  wifiServer.start();
+  screen = Screen::wifi_receive;
+  focusIndex = 0;
+  drawWifiReceive();
+}
+
 void drawScreen() {
   switch (screen) {
     case Screen::menu: drawMenu(); break;
@@ -2584,6 +2650,7 @@ void drawScreen() {
     case Screen::help: drawHelp(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
     case Screen::scan_qr: drawScanQr(); break;
+    case Screen::wifi_receive: drawWifiReceive(); break;
   }
 }
 
@@ -2591,7 +2658,7 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                        Icon::wrench, Icon::none, Icon::qr};
+                                        Icon::wrench, Icon::none, Icon::wifi};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -2796,6 +2863,18 @@ void updateFocusButton(uint8_t index) {
       }
       break;
     }
+    case Screen::wifi_receive: {
+      const auto p = wifiServer.phase();
+      if (p == qr_wifi::Phase::Failed) {
+        if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+        else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
+      } else if (p == qr_wifi::Phase::Received) {
+        updateButton(kAction, "VOLVER", true, index == focusIndex);
+      } else {
+        updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
+      }
+      break;
+    }
   }
 }
 
@@ -2810,6 +2889,8 @@ void moveFocus(int direction) {
   else if (screen == Screen::menu) count = 6;
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
+  else if (screen == Screen::wifi_receive)
+    count = wifiServer.phase() == qr_wifi::Phase::Failed ? 2 : 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 3;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
@@ -2889,7 +2970,7 @@ void click(int x, int y) {
     } else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::diagnostics; focusIndex = 0; drawScreen(); }
     else if (kMenu[4].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
-    else if (kMenu[5].contains(x, y)) { beginScanQr(); }
+    else if (kMenu[5].contains(x, y)) { beginWifiReceive(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
     else if (kActiveMenu[1].contains(x, y)) {
@@ -3302,6 +3383,16 @@ void click(int x, int y) {
     } else if (kAction.contains(x, y)) {
       qrClient.cancel(); screen = Screen::menu; focusIndex = 5; drawScreen();
     }
+  } else if (screen == Screen::wifi_receive) {
+    const auto p = wifiServer.phase();
+    if (p == qr_wifi::Phase::Received) {
+      if (kAction.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 5; drawScreen(); }
+    } else if (p == qr_wifi::Phase::Failed) {
+      if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 5; drawScreen(); }
+      else if (kAction.contains(x, y)) { beginWifiReceive(); }
+    } else if (kAction.contains(x, y)) {
+      wifiServer.cancel(); screen = Screen::menu; focusIndex = 5; drawScreen();
+    }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
@@ -3412,6 +3503,10 @@ void activateFocus() {
     const auto p = qrClient.phase();
     const Rect& r = (p == qr_ble::Phase::Failed && focusIndex == 0) ? kBack : kAction;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::wifi_receive) {
+    const auto p = wifiServer.phase();
+    const Rect& r = (p == qr_wifi::Phase::Failed && focusIndex == 0) ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
@@ -3456,6 +3551,17 @@ void loop() {
     }
   } else if (scanQrActive()) {
     qrClient.cancel();
+  }
+
+  wifiServer.update();
+  if (screen == Screen::wifi_receive) {
+    const auto wp = wifiServer.phase();
+    if (wp == qr_wifi::Phase::Cancelled || wp == qr_wifi::Phase::Idle) {
+      screen = Screen::menu; focusIndex = 5; drawScreen();
+    } else if (wp == qr_wifi::Phase::Received && !wifiResultShown) {
+      wifiResultShown = true;
+      drawWifiReceive();
+    }
   }
 
   if (sessionUnlocked && static_cast<uint32_t>(millis() - lastUserActivity) >= kSessionTimeoutMs) {
