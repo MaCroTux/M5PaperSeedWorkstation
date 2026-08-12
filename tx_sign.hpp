@@ -240,6 +240,109 @@ inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words
   return derived.length() > 0;
 }
 
+// ---- Finalizacion y serializacion de la transaccion firmada ----
+
+inline size_t derEncode(const uint8_t r[32], const uint8_t s[32], uint8_t out[73]) {
+  auto enc = [](const uint8_t* v, uint8_t* o) -> size_t {
+    size_t start = 0;
+    while (start < 31 && v[start] == 0) ++start;
+    const size_t len = 32 - start;
+    if (v[start] & 0x80) { o[0] = 0x00; memcpy(o + 1, v + start, len); return len + 1; }
+    memcpy(o, v + start, len);
+    return len;
+  };
+  uint8_t rb[33] = {}, sb[33] = {};
+  const size_t rl = enc(r, rb), sl = enc(s, sb);
+  const size_t total = 2 + rl + 2 + sl;
+  size_t idx = 0;
+  out[idx++] = 0x30;
+  out[idx++] = static_cast<uint8_t>(total);
+  out[idx++] = 0x02; out[idx++] = static_cast<uint8_t>(rl); memcpy(out + idx, rb, rl); idx += rl;
+  out[idx++] = 0x02; out[idx++] = static_cast<uint8_t>(sl); memcpy(out + idx, sb, sl); idx += sl;
+  return idx;
+}
+
+inline void pushVarint(std::vector<uint8_t>& o, uint64_t v) {
+  if (v < 0xfd) { o.push_back(static_cast<uint8_t>(v)); }
+  else if (v <= 0xffff) {
+    o.push_back(0xfd); o.push_back(v & 0xff); o.push_back((v >> 8) & 0xff);
+  } else {
+    o.push_back(0xfe); for (int b = 0; b < 4; ++b) o.push_back((v >> (8 * b)) & 0xff);
+  }
+}
+
+struct InputSig {
+  uint8_t der[73] = {};
+  size_t derLen = 0;
+  uint8_t pub[33] = {};
+};
+
+inline void serializeSignedTx(const psbt::ParsedTx& tx, const std::vector<InputSig>& sigs,
+                              std::vector<uint8_t>& out) {
+  out.clear();
+  for (int b = 0; b < 4; ++b) out.push_back((tx.version >> (8 * b)) & 0xff);
+  out.push_back(0x00); out.push_back(0x01);  // segwit marker + flag
+  pushVarint(out, tx.inputs.size());
+  for (const auto& in : tx.inputs) {
+    out.insert(out.end(), in.prevTxid, in.prevTxid + 32);
+    for (int b = 0; b < 4; ++b) out.push_back((in.prevVout >> (8 * b)) & 0xff);
+    out.push_back(0x00);  // scriptSig vacio
+    for (int b = 0; b < 4; ++b) out.push_back((in.sequence >> (8 * b)) & 0xff);
+  }
+  pushVarint(out, tx.outputs.size());
+  for (const auto& o : tx.outputs) {
+    for (int b = 0; b < 8; ++b) out.push_back((o.value >> (8 * b)) & 0xff);
+    pushVarint(out, o.scriptLen);
+    out.insert(out.end(), o.script, o.script + o.scriptLen);
+  }
+  for (const auto& s : sigs) {
+    out.push_back(0x02);  // 2 items del witness
+    pushVarint(out, s.derLen);
+    out.insert(out.end(), s.der, s.der + s.derLen);
+    pushVarint(out, 33);
+    out.insert(out.end(), s.pub, s.pub + 33);
+  }
+  for (int b = 0; b < 4; ++b) out.push_back((tx.locktime >> (8 * b)) & 0xff);
+}
+
+// Firma todos los inputs (solo P2WPKH / purpose 84, SIGHASH_ALL) y serializa la
+// transaccion segwit final en signedTx.
+inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t count,
+                             const char* passphrase, std::vector<uint8_t>& signedTx) {
+  std::vector<InputSig> sigs(tx.inputs.size());
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    const auto& in = tx.inputs[i];
+    if (in.utxoScriptLen != 22 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x14)
+      return false;
+    if (!in.hasDerivation || !in.amountKnown) return false;
+    uint8_t key[32] = {}, pub[33] = {};
+    if (!deriveKey(words, count, 84, in.derivFpr, in.derivPath, passphrase, key, pub)) {
+      bitcoin_hd::wipe(key, 32); return false;
+    }
+    uint8_t scriptCode[26] = {};
+    scriptCode[0] = 0x19; scriptCode[1] = 0x76; scriptCode[2] = 0xa9; scriptCode[3] = 0x14;
+    memcpy(scriptCode + 4, in.utxoScript + 2, 20);
+    scriptCode[24] = 0x88; scriptCode[25] = 0xac;
+    uint8_t sighash[32] = {};
+    if (!sighashSegwit(tx, i, scriptCode, 26, in.amount, sighash)) {
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(scriptCode, 26); return false;
+    }
+    uint8_t rs[64] = {};
+    if (!sign(key, sighash, rs)) {
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+      return false;
+    }
+    sigs[i].derLen = derEncode(rs, rs + 32, sigs[i].der);
+    sigs[i].der[sigs[i].derLen++] = kSighashAll;
+    memcpy(sigs[i].pub, pub, 33);
+    bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+    bitcoin_hd::wipe(scriptCode, 26);
+  }
+  serializeSignedTx(tx, sigs, signedTx);
+  for (auto& s : sigs) bitcoin_hd::wipe(&s, sizeof(s));
+  return !signedTx.empty();
+}
+
 // Self-test: RFC6979 + ECDSA secp256k1 con el vector del RFC 6979 (SHA-256,
 // "sample"). Valida la generacion de nonce determinista y la firma.
 inline bool self_test() {

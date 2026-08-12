@@ -32,7 +32,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      vault_list, vault_unlock, vault_loaded,
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
-                     help, unlock_confirm, diagnostics, scan_qr, wifi_receive };
+                     help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
+                     signed_tx };
 
 struct Rect {
   int x, y, w, h;
@@ -2561,6 +2562,11 @@ qr_wifi::QRWiFiServer wifiServer;
 bool wifiResultShown = false;
 psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
+std::vector<uint8_t> signedTxBytes;
+String signedTxHex;
+bool txSigned = false;
+QRCode signedTxQr;
+uint8_t signedTxQrBuffer[1024] = {};
 
 void drawWifiResult() {
   const std::vector<uint8_t>& d = wifiServer.data();
@@ -2667,6 +2673,78 @@ void drawTxInfo() {
                 static_cast<unsigned>(parsedTx.outputs.size() - maxShow));
   }
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+  if (fingerprintValid)
+    buttonOn(page, kBack, "FIRMAR", true, focusIndex == 1, Icon::key);
+}
+
+String hexEncode(const std::vector<uint8_t>& data) {
+  static const char hex[] = "0123456789abcdef";
+  String out;
+  out.reserve(data.size() * 2);
+  for (uint8_t b : data) { out += hex[b >> 4]; out += hex[b & 0xF]; }
+  return out;
+}
+
+void saveSignedTxToSd(const String& hex) {
+  if (SD.cardType() == CARD_NONE) return;
+  String path = "/TX-" + String(millis()) + ".hex";
+  File f = SD.open(path, FILE_WRITE);
+  if (f) {
+    f.print(hex);
+    f.close();
+    Serial.printf("[TX] guardado en %s\n", path.c_str());
+  }
+}
+
+bool buildSignedTxQr() {
+  memset(signedTxQrBuffer, 0, sizeof(signedTxQrBuffer));
+  return qrcode_initText(&signedTxQr, signedTxQrBuffer, 10, ECC_LOW,
+                         signedTxHex.c_str()) == 0;
+}
+
+void drawSignedTx() {
+  blankPage();
+  if (!txSigned) {
+    title("FIRMAR", "No se pudo firmar");
+    warningIcon(page, 270, 200);
+    centeredFit(page, "ERROR DE FIRMA", 320, 500, 3);
+    centeredFit(page, "Comprueba la semilla y que el PSBT", 400);
+    centeredFit(page, "tenga entradas P2WPKH con ruta.", 445);
+  } else {
+    title("TX FIRMADA", "Escanear con BlueWallet para emitir");
+    const int module = 4;
+    const int px = signedTxQr.size * module;
+    const int ox = (kWidth - px) / 2;
+    const int oy = 175;
+    page.fillRect(ox - 12, oy - 12, px + 24, px + 24, kWhite);
+    for (uint8_t yy = 0; yy < signedTxQr.size; ++yy)
+      for (uint8_t xx = 0; xx < signedTxQr.size; ++xx)
+        if (qrcode_getModule(&signedTxQr, xx, yy))
+          page.fillRect(ox + xx * module, oy + yy * module, module, module, kBlack);
+    textStyle(page, 1);
+    page.setTextDatum(MC_DATUM);
+    page.drawString("Transaccion firmada y guardada en la SD", 270, oy + px + 20);
+    page.drawString("(" + String(signedTxBytes.size()) + " bytes)", 270, oy + px + 40);
+    page.setTextDatum(TL_DATUM);
+  }
+  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+  fullRefresh();
+}
+
+void beginSignTx() {
+  txSigned = false;
+  signedTxHex = "";
+  signedTxBytes.clear();
+  if (tx_sign::signSegwitP2wpkh(parsedTx, words, targetWords,
+        passphraseActive ? activePassphrase : "", signedTxBytes)) {
+    signedTxHex = hexEncode(signedTxBytes);
+    txSigned = true;
+    saveSignedTxToSd(signedTxHex);
+    buildSignedTxQr();
+  }
+  screen = Screen::signed_tx;
+  focusIndex = 0;
+  drawSignedTx();
 }
 
 void drawWifiReceive() {
@@ -2759,6 +2837,7 @@ void drawScreen() {
     case Screen::diagnostics: drawDiagnostics(); break;
     case Screen::scan_qr: drawScanQr(); break;
     case Screen::wifi_receive: drawWifiReceive(); break;
+    case Screen::signed_tx: drawSignedTx(); break;
   }
 }
 
@@ -2977,12 +3056,16 @@ void updateFocusButton(uint8_t index) {
         if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
         else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
       } else if (p == qr_wifi::Phase::Received) {
-        updateButton(kAction, "VOLVER", true, index == focusIndex);
+        if (index == 0) updateButton(kAction, "VOLVER", true, index == focusIndex);
+        else updateButton(kBack, "FIRMAR", true, index == focusIndex, Icon::key);
       } else {
         updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
       }
       break;
     }
+    case Screen::signed_tx:
+      updateButton(kAction, "VOLVER", true, index == focusIndex);
+      break;
   }
 }
 
@@ -2997,8 +3080,13 @@ void moveFocus(int direction) {
   else if (screen == Screen::menu) count = 5;
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
-  else if (screen == Screen::wifi_receive)
-    count = wifiServer.phase() == qr_wifi::Phase::Failed ? 2 : 1;
+  else if (screen == Screen::wifi_receive) {
+    if (wifiServer.phase() == qr_wifi::Phase::Failed) count = 2;
+    else if (wifiServer.phase() == qr_wifi::Phase::Received && txIsPsbt && fingerprintValid)
+      count = 2;
+    else count = 1;
+  }
+  else if (screen == Screen::signed_tx) count = 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 3;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
@@ -3493,13 +3581,16 @@ void click(int x, int y) {
   } else if (screen == Screen::wifi_receive) {
     const auto p = wifiServer.phase();
     if (p == qr_wifi::Phase::Received) {
-      if (kAction.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
+      if (kBack.contains(x, y) && txIsPsbt && fingerprintValid) { beginSignTx(); }
+      else if (kAction.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
     } else if (p == qr_wifi::Phase::Failed) {
       if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
       else if (kAction.contains(x, y)) { beginWifiReceive(); }
     } else if (kAction.contains(x, y)) {
       wifiServer.cancel(); screen = Screen::menu; focusIndex = 4; drawScreen();
     }
+  } else if (screen == Screen::signed_tx) {
+    if (kAction.contains(x, y)) { screen = Screen::wifi_receive; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
@@ -3612,8 +3703,13 @@ void activateFocus() {
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::wifi_receive) {
     const auto p = wifiServer.phase();
-    const Rect& r = (p == qr_wifi::Phase::Failed && focusIndex == 0) ? kBack : kAction;
-    click(r.x + 5, r.y + 5);
+    const Rect* r = &kAction;
+    if (p == qr_wifi::Phase::Failed && focusIndex == 0) r = &kBack;
+    else if (p == qr_wifi::Phase::Received && txIsPsbt && fingerprintValid && focusIndex == 1)
+      r = &kBack;
+    click(r->x + 5, r->y + 5);
+  } else if (screen == Screen::signed_tx) {
+    click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
