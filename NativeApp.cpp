@@ -2031,15 +2031,15 @@ void drawAddressExplorer() {
       page.drawString(lines[i], 270, firstY + i * 46);
     page.setTextDatum(TL_DATUM);
   }
-  buttonOn(page, kAddressReceive, "RECIBIR", true, addressChange == 0, Icon::down);
-  buttonOn(page, kAddressChange, "CAMBIO", true, addressChange == 1, Icon::up);
-  buttonOn(page, kAddressMinus, "- 1", addressIndex > 0, false, Icon::minus);
+  buttonOn(page, kAddressReceive, "RECIBIR", true, focusIndex == 0, Icon::down);
+  buttonOn(page, kAddressChange, "CAMBIO", true, focusIndex == 1, Icon::up);
+  buttonOn(page, kAddressMinus, "- 1", addressIndex > 0, focusIndex == 2, Icon::minus);
   buttonOn(page, kAddressIndex, String(addressIndex).c_str(), true);
-  buttonOn(page, kAddressPlus, "+ 1", true, false, Icon::plus);
+  buttonOn(page, kAddressPlus, "+ 1", addressIndex < 999999, focusIndex == 3, Icon::plus);
   String nextProfile = String("TIPO: ") + profile.title;
-  buttonOn(page, kAddressProfile, nextProfile.c_str());
-  buttonOn(page, kBack, "MENU SEED", true, focusIndex == 0, Icon::home);
-  buttonOn(page, kAction, "QR DIRECCION", activeAddress.length(), focusIndex == 1,
+  buttonOn(page, kAddressProfile, nextProfile.c_str(), true, focusIndex == 4);
+  buttonOn(page, kBack, "MENU SEED", true, focusIndex == 5, Icon::home);
+  buttonOn(page, kAction, "QR DIRECCION", activeAddress.length(), focusIndex == 6,
            Icon::qr);
   fullRefresh();
 }
@@ -2305,11 +2305,18 @@ void updateFocusButton(uint8_t index) {
       updateButton(index == 0 ? kBack : kAction,
           index == 0 ? "CANCELAR" : "ELIMINAR ARCHIVO", true, index == focusIndex,
           index == 0 ? Icon::none : Icon::trash); break;
-    case Screen::address_explorer:
-      updateButton(index == 0 ? kBack : kAction,
-          index == 0 ? "MENU SEED" : "QR DIRECCION",
-          index == 0 || activeAddress.length(), index == focusIndex,
-          index == 0 ? Icon::home : Icon::qr); break;
+    case Screen::address_explorer: {
+      const PublicProfile& profile = kPublicProfiles[publicKeyProfile];
+      String profileLabel = String("TIPO: ") + profile.title;
+      if (index == 0) updateButton(kAddressReceive, "RECIBIR", true, index == focusIndex, Icon::down);
+      else if (index == 1) updateButton(kAddressChange, "CAMBIO", true, index == focusIndex, Icon::up);
+      else if (index == 2) updateButton(kAddressMinus, "- 1", addressIndex > 0, index == focusIndex, Icon::minus);
+      else if (index == 3) updateButton(kAddressPlus, "+ 1", addressIndex < 999999, index == focusIndex, Icon::plus);
+      else if (index == 4) updateButton(kAddressProfile, profileLabel.c_str(), true, index == focusIndex);
+      else if (index == 5) updateButton(kBack, "MENU SEED", true, index == focusIndex, Icon::home);
+      else updateButton(kAction, "QR DIRECCION", activeAddress.length(), index == focusIndex, Icon::qr);
+      break;
+    }
     case Screen::address_qr:
       updateButton(kAction, "VOLVER AL EXPLORADOR", true, true); break;
     case Screen::discard_confirm:
@@ -2342,8 +2349,8 @@ void moveFocus(int direction) {
            screen == Screen::security_warning || screen == Screen::vault_password ||
            screen == Screen::vault_label || screen == Screen::vault_unlock ||
            screen == Screen::passphrase_input ||
-           screen == Screen::address_explorer ||
            screen == Screen::delete_confirm || screen == Screen::discard_confirm) count = 2;
+  else if (screen == Screen::address_explorer) count = 7;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
   if (screen == Screen::menu && fingerprintValid && focusIndex == 1) {
     focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
@@ -2759,7 +2766,7 @@ void click(int x, int y) {
     }
     if (changed) { updateAddress(); drawAddressExplorer(); }
   } else if (screen == Screen::address_qr) {
-    if (kAction.contains(x, y)) { screen = Screen::address_explorer; focusIndex = 1; drawScreen(); }
+    if (kAction.contains(x, y)) { screen = Screen::address_explorer; focusIndex = 6; drawScreen(); }
   } else if (screen == Screen::discard_confirm) {
     if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = 4; drawScreen(); }
     else if (kAction.contains(x, y)) {
@@ -2853,7 +2860,13 @@ void activateFocus() {
   } else if (screen == Screen::vault_result) {
     click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::address_explorer) {
-    const Rect& r = focusIndex == 0 ? kBack : kAction; click(r.x + 5, r.y + 5);
+    const Rect& r = focusIndex == 0 ? kAddressReceive :
+                    focusIndex == 1 ? kAddressChange :
+                    focusIndex == 2 ? kAddressMinus :
+                    focusIndex == 3 ? kAddressPlus :
+                    focusIndex == 4 ? kAddressProfile :
+                    focusIndex == 5 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::address_qr) {
     click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::discard_confirm) {
