@@ -70,8 +70,8 @@ constexpr const char* kActiveLabels[] = {"VER CLAVE PUBLICA", "BACKUP SEED",
                                          "PASSPHRASE", "EXPLORAR DIRECCIONES",
                                          "DESCARTAR SEED"};
 constexpr const char* kBackupLabels[] = {"VER PALABRAS", "VER QR",
-                                         "BACKUP SEEDQR", "GUARDAR EN SESION",
-                                         "VOLVER"};
+                                          "BACKUP SEEDQR", "ABRIR VAULT DE SESION",
+                                          "VOLVER"};
 constexpr Rect kAddressValue{20, 245, 500, 190};
 constexpr Rect kAddressReceive{20, 455, 240, 70};
 constexpr Rect kAddressChange{280, 455, 240, 70};
@@ -1697,7 +1697,7 @@ void drawBackupSeed() {
   blankPage();
   title("BACKUP SEED", "Copias y comprobacion de la semilla");
   static const Icon kBackupIcons[] = {Icon::list, Icon::qr, Icon::qr,
-                                      Icon::save, Icon::none};
+                                      Icon::lock, Icon::none};
   if (sessionUnlocked) {
     buttonOn(page, kActiveMenu[0], "VER PALABRAS", true, focusIndex == 0, Icon::list);
     buttonOn(page, kActiveMenu[1], "VER QR", true, focusIndex == 1, Icon::qr);
@@ -2464,8 +2464,7 @@ void click(int x, int y) {
       screen = Screen::active_seed; focusIndex = 1; drawScreen();
     }
     else if (!sessionUnlocked && kActiveMenu[3].contains(x, y)) {
-      if (sessionUnlocked) beginSessionSave();
-      else { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
+      screen = Screen::session_menu; focusIndex = 0; drawScreen();
     }
     else if (kActiveMenu[4].contains(x, y)) { screen = Screen::active_seed; focusIndex = 1; drawScreen(); }
   } else if (screen == Screen::vault_actions) {
