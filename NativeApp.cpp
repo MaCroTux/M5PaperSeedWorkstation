@@ -555,12 +555,21 @@ void blankPage() {
   textStyle(page);
 }
 
+const char* menuLabel(uint8_t index) {
+  return (index == 0 && fingerprintValid) ? "SEMILLA ACTIVA" : kMenuLabels[index];
+}
+
+bool menuEnabled(uint8_t index) {
+  return !(index == 1 && fingerprintValid);
+}
+
 void drawMenu() {
   blankPage();
-  title("SEED WORKSTATION", "Interfaz nativa M5Paper");
+  title("SEED WORKSTATION",
+        fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock, Icon::wrench};
   for (uint8_t i = 0; i < 4; ++i) {
-    buttonOn(page, kMenu[i], kMenuLabels[i], true, focusIndex == i, kMenuIcons[i]);
+    buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   fullRefresh();
 }
@@ -2134,7 +2143,7 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock, Icon::wrench};
-      updateButton(kMenu[index], kMenuLabels[index], true,
+      updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
     case Screen::active_seed: {
@@ -2336,6 +2345,9 @@ void moveFocus(int direction) {
            screen == Screen::address_explorer ||
            screen == Screen::delete_confirm || screen == Screen::discard_confirm) count = 2;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
+  if (screen == Screen::menu && fingerprintValid && focusIndex == 1) {
+    focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
+  }
   updateFocusButton(previous);
   if (previous != focusIndex) updateFocusButton(focusIndex);
 }
@@ -2386,11 +2398,12 @@ void click(int x, int y) {
     return;
   }
   if (screen == Screen::menu) {
-    if ((kMenu[0].contains(x, y) || kMenu[1].contains(x, y)) && fingerprintValid) {
-      screen = Screen::active_seed; focusIndex = 0; drawScreen();
-    } else if (kMenu[0].contains(x, y)) { newSeedIntent = NewSeedIntent::none; screen = Screen::length; focusIndex = 0; drawScreen(); }
-    else if (kMenu[1].contains(x, y)) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
-    else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
+    if (kMenu[0].contains(x, y)) {
+      if (fingerprintValid) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
+      else { newSeedIntent = NewSeedIntent::none; screen = Screen::length; focusIndex = 0; drawScreen(); }
+    } else if (kMenu[1].contains(x, y)) {
+      if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
+    } else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::diagnostics; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
