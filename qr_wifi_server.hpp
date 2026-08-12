@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <esp_system.h>
 #include <vector>
 
@@ -86,15 +87,21 @@ public:
     server_.on("/upload", HTTP_POST,
                [this]() { handleUploadDone(); },
                [this]() { handleUpload(); });
+    server_.onNotFound([this]() { handleRoot(); });
     server_.begin();
+    dnsServer_.start(53, "*", WiFi.softAPIP());
     serving_ = true;
     Serial.print("[WIFI] AP IP: ");
     Serial.println(WiFi.softAPIP());
+    Serial.println("[WIFI] captive portal activo");
     phase_ = Phase::Waiting;
   }
 
   void update() {
-    if (phase_ == Phase::Waiting) server_.handleClient();
+    if (phase_ == Phase::Waiting) {
+      dnsServer_.processNextRequest();
+      server_.handleClient();
+    }
     if (stopRequested_) {
       stopRequested_ = false;
       teardown();  // apaga servidor + WiFi, conserva data_ y phase_
@@ -146,6 +153,7 @@ private:
   void teardown() {
     if (serving_) {
       server_.stop();
+      dnsServer_.stop();
       serving_ = false;
     }
     if (WiFi.getMode() != WIFI_OFF) {
@@ -207,6 +215,7 @@ private:
 
   Phase phase_ = Phase::Idle;
   WebServer server_;
+  DNSServer dnsServer_;
   std::vector<uint8_t> data_;
   String format_;
   String type_;
