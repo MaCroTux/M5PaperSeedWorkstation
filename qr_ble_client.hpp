@@ -15,9 +15,14 @@
 // recibir METADATA -> recibir chunks DATA -> reconstruir -> verificar SIZE y
 // SHA256 -> desconectar -> BLE OFF.
 //
-// Las callbacks BLE se ejecutan en la tarea de Bluedroid y NO dibujan e-ink ni
-// hacen cripto. Solo guardan estado/datos bajo un mutex; el bucle principal
-// (update()) procesa el flujo como una maquina de estados y actualiza la UI.
+// Toda la logica de conexion se ejecuta desde update(), llamado desde loop()
+// (la tarea principal de Arduino). Es el patron probado de la libreria BLE del
+// core ESP32; ejecutar connect()/getService() desde otra tarea FreeRTOS provoca
+// asserts en Bluedroid (BTA_GATTC_Open).
+//
+// Las callbacks de notificacion (tarea de Bluedroid) NO dibujan e-ink ni hacen
+// cripto. Solo guardan estado/datos bajo un mutex; update() procesa el flujo y
+// la UI lo refleja.
 //
 // La Pi es un dispositivo de entrada NO confiable: el SHA256 solo protege el
 // transporte. Aqui no se interpreta el contenido; solo se entrega un QRPayload.
@@ -47,7 +52,7 @@ struct QRPayload {
 };
 
 enum class Phase : uint8_t {
-  Idle, Scanning, Connecting, Subscribing, Waiting, Receiving,
+  Idle, Scanning, Connecting, Waiting, Receiving,
   Success, Failed, Cancelled
 };
 
@@ -79,9 +84,6 @@ public:
   const QRMetadata& metadata() const { return metadata_; }
 
 private:
-  enum class SetupResult : uint8_t { None, Ok, ConnectFailed,
-                                     ServiceNotFound, SubscribeFailed };
-
   void lock() { if (mux_) xSemaphoreTake(mux_, portMAX_DELAY); }
   void unlock() { if (mux_) xSemaphoreGive(mux_); }
 
@@ -94,8 +96,6 @@ private:
 
   void teardown();
   void finalizeTransfer();
-  void runConnect();
-  static void connectTaskEntry(void* arg);
 
   // Estado manejado solo desde update()/loop (mono-hilo).
   Phase phase_ = Phase::Idle;
@@ -122,21 +122,14 @@ private:
   std::string foundAddr_;
   esp_ble_addr_type_t foundType_ = BLE_ADDR_TYPE_PUBLIC;
 
-  // Recursos y tarea de conexion.
+  // Recursos BLE.
   BLEScan* scan_ = nullptr;
   BLEClient* client_ = nullptr;
   bool bleOn_ = false;
   bool scanning_ = false;
-  TaskHandle_t taskHandle_ = nullptr;
-  bool taskRunning_ = false;
-  bool abortRequested_ = false;
-  bool taskDone_ = true;
-  bool connectOk_ = false;
-  SetupResult setupResult_ = SetupResult::None;
 
   // Timeouts.
   uint32_t scanStartMs_ = 0;
-  uint32_t connectStartMs_ = 0;
   uint32_t waitStartMs_ = 0;
   uint32_t lastChunkMs_ = 0;
 

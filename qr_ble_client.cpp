@@ -6,7 +6,6 @@ namespace qr_ble {
 
 namespace {
 constexpr uint32_t kScanTimeoutMs = 15000;
-constexpr uint32_t kConnectTimeoutMs = 10000;
 constexpr uint32_t kWaitTimeoutMs = 60000;
 constexpr uint32_t kTransferTimeoutMs = 60000;
 
@@ -69,10 +68,8 @@ QRBLEClient::~QRBLEClient() {
 
 void QRBLEClient::start() {
   if (phase_ == Phase::Scanning || phase_ == Phase::Connecting ||
-      phase_ == Phase::Subscribing || phase_ == Phase::Waiting ||
-      phase_ == Phase::Receiving) return;
+      phase_ == Phase::Waiting || phase_ == Phase::Receiving) return;
 
-  // Reset completo del estado previo.
   teardown();
   lock();
   statusText_ = "";
@@ -216,6 +213,7 @@ void QRBLEClient::onDataNotify(uint8_t* data, size_t len) {
 void QRBLEClient::onConnectCallback() {
   lock();
   connected_ = true;
+  disconnected_ = false;
   unlock();
 }
 
@@ -227,53 +225,51 @@ void QRBLEClient::onDisconnectCallback() {
   Serial.println("[BLE] disconnected");
 }
 
-void QRBLEClient::connectTaskEntry(void* arg) {
-  static_cast<QRBLEClient*>(arg)->runConnect();
-}
+void QRBLEClient::update() {
+  switch (phase_) {
+    case Phase::Scanning: {
+      bool found = false;
+      lock();
+      found = found_;
+      unlock();
+      if (found) {
+        if (scan_ && scanning_) { scan_->stop(); scanning_ = false; }
+        Serial.println("[BLE] stop scan");
 
-void QRBLEClient::runConnect() {
-  bool ok = false;
-  std::string addr;
-  esp_ble_addr_type_t type;
-  lock();
-  addr = foundAddr_;
-  type = foundType_;
-  unlock();
-  if (client_ && !addr.empty()) {
-    ok = client_->connect(BLEAddress(addr), type);
-  }
+        phase_ = Phase::Connecting;
+        client_ = BLEDevice::createClient();
+        client_->setClientCallbacks(clientCallbacks_);
 
-  if (!ok) {
-    Serial.println("[BLE] connect failed");
-    lock();
-    connectOk_ = false;
-    setupResult_ = SetupResult::ConnectFailed;
-    taskDone_ = true;
-    taskRunning_ = false;
-    unlock();
-    vTaskDelete(nullptr);
-    return;
-  }
+        if (!client_->connect(BLEAddress(foundAddr_), foundType_)) {
+          Serial.println("[BLE] connect failed");
+          error_ = Error::ConnectFailed;
+          teardown();
+          phase_ = Phase::Failed;
+          break;
+        }
+        Serial.println("[BLE] connected");
 
-  Serial.println("[BLE] connected");
+        BLERemoteService* service = client_->getService(kServiceUUID);
+        if (!service) {
+          Serial.println("[BLE] service not found");
+          error_ = Error::ServiceNotFound;
+          teardown();
+          phase_ = Phase::Failed;
+          break;
+        }
+        Serial.println("[BLE] service matched");
 
-  SetupResult result = SetupResult::Ok;
-  if (abortRequested_) {
-    result = SetupResult::ConnectFailed;
-  } else {
-    BLERemoteService* service = client_->getService(kServiceUUID);
-    if (!service) {
-      Serial.println("[BLE] service not found");
-      result = SetupResult::ServiceNotFound;
-    } else {
-      Serial.println("[BLE] service matched");
-      BLERemoteCharacteristic* status = service->getCharacteristic(kStatusUUID);
-      BLERemoteCharacteristic* meta = service->getCharacteristic(kMetadataUUID);
-      BLERemoteCharacteristic* data = service->getCharacteristic(kDataUUID);
-      if (!status || !meta || !data) {
-        Serial.println("[BLE] characteristic not found");
-        result = SetupResult::SubscribeFailed;
-      } else {
+        BLERemoteCharacteristic* status = service->getCharacteristic(kStatusUUID);
+        BLERemoteCharacteristic* meta = service->getCharacteristic(kMetadataUUID);
+        BLERemoteCharacteristic* data = service->getCharacteristic(kDataUUID);
+        if (!status || !meta || !data) {
+          Serial.println("[BLE] characteristic not found");
+          error_ = Error::SubscribeFailed;
+          teardown();
+          phase_ = Phase::Failed;
+          break;
+        }
+
         status->registerForNotify(
             [this](BLERemoteCharacteristic*, uint8_t* p, size_t l, bool) {
               onStatusNotify(p, l);
@@ -288,8 +284,9 @@ void QRBLEClient::runConnect() {
               onDataNotify(p, l);
             });
         Serial.println("[BLE] subscribed DATA");
+
         // METADATA tambien puede ser leida (no solo notificada).
-        std::string m = meta->readValue();
+        const std::string m = meta->readValue();
         if (!m.empty()) {
           lock();
           metadataRaw_ = String(m.c_str());
@@ -297,63 +294,8 @@ void QRBLEClient::runConnect() {
           unlock();
           Serial.println("[BLE] metadata received");
         }
-        result = SetupResult::Ok;
-      }
-    }
-  }
-
-  lock();
-  connectOk_ = ok;
-  setupResult_ = result;
-  taskDone_ = true;
-  taskRunning_ = false;
-  unlock();
-  vTaskDelete(nullptr);
-}
-
-void QRBLEClient::update() {
-  // Limpieza diferida: si habia una tarea de conexion pendiente y ya termino,
-  // terminamos de liberar recursos (deinit BLE + delete client).
-  if (abortRequested_ && !taskRunning_) {
-    lock();
-    const bool done = taskDone_;
-    unlock();
-    if (done) {
-      if (bleOn_) {
-        BLEDevice::deinit(false);
-        bleOn_ = false;
-      }
-      if (client_) {
-        delete client_;
-        client_ = nullptr;
-      }
-      abortRequested_ = false;
-    }
-  }
-
-  switch (phase_) {
-    case Phase::Scanning: {
-      bool found = false;
-      lock();
-      found = found_;
-      unlock();
-      if (found) {
-        Serial.println("[BLE] stop scan");
-        if (scan_ && scanning_) { scan_->stop(); scanning_ = false; }
-        // Lanzar conexion en una tarea (bloqueante) con timeout en update().
-        lock();
-        taskDone_ = false;
-        connectOk_ = false;
-        setupResult_ = SetupResult::None;
-        abortRequested_ = false;
-        unlock();
-        taskRunning_ = true;
-        client_ = BLEDevice::createClient();
-        client_->setClientCallbacks(clientCallbacks_);
-        connectStartMs_ = millis();
-        phase_ = Phase::Connecting;
-        xTaskCreatePinnedToCore(connectTaskEntry, "qrble", 16384, this, 1,
-                                &taskHandle_, 0);
+        waitStartMs_ = millis();
+        phase_ = Phase::Waiting;
       } else if (millis() - scanStartMs_ > kScanTimeoutMs) {
         if (scan_ && scanning_) { scan_->stop(); scanning_ = false; }
         error_ = Error::ScanTimeout;
@@ -363,41 +305,7 @@ void QRBLEClient::update() {
       }
       break;
     }
-    case Phase::Connecting: {
-      bool done = false, ok = false;
-      SetupResult setup = SetupResult::None;
-      lock();
-      done = taskDone_;
-      ok = connectOk_;
-      setup = setupResult_;
-      unlock();
-      if (done) {
-        if (!ok) {
-          error_ = Error::ConnectFailed;
-          teardown();
-          phase_ = Phase::Failed;
-        } else if (setup == SetupResult::Ok) {
-          waitStartMs_ = millis();
-          phase_ = Phase::Waiting;
-        } else {
-          error_ = setup == SetupResult::ServiceNotFound
-                       ? Error::ServiceNotFound
-                       : Error::SubscribeFailed;
-          teardown();
-          phase_ = Phase::Failed;
-        }
-      } else if (millis() - connectStartMs_ > kConnectTimeoutMs) {
-        // Aborta la espera: marcamos abort, y la tarea terminara sola.
-        lock();
-        abortRequested_ = true;
-        unlock();
-        error_ = Error::ConnectTimeout;
-        Serial.println("[BLE] connect timeout");
-        teardown();
-        phase_ = Phase::Failed;
-      }
-      break;
-    }
+
     case Phase::Waiting: {
       bool metaChanged = false, firstChunk = false;
       lock();
@@ -428,7 +336,6 @@ void QRBLEClient::update() {
         Serial.printf("[BLE] type=%s\n", metadata_.type.c_str());
         Serial.printf("[BLE] size=%u\n", static_cast<unsigned>(metadata_.size));
       }
-      // Procesar estado del STATUS recibido.
       String status;
       bool changed = false;
       lock();
@@ -456,6 +363,7 @@ void QRBLEClient::update() {
       }
       break;
     }
+
     case Phase::Receiving: {
       bool tooLarge = false, disconnected = false, complete = false;
       lock();
@@ -498,6 +406,7 @@ void QRBLEClient::update() {
       }
       break;
     }
+
     default:
       break;
   }
@@ -505,7 +414,6 @@ void QRBLEClient::update() {
 
 void QRBLEClient::finalizeTransfer() {
   Serial.println("[BLE] transfer complete");
-  // Mover chunks a memoria local y reconstruir por indice.
   std::map<uint16_t, std::vector<uint8_t>> received;
   lock();
   received.swap(chunks_);
@@ -514,7 +422,7 @@ void QRBLEClient::finalizeTransfer() {
   unlock();
 
   std::vector<uint8_t> assembled;
-  size_t expected = metadataReady_ ? metadata_.size : 0;
+  const size_t expected = metadataReady_ ? metadata_.size : 0;
   if (expected > 0 && expected <= MAX_QR_PAYLOAD) {
     assembled.reserve(expected);
   }
@@ -570,25 +478,13 @@ void QRBLEClient::teardown() {
   found_ = false;
   unlock();
 
-  bool taskStillRunning = false;
-  lock();
-  taskStillRunning = taskRunning_;
-  unlock();
-  if (!taskStillRunning) {
-    if (client_) {
-      delete client_;
-      client_ = nullptr;
-    }
-    if (bleOn_) {
-      BLEDevice::deinit(false);
-      bleOn_ = false;
-    }
-  } else {
-    // La tarea sigue bloqueada (connect en curso); el update() se encarga de
-    // liberar recursos cuando termine (abortRequested_).
-    lock();
-    abortRequested_ = true;
-    unlock();
+  if (client_) {
+    delete client_;
+    client_ = nullptr;
+  }
+  if (bleOn_) {
+    BLEDevice::deinit(false);
+    bleOn_ = false;
   }
 }
 
