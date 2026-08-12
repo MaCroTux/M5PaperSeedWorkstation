@@ -27,7 +27,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                     vault_label, address_explorer, address_index_input, address_qr,
                     vault_list, vault_unlock, vault_loaded,
                     session_menu, session_meta_list, session_seed_list,
-                    delete_confirm, discard_confirm, diagnostics };
+                    delete_confirm, discard_confirm, session_lock_warning,
+                    diagnostics };
 
 struct Rect {
   int x, y, w, h;
@@ -188,6 +189,9 @@ uint8_t sessionSeedCount = 0;
 uint8_t selectedSessionFile = 0;
 uint32_t lastUserActivity = 0;
 constexpr uint32_t kSessionTimeoutMs = 180000;
+constexpr uint32_t kSessionTimeoutWarnMs = 15000;
+uint32_t lastWarnSecond = 0;
+Screen sessionLockReturn = Screen::menu;
 constexpr uint8_t kMaxLoadedSeeds = 6;
 struct LoadedSeed {
   uint16_t indices[24];
@@ -1816,6 +1820,23 @@ void requestSecurity(Screen target, Screen returnTo) {
   drawSecurityWarning();
 }
 
+void drawSessionLockWarning() {
+  blankPage();
+  title("SESION A PUNTO DE BLOQUEARSE", "Por inactividad");
+  warningIcon(page, 270, 200);
+  const uint32_t remaining = kSessionTimeoutMs -
+      static_cast<uint32_t>(millis() - lastUserActivity);
+  const uint32_t sec = remaining / 1000 + 1;
+  textStyle(page, 3); page.setTextDatum(MC_DATUM);
+  page.drawString(String("Se bloqueara en ") + sec + " s", 270, 380);
+  textStyle(page, 2);
+  page.drawString("Toca la pantalla o pulsa", 270, 470);
+  page.drawString("la palanca para continuar.", 270, 515);
+  page.drawString("La semilla activa se conservara.", 270, 560);
+  page.setTextDatum(TL_DATUM);
+  fullRefresh(UPDATE_MODE_DU4);
+}
+
 bool buildSeedQR() {
   if (!bip39::checksum_valid(words, targetWords)) return false;
   char payload[97] = {};
@@ -2213,6 +2234,7 @@ void drawScreen() {
     case Screen::address_index_input: drawAddressIndexInput(); break;
     case Screen::address_qr: drawAddressQr(); break;
     case Screen::discard_confirm: drawDiscardConfirm(); break;
+    case Screen::session_lock_warning: drawSessionLockWarning(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
   }
 }
@@ -3018,15 +3040,45 @@ void setup() {
 void loop() {
   if (sessionUnlocked && static_cast<uint32_t>(millis() - lastUserActivity) >= kSessionTimeoutMs) {
     Serial.println("Vault de sesion bloqueado por inactividad");
+    lastWarnSecond = 0;
     lockSessionVault();
     return;
+  }
+  if (sessionUnlocked) {
+    const uint32_t remaining = kSessionTimeoutMs -
+        static_cast<uint32_t>(millis() - lastUserActivity);
+    if (remaining <= kSessionTimeoutWarnMs) {
+      if (screen != Screen::session_lock_warning) {
+        sessionLockReturn = screen;
+        screen = Screen::session_lock_warning;
+        lastWarnSecond = 0;
+        drawSessionLockWarning();
+      } else {
+        const uint32_t sec = remaining / 1000 + 1;
+        if (sec != lastWarnSecond) {
+          lastWarnSecond = sec;
+          drawSessionLockWarning();
+        }
+      }
+    } else {
+      lastWarnSecond = 0;
+      if (screen == Screen::session_lock_warning) {
+        screen = sessionLockReturn; focusIndex = 0; drawScreen();
+      }
+    }
   }
   static int oldLeft = HIGH, oldPress = HIGH, oldRight = HIGH;
   static uint32_t lastRocker = 0;
   const int left = digitalRead(kRockerLeftPin);
   const int press = digitalRead(kRockerPressPin);
   const int right = digitalRead(kRockerRightPin);
-  if (millis() - lastRocker >= 120) {
+  if (screen == Screen::session_lock_warning &&
+      (left == LOW || right == LOW || press == LOW)) {
+    if (millis() - lastRocker >= 120) {
+      lastRocker = millis(); lastUserActivity = millis();
+      screen = sessionLockReturn; focusIndex = 0; drawScreen();
+    }
+  } else if (millis() - lastRocker >= 120) {
     if (left == LOW && oldLeft == HIGH) { lastRocker = millis(); lastUserActivity = millis(); moveFocus(1); }
     else if (right == LOW && oldRight == HIGH) { lastRocker = millis(); lastUserActivity = millis(); moveFocus(-1); }
     else if (press == LOW && oldPress == HIGH) { lastRocker = millis(); lastUserActivity = millis(); activateFocus(); }
@@ -3047,7 +3099,11 @@ void loop() {
       }
     } else if (wasDown) {
       lastUserActivity = millis();
-      click(tx, ty);
+      if (screen == Screen::session_lock_warning) {
+        screen = sessionLockReturn; focusIndex = 0; drawScreen();
+      } else {
+        click(tx, ty);
+      }
       entropyLastX = entropyLastY = -1;
     }
     wasDown = down;
