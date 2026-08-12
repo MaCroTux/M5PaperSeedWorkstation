@@ -100,23 +100,18 @@ y `NimBLE-Arduino@^1.4.0`.
 
 ## 6. Recibir por WiFi (MVP)
 
-1. En el menú → **RECIBIR POR WIFI**. El M5Paper crea un punto de acceso:
-   - SSID: `M5Paper-QR`
-   - Clave: `m5paper123` (fija por ahora)
-   - URL: `http://192.168.4.1`
-2. El móvil se conecta al AP y abre esa URL en el navegador.
-3. Puede **pegar el contenido** de un QR o **subir un archivo** (p. ej. un PSBT).
-4. El M5Paper muestra el contenido recibido (texto o "binary payload N bytes").
+1. En el menú → **RECIBIR POR WIFI**. El M5Paper crea un punto de acceso con una
+   **clave aleatoria por sesión** y muestra un **QR de conexión** en pantalla
+   (`WIFI:T:WPA;S:M5Paper-QR;P:<clave>;;`).
+2. El móvil escanea el QR y se conecta automáticamente a la red `M5Paper-QR`.
+3. Abre `http://192.168.4.1` en el navegador y **pega el contenido** de un QR o
+   **sube un archivo** (p. ej. un PSBT).
+4. El M5Paper muestra el contenido recibido (texto o "binary payload N bytes") y
+   **apaga el AP automáticamente**.
 
 El contenido llega como payload crudo (`format`/`type` + bytes). La integridad la
 garantiza TCP; la interpretación del contenido (PSBT, etc.) se hará en una fase
 posterior.
-
-### Siguiente paso previsto
-
-Generar un **QR de conexión WiFi** (`WIFI:T:WPA;S:...;P:...;;`) con una **clave
-aleatoria por sesión**, para que el móvil conecte escaneando el QR en vez de teclear
-la contraseña, y apagar el AP automáticamente al recibir el fichero.
 
 ---
 
@@ -139,8 +134,8 @@ M5Paper; NimBLE es más ligero y no usa esa arquitectura.
 - [x] Mejoras de navegación y UX (barra de progreso, entrada numérica de índice,
       aviso de auto-bloqueo, ayuda contextual, toast, etc.).
 - [x] Recepción por WiFi AP (MVP).
+- [x] QR de conexión WiFi con clave aleatoria + apagado automático del AP.
 - [ ] Verificar en hardware la recepción WiFi y el BLE/NimBLE.
-- [ ] QR de conexión WiFi con clave aleatoria + apagado automático del AP.
 - [ ] Parsing/interpretación de PSBT.
 - [ ] Corregir el self-test **BIP86** (falla; BIP84 OK).
 - [ ] Consolidar la UI legacy (`.ino`) en `NativeApp.cpp`.

@@ -214,6 +214,8 @@ char indexBuffer[7] = {};
 char toastMessage[48] = {};
 uint32_t toastUntil = 0;
 QRCode addressQr;
+QRCode wifiQr;
+uint8_t wifiQrBuffer[256] = {};
 uint8_t addressQrBuffer[256] = {};
 
 struct PublicProfile {
@@ -2575,6 +2577,12 @@ void drawWifiResult() {
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
 }
 
+bool buildWifiQr() {
+  memset(wifiQrBuffer, 0, sizeof(wifiQrBuffer));
+  return qrcode_initText(&wifiQr, wifiQrBuffer, 4, ECC_LOW,
+                         wifiServer.wifiQrText().c_str()) == 0;
+}
+
 void drawWifiReceive() {
   blankPage();
   const auto p = wifiServer.phase();
@@ -2589,14 +2597,24 @@ void drawWifiReceive() {
     buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
     buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
   } else {
-    title("RECIBIR POR WIFI", "Punto de acceso activo");
-    textStyle(page, 2);
-    page.setCursor(30, 200); page.println("Conecta el movil a la red WIFI:");
-    page.setCursor(60, 265); page.printf("SSID: %s", qr_wifi::kApSsid);
-    page.setCursor(60, 310); page.printf("Clave: %s", qr_wifi::kApPassword);
-    page.setCursor(30, 380); page.println("Abre en el navegador:");
-    page.setCursor(60, 445); page.println("http://192.168.4.1");
-    page.setCursor(30, 515); page.println("y pega el texto o sube el archivo.");
+    title("RECIBIR POR WIFI", "Escanea el QR para conectarte");
+    const int module = 8;
+    const int px = wifiQr.size * module;
+    const int ox = (kWidth - px) / 2;
+    const int oy = 165;
+    page.fillRect(ox - 15, oy - 15, px + 30, px + 30, kWhite);
+    for (uint8_t y = 0; y < wifiQr.size; ++y)
+      for (uint8_t x = 0; x < wifiQr.size; ++x)
+        if (qrcode_getModule(&wifiQr, x, y))
+          page.fillRect(ox + x * module, oy + y * module, module, module, kBlack);
+    const int ty = oy + px + 25;
+    textStyle(page, 2); page.setTextDatum(MC_DATUM);
+    page.drawString("SSID: " + String(qr_wifi::kApSsid), 270, ty);
+    page.drawString("Clave: " + String(wifiServer.password()), 270, ty + 40);
+    page.drawString("URL: http://192.168.4.1", 270, ty + 80);
+    textStyle(page, 1);
+    page.drawString("Conecta, abre la URL y pega o sube el archivo", 270, ty + 130);
+    page.setTextDatum(TL_DATUM);
     buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
   }
   fullRefresh();
@@ -2606,6 +2624,7 @@ void beginWifiReceive() {
   wifiResultShown = false;
   wifiServer.clear();
   wifiServer.start();
+  buildWifiQr();
   screen = Screen::wifi_receive;
   focusIndex = 0;
   drawWifiReceive();

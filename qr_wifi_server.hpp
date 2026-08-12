@@ -2,24 +2,25 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <esp_system.h>
 #include <vector>
 
 // Servidor WiFi (modo Access Point) para recibir un archivo o contenido de QR
 // desde un movil, sin depender de la Raspberry Pi.
 //
-// Flujo: el M5Paper crea un AP "M5Paper-QR"; el movil se conecta, abre
-// http://192.168.4.1 y pega texto o sube un archivo. El contenido se entrega
-// como un payload crudo (format/type + bytes). La integridad la garantiza TCP
-// (no hay terceros); el contenido (p.ej. PSBT) se validara despues en la app.
+// Flujo: el M5Paper crea un AP "M5Paper-QR" con una clave ALEATORIA por sesion
+// (se muestra como QR de conexion WIFI:T:WPA;S:...;P:...;; en la pantalla). El
+// movil escanea el QR, se conecta, abre http://192.168.4.1 y pega texto o sube
+// un archivo. Al recibir el contenido se apaga el AP automaticamente.
 //
-// El telefono es un dispositivo de entrada NO confiable; aqui solo se recoge
-// el dato, no se interpreta.
+// La integridad la garantiza TCP (no hay terceros); el contenido (p.ej. PSBT)
+// se validara despues en la app. El telefono es NO confiable: aqui solo se
+// recoge el dato, no se interpreta.
 
 namespace qr_wifi {
 
 constexpr size_t MAX_PAYLOAD = 32768;
 constexpr char kApSsid[] = "M5Paper-QR";
-constexpr char kApPassword[] = "m5paper123";
 
 const char kHtmlPage[] = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -68,11 +69,14 @@ public:
     format_ = ""; type_ = "";
     ready_ = false;
     payloadTooLarge_ = false;
+    stopRequested_ = false;
+    generatePassword();
     phase_ = Phase::Starting;
 
-    Serial.println("[WIFI] starting AP");
+    Serial.print("[WIFI] starting AP with random key: ");
+    Serial.println(apPassword_);
     WiFi.mode(WIFI_AP);
-    if (!WiFi.softAP(kApSsid, kApPassword)) {
+    if (!WiFi.softAP(kApSsid, apPassword_)) {
       Serial.println("[WIFI] AP failed");
       phase_ = Phase::Failed;
       return;
@@ -83,6 +87,7 @@ public:
                [this]() { handleUploadDone(); },
                [this]() { handleUpload(); });
     server_.begin();
+    serving_ = true;
     Serial.print("[WIFI] AP IP: ");
     Serial.println(WiFi.softAPIP());
     phase_ = Phase::Waiting;
@@ -90,6 +95,10 @@ public:
 
   void update() {
     if (phase_ == Phase::Waiting) server_.handleClient();
+    if (stopRequested_) {
+      stopRequested_ = false;
+      teardown();  // apaga servidor + WiFi, conserva data_ y phase_
+    }
   }
 
   void cancel() {
@@ -114,11 +123,30 @@ public:
   const std::vector<uint8_t>& data() const { return data_; }
   String format() const { return format_; }
   String type() const { return type_; }
+  const char* password() const { return apPassword_; }
+
+  String wifiQrText() const {
+    String s = "WIFI:T:WPA;S:";
+    s += kApSsid;
+    s += ";P:";
+    s += apPassword_;
+    s += ";;";
+    return s;
+  }
 
 private:
+  void generatePassword() {
+    static const char charset[] = "abcdefghjkmnpqrstuvwxyz23456789";
+    for (int i = 0; i < 8; ++i) {
+      apPassword_[i] = charset[esp_random() % (sizeof(charset) - 1)];
+    }
+    apPassword_[8] = '\0';
+  }
+
   void teardown() {
-    if (phase_ == Phase::Waiting || phase_ == Phase::Starting) {
+    if (serving_) {
       server_.stop();
+      serving_ = false;
     }
     if (WiFi.getMode() != WIFI_OFF) {
       WiFi.softAPdisconnect(true);
@@ -141,6 +169,7 @@ private:
     ready_ = true;
     phase_ = Phase::Received;
     server_.send(200, "text/plain", "OK");
+    stopRequested_ = true;
   }
 
   void handleUpload() {
@@ -173,6 +202,7 @@ private:
     ready_ = true;
     phase_ = Phase::Received;
     server_.send(200, "text/plain", "OK");
+    stopRequested_ = true;
   }
 
   Phase phase_ = Phase::Idle;
@@ -182,6 +212,9 @@ private:
   String type_;
   bool ready_ = false;
   bool payloadTooLarge_ = false;
+  bool serving_ = false;
+  bool stopRequested_ = false;
+  char apPassword_[16] = {};
 };
 
 }  // namespace qr_wifi
