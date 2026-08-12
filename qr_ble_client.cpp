@@ -92,6 +92,7 @@ void QRBLEClient::start() {
   payloadReady_ = false;
   error_ = Error::None;
 
+  Serial.println("[BLE] stack=NimBLE");
   Serial.println("[BLE] scanning");
   NimBLEDevice::init(kDeviceName);
   bleOn_ = true;
