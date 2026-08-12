@@ -10,6 +10,7 @@
 #include "qr_ble_client.hpp"
 #include "qr_wifi_server.hpp"
 #include "psbt_parser.hpp"
+#include "tx_sign.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -3615,6 +3616,8 @@ void setup() {
                 encrypted_seed_store::self_test() ? "OK" : "ERROR");
   Serial.printf("PSBT parser self-test: %s\n",
                 psbt::self_test() ? "OK" : "ERROR");
+  Serial.printf("ECDSA (RFC6979) self-test: %s\n",
+                tx_sign::self_test() ? "OK" : "ERROR");
   hdSelfTest = bitcoin_hd::self_test() && bitcoin_hd::self_test_passphrase();
   Serial.printf("BIP32 xpub/zpub self-test: %s\n", hdSelfTest ? "OK" : "ERROR");
   addressBip84SelfTest = bitcoin_address::self_test_bip84();

@@ -27,9 +27,15 @@ struct TxOutput {
 struct TxInput {
   uint8_t prevTxid[32] = {};
   uint32_t prevVout = 0;
+  uint32_t sequence = 0;
   uint64_t amount = 0;                // satoshis (0 si desconocido)
   bool amountKnown = false;
   String address;                     // direccion del UTXO previo
+  bool hasDerivation = false;         // ruta BIP32 presente (clave 0x06)
+  uint8_t derivFpr[4] = {};           // fingerprint del padre
+  std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
+  uint8_t utxoScript[80] = {};        // scriptPubKey del UTXO gastado (witness/non-witness)
+  uint8_t utxoScriptLen = 0;
 };
 
 struct ParsedTx {
@@ -121,6 +127,8 @@ inline bool parseTx(const uint8_t* p, size_t len, ParsedTx& tx, size_t& consumed
     if (len - i < scriptLen) return false;
     i += scriptLen;              // scriptSig
     if (len - i < 4) return false;
+    in.sequence = static_cast<uint32_t>(p[i]) | (static_cast<uint32_t>(p[i + 1]) << 8) |
+                  (static_cast<uint32_t>(p[i + 2]) << 16) | (static_cast<uint32_t>(p[i + 3]) << 24);
     i += 4;                      // sequence
     tx.inputs.push_back(in);
   }
@@ -215,7 +223,12 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
         uint64_t spkLen = 0;
         size_t sn = readVarint(val + 8, valLen - 8, spkLen);
         if (sn && 8 + sn + spkLen <= valLen) {
-          tx.inputs[inIdx].address = scriptToAddress(val + 8 + sn, static_cast<size_t>(spkLen));
+          const uint8_t* spk = val + 8 + sn;
+          tx.inputs[inIdx].address = scriptToAddress(spk, static_cast<size_t>(spkLen));
+          if (spkLen <= sizeof(tx.inputs[inIdx].utxoScript)) {
+            memcpy(tx.inputs[inIdx].utxoScript, spk, static_cast<size_t>(spkLen));
+            tx.inputs[inIdx].utxoScriptLen = static_cast<uint8_t>(spkLen);
+          }
         }
       } else if (keyLen >= 1 && key[0] == 0x00 && !tx.inputs[inIdx].amountKnown) {
         ParsedTx prev;
@@ -227,6 +240,20 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
           tx.inputs[inIdx].amountKnown = true;
           tx.inputs[inIdx].address = o.address;
         }
+      } else if (keyLen >= 1 && key[0] == 0x06 && valLen >= 4) {
+        // Ruta BIP32: {fingerprint(4)}{indices uint32 LE...}.
+        memcpy(tx.inputs[inIdx].derivFpr, val, 4);
+        tx.inputs[inIdx].derivPath.clear();
+        size_t off = 4;
+        while (off + 4 <= valLen) {
+          uint32_t idx = static_cast<uint32_t>(val[off]) |
+                         (static_cast<uint32_t>(val[off + 1]) << 8) |
+                         (static_cast<uint32_t>(val[off + 2]) << 16) |
+                         (static_cast<uint32_t>(val[off + 3]) << 24);
+          tx.inputs[inIdx].derivPath.push_back(idx);
+          off += 4;
+        }
+        tx.inputs[inIdx].hasDerivation = true;
       }
     }
   }
