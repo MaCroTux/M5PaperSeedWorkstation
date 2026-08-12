@@ -1,28 +1,21 @@
 #pragma once
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEScan.h>
-#include <BLEClient.h>
-#include <BLERemoteService.h>
-#include <BLERemoteCharacteristic.h>
-#include <BLEAdvertisedDevice.h>
+#include <NimBLEDevice.h>
 #include <vector>
 #include <map>
 #include <string>
 
-// Cliente BLE para recibir un QR enviado por una Raspberry Pi Zero W (servidor
-// GATT). Flujo: BLE ON -> scan -> connect -> subscribe STATUS/METADATA/DATA ->
-// recibir METADATA -> recibir chunks DATA -> reconstruir -> verificar SIZE y
-// SHA256 -> desconectar -> BLE OFF.
+// Cliente BLE (NimBLE) para recibir un QR enviado por una Raspberry Pi Zero W
+// (servidor GATT). Flujo: BLE ON -> scan -> connect -> subscribe
+// STATUS/METADATA/DATA -> recibir METADATA -> recibir chunks DATA ->
+// reconstruir -> verificar SIZE y SHA256 -> desconectar -> BLE OFF.
 //
-// Toda la logica de conexion se ejecuta desde update(), llamado desde loop()
-// (la tarea principal de Arduino). Es el patron probado de la libreria BLE del
-// core ESP32; ejecutar connect()/getService() desde otra tarea FreeRTOS provoca
-// asserts en Bluedroid (BTA_GATTC_Open).
+// Se usa NimBLE en vez de Bluedroid porque consume mucha menos RAM y evita los
+// asserts internos de Bluedroid (GKI/BTA) que se producen en el M5Paper.
 //
-// Las callbacks de notificacion (tarea de Bluedroid) NO dibujan e-ink ni hacen
-// cripto. Solo guardan estado/datos bajo un mutex; update() procesa el flujo y
-// la UI lo refleja.
+// Toda la logica de conexion se ejecuta desde update(), llamado desde loop().
+// Las callbacks de notificacion (tarea de NimBLE) NO dibujan e-ink ni hacen
+// cripto; solo guardan estado/datos bajo un mutex.
 //
 // La Pi es un dispositivo de entrada NO confiable: el SHA256 solo protege el
 // transporte. Aqui no se interpreta el contenido; solo se entrega un QRPayload.
@@ -87,12 +80,12 @@ private:
   void lock() { if (mux_) xSemaphoreTake(mux_, portMAX_DELAY); }
   void unlock() { if (mux_) xSemaphoreGive(mux_); }
 
-  void onScanResult(BLEAdvertisedDevice device);
+  void onScanResult(NimBLEAdvertisedDevice* device);
   void onStatusNotify(uint8_t* data, size_t len);
   void onMetadataNotify(uint8_t* data, size_t len);
   void onDataNotify(uint8_t* data, size_t len);
-  void onConnectCallback();
-  void onDisconnectCallback();
+  void onConnectCallback(NimBLEClient* client);
+  void onDisconnectCallback(NimBLEClient* client);
 
   void teardown();
   void finalizeTransfer();
@@ -120,11 +113,11 @@ private:
   bool disconnected_ = false;
   bool found_ = false;
   std::string foundAddr_;
-  esp_ble_addr_type_t foundType_ = BLE_ADDR_TYPE_PUBLIC;
+  uint8_t foundType_ = 0;
 
   // Recursos BLE.
-  BLEScan* scan_ = nullptr;
-  BLEClient* client_ = nullptr;
+  NimBLEScan* scan_ = nullptr;
+  NimBLEClient* client_ = nullptr;
   bool bleOn_ = false;
   bool scanning_ = false;
 
@@ -139,19 +132,19 @@ private:
   ClientCallbacks* clientCallbacks_ = nullptr;
 };
 
-class QRBLEClient::ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+class QRBLEClient::ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 public:
   explicit ScanCallbacks(QRBLEClient* c) : client(c) {}
-  void onResult(BLEAdvertisedDevice device) override { client->onScanResult(device); }
+  void onResult(NimBLEAdvertisedDevice* device) override { client->onScanResult(device); }
 private:
   QRBLEClient* client;
 };
 
-class QRBLEClient::ClientCallbacks : public BLEClientCallbacks {
+class QRBLEClient::ClientCallbacks : public NimBLEClientCallbacks {
 public:
   explicit ClientCallbacks(QRBLEClient* c) : client(c) {}
-  void onConnect(BLEClient*) override { client->onConnectCallback(); }
-  void onDisconnect(BLEClient*) override { client->onDisconnectCallback(); }
+  void onConnect(NimBLEClient* c) override { client->onConnectCallback(c); }
+  void onDisconnect(NimBLEClient* c) override { client->onDisconnectCallback(c); }
 private:
   QRBLEClient* client;
 };

@@ -93,13 +93,13 @@ void QRBLEClient::start() {
   error_ = Error::None;
 
   Serial.println("[BLE] scanning");
-  BLEDevice::init(std::string("M5Paper-QR"));
+  NimBLEDevice::init(kDeviceName);
   bleOn_ = true;
-  scan_ = BLEDevice::getScan();
+  scan_ = NimBLEDevice::getScan();
   scan_->setActiveScan(true);
   scan_->setInterval(100);
   scan_->setWindow(99);
-  scan_->setAdvertisedDeviceCallbacks(scanCallbacks_, false, true);
+  scan_->setAdvertisedDeviceCallbacks(scanCallbacks_, false);
   scanning_ = scan_->start(0, nullptr, false);
   scanStartMs_ = millis();
   phase_ = Phase::Scanning;
@@ -148,13 +148,13 @@ uint16_t QRBLEClient::totalChunks() {
   return n;
 }
 
-void QRBLEClient::onScanResult(BLEAdvertisedDevice device) {
+void QRBLEClient::onScanResult(NimBLEAdvertisedDevice* device) {
   if (found_) return;
-  if (device.haveName() && device.getName() == kDeviceName) {
+  if (device->haveName() && device->getName() == kDeviceName) {
     lock();
     found_ = true;
-    foundAddr_ = device.getAddress().toString();
-    foundType_ = device.getAddressType();
+    foundAddr_ = device->getAddress().toString();
+    foundType_ = device->getAddress().getType();
     unlock();
     Serial.println("[BLE] found M5Paper-QR");
   }
@@ -210,14 +210,14 @@ void QRBLEClient::onDataNotify(uint8_t* data, size_t len) {
   }
 }
 
-void QRBLEClient::onConnectCallback() {
+void QRBLEClient::onConnectCallback(NimBLEClient* client) {
   lock();
   connected_ = true;
   disconnected_ = false;
   unlock();
 }
 
-void QRBLEClient::onDisconnectCallback() {
+void QRBLEClient::onDisconnectCallback(NimBLEClient* client) {
   lock();
   disconnected_ = true;
   connected_ = false;
@@ -237,10 +237,10 @@ void QRBLEClient::update() {
         Serial.println("[BLE] stop scan");
 
         phase_ = Phase::Connecting;
-        client_ = BLEDevice::createClient();
-        client_->setClientCallbacks(clientCallbacks_);
+        client_ = NimBLEDevice::createClient();
+        client_->setClientCallbacks(clientCallbacks_, false);
 
-        if (!client_->connect(BLEAddress(foundAddr_), foundType_)) {
+        if (!client_->connect(NimBLEAddress(foundAddr_, foundType_))) {
           Serial.println("[BLE] connect failed");
           error_ = Error::ConnectFailed;
           teardown();
@@ -249,7 +249,7 @@ void QRBLEClient::update() {
         }
         Serial.println("[BLE] connected");
 
-        BLERemoteService* service = client_->getService(kServiceUUID);
+        NimBLERemoteService* service = client_->getService(kServiceUUID);
         if (!service) {
           Serial.println("[BLE] service not found");
           error_ = Error::ServiceNotFound;
@@ -259,9 +259,9 @@ void QRBLEClient::update() {
         }
         Serial.println("[BLE] service matched");
 
-        BLERemoteCharacteristic* status = service->getCharacteristic(kStatusUUID);
-        BLERemoteCharacteristic* meta = service->getCharacteristic(kMetadataUUID);
-        BLERemoteCharacteristic* data = service->getCharacteristic(kDataUUID);
+        NimBLERemoteCharacteristic* status = service->getCharacteristic(kStatusUUID);
+        NimBLERemoteCharacteristic* meta = service->getCharacteristic(kMetadataUUID);
+        NimBLERemoteCharacteristic* data = service->getCharacteristic(kDataUUID);
         if (!status || !meta || !data) {
           Serial.println("[BLE] characteristic not found");
           error_ = Error::SubscribeFailed;
@@ -270,20 +270,28 @@ void QRBLEClient::update() {
           break;
         }
 
-        status->registerForNotify(
-            [this](BLERemoteCharacteristic*, uint8_t* p, size_t l, bool) {
+        if (!status->subscribe(true, [this](NimBLERemoteCharacteristic*,
+                                            uint8_t* p, size_t l, bool) {
               onStatusNotify(p, l);
-            });
-        Serial.println("[BLE] subscribed STATUS");
-        meta->registerForNotify(
-            [this](BLERemoteCharacteristic*, uint8_t* p, size_t l, bool) {
+            })) {
+          Serial.println("[BLE] subscribe STATUS failed");
+        } else {
+          Serial.println("[BLE] subscribed STATUS");
+        }
+        if (!meta->subscribe(true, [this](NimBLERemoteCharacteristic*,
+                                          uint8_t* p, size_t l, bool) {
               onMetadataNotify(p, l);
-            });
-        data->registerForNotify(
-            [this](BLERemoteCharacteristic*, uint8_t* p, size_t l, bool) {
+            })) {
+          Serial.println("[BLE] subscribe METADATA failed");
+        }
+        if (!data->subscribe(true, [this](NimBLERemoteCharacteristic*,
+                                          uint8_t* p, size_t l, bool) {
               onDataNotify(p, l);
-            });
-        Serial.println("[BLE] subscribed DATA");
+            })) {
+          Serial.println("[BLE] subscribe DATA failed");
+        } else {
+          Serial.println("[BLE] subscribed DATA");
+        }
 
         // METADATA tambien puede ser leida (no solo notificada).
         const std::string m = meta->readValue();
@@ -345,13 +353,11 @@ void QRBLEClient::update() {
         statusChanged_ = false;
       }
       unlock();
-      if (changed) {
-        if (status == "PAYLOAD_TOO_LARGE") {
-          error_ = Error::PayloadTooLarge;
-          teardown();
-          phase_ = Phase::Failed;
-          break;
-        }
+      if (changed && status == "PAYLOAD_TOO_LARGE") {
+        error_ = Error::PayloadTooLarge;
+        teardown();
+        phase_ = Phase::Failed;
+        break;
       }
       if (firstChunk || (changed && status == "TRANSFER_START")) {
         lastChunkMs_ = millis();
@@ -464,8 +470,10 @@ void QRBLEClient::teardown() {
     scan_->stop();
     scanning_ = false;
   }
-  if (client_ && client_->isConnected()) {
-    client_->disconnect();
+  if (client_) {
+    if (client_->isConnected()) client_->disconnect();
+    NimBLEDevice::deleteClient(client_);
+    client_ = nullptr;
   }
   lock();
   chunks_.clear();
@@ -478,12 +486,8 @@ void QRBLEClient::teardown() {
   found_ = false;
   unlock();
 
-  if (client_) {
-    delete client_;
-    client_ = nullptr;
-  }
   if (bleOn_) {
-    BLEDevice::deinit(false);
+    NimBLEDevice::deinit(true);
     bleOn_ = false;
   }
 }
