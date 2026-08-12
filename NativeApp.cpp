@@ -24,7 +24,7 @@ constexpr uint8_t kBlack = 15;
 enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_seed, vault_actions, length, keyboard, review, plain_qr,
                     seedqr, public_key, public_key_qr, entropy_length, entropy, dice,
                     security_warning, vault_password, vault_result,
-                    vault_label, address_explorer, address_qr,
+                    vault_label, address_explorer, address_index_input, address_qr,
                     vault_list, vault_unlock, vault_loaded,
                     session_menu, session_meta_list, session_seed_list,
                     delete_confirm, discard_confirm, diagnostics };
@@ -79,6 +79,12 @@ constexpr Rect kAddressMinus{20, 545, 145, 70};
 constexpr Rect kAddressIndex{185, 545, 170, 70};
 constexpr Rect kAddressPlus{375, 545, 145, 70};
 constexpr Rect kAddressProfile{20, 640, 500, 75};
+constexpr Rect kDigitKey[10] = {{40, 235, 145, 80}, {200, 235, 145, 80},
+                                {360, 235, 145, 80}, {40, 330, 145, 80},
+                                {200, 330, 145, 80}, {360, 330, 145, 80},
+                                {40, 425, 145, 80}, {200, 425, 145, 80},
+                                {360, 425, 145, 80}, {200, 520, 145, 80}};
+constexpr Rect kDigitDelete{40, 520, 145, 80};
 constexpr Rect kVaultReveal{120, 620, 300, 75};
 constexpr Rect kPassMode{20, 600, 150, 70};
 constexpr Rect kPassSpace{185, 600, 170, 70};
@@ -197,6 +203,7 @@ int8_t activeLoadedSeed = -1;
 String activeAddress;
 uint8_t addressChange = 0;
 uint32_t addressIndex = 0;
+char indexBuffer[7] = {};
 QRCode addressQr;
 uint8_t addressQrBuffer[256] = {};
 
@@ -2082,6 +2089,35 @@ void drawAddressExplorer() {
   buttonOn(page, kBack, "MENU SEED", true, focusIndex == 5, Icon::home);
   buttonOn(page, kAction, "QR DIRECCION", activeAddress.length(), focusIndex == 6,
            Icon::qr);
+  textStyle(page, 1); page.setTextDatum(MC_DATUM);
+  page.drawString("Toca el indice para ir a uno concreto (0-999999)", 270, 765);
+  page.setTextDatum(TL_DATUM);
+  fullRefresh();
+}
+
+void updateAddressIndexDynamic() {
+  M5EPD_Canvas field(&M5.EPD);
+  if (field.createCanvas(500, 52)) {
+    field.fillCanvas(kWhite); field.drawRoundRect(0, 0, 500, 52, 8, kBlack);
+    textStyle(field, 2); field.setCursor(15, 9);
+    field.print(indexBuffer[0] ? indexBuffer : "0");
+    field.pushCanvas(20, 165, UPDATE_MODE_A2); field.deleteCanvas();
+  }
+  updateButton(kDigitDelete, "BORRAR", indexBuffer[0], false, Icon::back, UPDATE_MODE_A2);
+  updateButton(kAction, "IR A INDICE", indexBuffer[0], focusIndex == 1, Icon::check, UPDATE_MODE_A2);
+}
+
+void drawAddressIndexInput() {
+  blankPage();
+  title("IR A INDICE", "Escribe el numero de indice (0-999999)");
+  page.drawRoundRect(20, 165, 500, 52, 8, kBlack);
+  textStyle(page, 2); page.setCursor(35, 174);
+  page.print(indexBuffer[0] ? indexBuffer : "0");
+  for (uint8_t i = 0; i < 10; ++i)
+    buttonOn(page, kDigitKey[i], String(i == 9 ? 0 : i + 1).c_str());
+  buttonOn(page, kDigitDelete, "BORRAR", indexBuffer[0], false, Icon::back);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, "IR A INDICE", indexBuffer[0], focusIndex == 1, Icon::check);
   fullRefresh();
 }
 
@@ -2174,6 +2210,7 @@ void drawScreen() {
     case Screen::session_seed_list: drawSessionSeedList(); break;
     case Screen::delete_confirm: drawDeleteConfirm(); break;
     case Screen::address_explorer: drawAddressExplorer(); break;
+    case Screen::address_index_input: drawAddressIndexInput(); break;
     case Screen::address_qr: drawAddressQr(); break;
     case Screen::discard_confirm: drawDiscardConfirm(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
@@ -2358,6 +2395,11 @@ void updateFocusButton(uint8_t index) {
       else updateButton(kAction, "QR DIRECCION", activeAddress.length(), index == focusIndex, Icon::qr);
       break;
     }
+    case Screen::address_index_input:
+      updateButton(index == 0 ? kBack : kAction,
+          index == 0 ? "CANCELAR" : "IR A INDICE",
+          index == 0 || indexBuffer[0], index == focusIndex,
+          index == 0 ? Icon::none : Icon::check); break;
     case Screen::address_qr:
       updateButton(kAction, "VOLVER AL EXPLORADOR", true, true); break;
     case Screen::discard_confirm:
@@ -2390,6 +2432,7 @@ void moveFocus(int direction) {
            screen == Screen::security_warning || screen == Screen::vault_password ||
            screen == Screen::vault_label || screen == Screen::vault_unlock ||
            screen == Screen::passphrase_input ||
+           screen == Screen::address_index_input ||
            screen == Screen::delete_confirm || screen == Screen::discard_confirm) count = 2;
   else if (screen == Screen::address_explorer) count = 7;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
@@ -2798,6 +2841,10 @@ void click(int x, int y) {
     else if (kAddressChange.contains(x, y) && addressChange != 1) { addressChange = 1; changed = true; }
     else if (kAddressMinus.contains(x, y) && addressIndex > 0) { --addressIndex; changed = true; }
     else if (kAddressPlus.contains(x, y) && addressIndex < 999999) { ++addressIndex; changed = true; }
+    else if (kAddressIndex.contains(x, y)) {
+      memset(indexBuffer, 0, sizeof(indexBuffer));
+      screen = Screen::address_index_input; focusIndex = 0; drawScreen(); return;
+    }
     else if (kAddressProfile.contains(x, y)) {
       publicKeyProfile = (publicKeyProfile + 1) % kPublicProfileCount; changed = true;
     } else if ((kAddressValue.contains(x, y) || kAction.contains(x, y)) && buildAddressQr()) {
@@ -2808,6 +2855,26 @@ void click(int x, int y) {
     if (changed) { updateAddress(); drawAddressExplorer(); }
   } else if (screen == Screen::address_qr) {
     if (kAction.contains(x, y)) { screen = Screen::address_explorer; focusIndex = 6; drawScreen(); }
+  } else if (screen == Screen::address_index_input) {
+    for (uint8_t i = 0; i < 10; ++i) if (kDigitKey[i].contains(x, y)) {
+      const char digit = i == 9 ? '0' : static_cast<char>('1' + i);
+      const size_t len = strlen(indexBuffer);
+      if (len < 6) { indexBuffer[len] = digit; indexBuffer[len + 1] = '\0'; updateAddressIndexDynamic(); }
+      return;
+    }
+    if (kDigitDelete.contains(x, y) && indexBuffer[0]) {
+      indexBuffer[strlen(indexBuffer) - 1] = '\0'; updateAddressIndexDynamic();
+    } else if (kAction.contains(x, y) && indexBuffer[0]) {
+      uint32_t value = 0;
+      for (size_t i = 0; indexBuffer[i]; ++i) value = value * 10 + (indexBuffer[i] - '0');
+      addressIndex = value > 999999 ? 999999 : value;
+      memset(indexBuffer, 0, sizeof(indexBuffer));
+      updateAddress();
+      screen = Screen::address_explorer; focusIndex = 3; drawScreen();
+    } else if (kBack.contains(x, y)) {
+      memset(indexBuffer, 0, sizeof(indexBuffer));
+      screen = Screen::address_explorer; focusIndex = 3; drawScreen();
+    }
   } else if (screen == Screen::discard_confirm) {
     if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = 4; drawScreen(); }
     else if (kAction.contains(x, y)) {
@@ -2910,6 +2977,9 @@ void activateFocus() {
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::address_qr) {
     click(kAction.x + 5, kAction.y + 5);
+  } else if (screen == Screen::address_index_input) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::discard_confirm) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
