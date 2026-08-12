@@ -21,6 +21,7 @@ struct TxOutput {
   uint8_t scriptLen = 0;
   uint8_t script[80] = {};            // scriptPubKey
   String address;                     // direccion o "OP_RETURN"
+  bool isChange = false;              // tiene ruta de derivacion (cambio a la wallet)
 };
 
 struct TxInput {
@@ -38,6 +39,9 @@ struct ParsedTx {
   uint32_t locktime = 0;
   uint64_t totalOut = 0;
   uint64_t totalIn = 0;
+  uint64_t totalPay = 0;              // salidas sin ruta de derivacion (pago)
+  uint64_t totalChange = 0;           // salidas con ruta de derivacion (cambio)
+  bool hasChangeInfo = false;         // el PSBT marca al menos una salida como cambio
   bool inputsComplete = false;        // todas las entradas tienen monto
   int64_t fee = 0;                    // totalIn - totalOut (si inputsComplete)
 };
@@ -227,12 +231,39 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
     }
   }
 
+  // Mapas de salida: detectar el cambio (ruta de derivacion BIP32, clave 0x02).
+  for (size_t outIdx = 0; outIdx < tx.outputs.size(); ++outIdx) {
+    while (i < data.size()) {
+      n = readVarint(data.data() + i, data.size() - i, keyLen);
+      if (!n) return false;
+      i += n;
+      if (keyLen == 0) break;               // fin del mapa de salida
+      if (data.size() - i < keyLen) return false;
+      const uint8_t* key = data.data() + i; i += keyLen;
+      n = readVarint(data.data() + i, data.size() - i, valLen);
+      if (!n) return false;
+      i += n;
+      if (data.size() - i < valLen) return false;
+      i += valLen;
+      if (keyLen >= 1 && key[0] == 0x02) {
+        tx.outputs[outIdx].isChange = true;
+        tx.hasChangeInfo = true;
+      }
+    }
+  }
+
   // Totales y comision.
   tx.totalIn = 0;
   tx.inputsComplete = true;
   for (const auto& in : tx.inputs) {
     if (!in.amountKnown) { tx.inputsComplete = false; break; }
     tx.totalIn += in.amount;
+  }
+  tx.totalPay = 0;
+  tx.totalChange = 0;
+  for (const auto& o : tx.outputs) {
+    if (o.isChange) tx.totalChange += o.value;
+    else tx.totalPay += o.value;
   }
   tx.fee = tx.inputsComplete ? static_cast<int64_t>(tx.totalIn) - static_cast<int64_t>(tx.totalOut)
                              : 0;
@@ -306,7 +337,8 @@ inline bool self_test() {
   if (!parsePsbt(data, tx)) return false;
   return tx.version == 2 && tx.inputs.size() == 1 && tx.outputs.size() == 1 &&
          tx.totalOut == 1000 && tx.inputsComplete && tx.totalIn == 1000 &&
-         tx.fee == 0 && tx.outputs[0].address.startsWith("1");
+         tx.fee == 0 && tx.totalPay == 1000 && tx.totalChange == 0 &&
+         tx.outputs[0].address.startsWith("1");
 }
 
 }  // namespace psbt

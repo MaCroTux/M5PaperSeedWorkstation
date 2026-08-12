@@ -2586,48 +2586,62 @@ bool buildWifiQr() {
                          wifiServer.wifiQrText().c_str()) == 0;
 }
 
-void drawTxInfo() {
-  title("TRANSACCION", "PSBT decodificado (sin firmar)");
-  textStyle(page, 2);
-  int y = 165;
-  page.setCursor(30, y);
-  page.printf("Entradas: %u   Salidas: %u", static_cast<unsigned>(parsedTx.inputs.size()),
-              static_cast<unsigned>(parsedTx.outputs.size()));
-  y += 42;
-  page.setCursor(30, y);
-  page.printf("Total salidas: %s BTC", psbt::formatSats(parsedTx.totalOut).c_str());
-  y += 42;
-  if (parsedTx.inputsComplete) {
-    page.setCursor(30, y);
-    page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
-    y += 42;
-    page.setCursor(30, y);
-    page.printf("Total a gastar: %s BTC", psbt::formatSats(parsedTx.totalIn).c_str());
-    y += 42;
-  } else {
-    page.setCursor(30, y); page.println("Comision: desconocida (sin UTXOs)");
-    y += 42;
+uint8_t drawGroupedAddress(M5EPD_Canvas& canvas, const String& addr, int cx, int topY,
+                           uint8_t size, int lineHeight) {
+  textStyle(canvas, size);
+  canvas.setTextDatum(TC_DATUM);
+  String lines[8]; uint8_t lineCount = 0;
+  for (unsigned position = 0; position < addr.length(); position += 4) {
+    if (lineCount >= 8) break;
+    if (lines[lineCount].length()) lines[lineCount] += ' ';
+    lines[lineCount] += addr.substring(position, position + 4);
+    if (((position / 4) + 1) % 4 == 0 && position + 4 < addr.length()) ++lineCount;
   }
-  page.drawLine(20, y, 520, y, kBlack);
-  y += 12;
+  if (lines[lineCount].length()) ++lineCount;
+  for (uint8_t i = 0; i < lineCount; ++i)
+    canvas.drawString(lines[i], cx, topY + i * lineHeight);
+  canvas.setTextDatum(TL_DATUM);
+  return lineCount;
+}
+
+void drawTxInfo() {
+  title("TRANSACCION", "PSBT sin firmar - verifica con calma");
   textStyle(page, 2);
-  page.setCursor(30, y); page.println("Salidas:");
-  y += 34;
-  const size_t maxShow = 5;
+  int y = 162;
+  page.setCursor(20, y);
+  page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
+  y += 44;
+  page.setCursor(20, y);
+  if (parsedTx.hasChangeInfo)
+    page.printf("Cambio: %s BTC", psbt::formatSats(parsedTx.totalChange).c_str());
+  else
+    page.print("Cambio: no identificado");
+  y += 44;
+  page.setCursor(20, y);
+  if (parsedTx.inputsComplete)
+    page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
+  else
+    page.print("Comision: desconocida");
+  y += 44;
+  page.drawLine(20, y, 520, y, kBlack);
+  y += 14;
+
+  const size_t maxShow = 3;
   for (size_t i = 0; i < parsedTx.outputs.size() && i < maxShow; ++i) {
     const auto& o = parsedTx.outputs[i];
-    page.setCursor(30, y);
-    page.printf("#%u  %s BTC", static_cast<unsigned>(i + 1), psbt::formatSats(o.value).c_str());
-    y += 34;
-    textStyle(page, 1);
-    page.setCursor(30, y);
-    page.print(o.address.length() ? o.address : "direccion no estandar");
-    y += 28;
-    textStyle(page, 2);
+    if (y > 730) break;
+    page.setCursor(20, y);
+    page.printf("%s: %s BTC", o.isChange ? "CAMBIO" : "PAGO",
+                psbt::formatSats(o.value).c_str());
+    y += 42;
+    const String addr = o.address.length() ? o.address : "direccion no estandar";
+    const uint8_t lines = drawGroupedAddress(page, addr, 270, y, 3, 46);
+    y += lines * 46 + 14;
   }
   if (parsedTx.outputs.size() > maxShow) {
-    page.setCursor(30, y);
-    page.printf("... y %u salidas mas", static_cast<unsigned>(parsedTx.outputs.size() - maxShow));
+    page.setCursor(20, y);
+    page.printf("... y %u salidas mas",
+                static_cast<unsigned>(parsedTx.outputs.size() - maxShow));
   }
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
 }
