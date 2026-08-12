@@ -194,6 +194,52 @@ inline bool sighashSegwit(const psbt::ParsedTx& tx, size_t inputIndex,
   return true;
 }
 
+// Determina el proposito (44/49/84/86) a partir del scriptPubKey.
+inline bool scriptPurpose(const uint8_t* script, size_t len, uint32_t& purpose) {
+  if (len == 22 && script[0] == 0x00 && script[1] == 0x14) { purpose = 84; return true; }  // P2WPKH
+  if (len == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14 &&
+      script[23] == 0x88 && script[24] == 0xac) { purpose = 44; return true; }           // P2PKH
+  if (len == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87) {
+    purpose = 49; return true;                                                           // P2SH
+  }
+  if (len == 34 && script[0] == 0x51 && script[1] == 0x20) { purpose = 86; return true; }  // P2TR
+  return false;
+}
+
+// Direccion de una clave publica comprimida segun el proposito.
+inline String pubkeyToAddress(const uint8_t pub[33], uint32_t purpose) {
+  uint8_t kh[20] = {}, redeem[22] = {}, rh[20] = {};
+  bitcoin_address::hash160(pub, 33, kh);
+  String r;
+  if (purpose == 84) r = bitcoin_address::segwit_address(0, kh, 20);
+  else if (purpose == 44) r = bitcoin_address::base58_address(0, kh);
+  else if (purpose == 49) {
+    redeem[0] = 0x00; redeem[1] = 0x14; memcpy(redeem + 2, kh, 20);
+    bitcoin_address::hash160(redeem, 22, rh);
+    r = bitcoin_address::base58_address(5, rh);
+  }
+  bitcoin_hd::wipe(kh, 20); bitcoin_hd::wipe(redeem, 22); bitcoin_hd::wipe(rh, 20);
+  return r;
+}
+
+// Comprueba si una salida con ruta de derivacion pertenece a nuestra semilla.
+// Devuelve true si pudo derivar/verificar, y en *isOurs* si coincide la direccion.
+inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words,
+                                size_t count, const char* passphrase, bool& isOurs) {
+  isOurs = false;
+  uint32_t purpose = 0;
+  if (!out.hasDerivation || !scriptPurpose(out.script, out.scriptLen, purpose)) return false;
+  uint8_t key[32] = {}, pub[33] = {};
+  if (!deriveKey(words, count, purpose, out.derivFpr, out.derivPath, passphrase, key, pub)) {
+    bitcoin_hd::wipe(key, 32); return false;
+  }
+  bitcoin_hd::wipe(key, 32);
+  const String derived = pubkeyToAddress(pub, purpose);
+  bitcoin_hd::wipe(pub, 33);
+  isOurs = derived.length() > 0 && derived == out.address;
+  return derived.length() > 0;
+}
+
 // Self-test: RFC6979 + ECDSA secp256k1 con el vector del RFC 6979 (SHA-256,
 // "sample"). Valida la generacion de nonce determinista y la firma.
 inline bool self_test() {

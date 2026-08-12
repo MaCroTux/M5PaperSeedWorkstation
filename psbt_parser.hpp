@@ -22,6 +22,9 @@ struct TxOutput {
   uint8_t script[80] = {};            // scriptPubKey
   String address;                     // direccion o "OP_RETURN"
   bool isChange = false;              // tiene ruta de derivacion (cambio a la wallet)
+  bool hasDerivation = false;         // ruta BIP32 presente (clave 0x02)
+  uint8_t derivFpr[4] = {};           // fingerprint del padre
+  std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
 };
 
 struct TxInput {
@@ -271,10 +274,22 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
       if (!n) return false;
       i += n;
       if (data.size() - i < valLen) return false;
-      i += valLen;
-      if (keyLen >= 1 && key[0] == 0x02) {
+      const uint8_t* val = data.data() + i; i += valLen;
+      if (keyLen >= 1 && key[0] == 0x02 && valLen >= 4) {
         tx.outputs[outIdx].isChange = true;
         tx.hasChangeInfo = true;
+        tx.outputs[outIdx].hasDerivation = true;
+        memcpy(tx.outputs[outIdx].derivFpr, val, 4);
+        tx.outputs[outIdx].derivPath.clear();
+        size_t off = 4;
+        while (off + 4 <= valLen) {
+          uint32_t idx = static_cast<uint32_t>(val[off]) |
+                         (static_cast<uint32_t>(val[off + 1]) << 8) |
+                         (static_cast<uint32_t>(val[off + 2]) << 16) |
+                         (static_cast<uint32_t>(val[off + 3]) << 24);
+          tx.outputs[outIdx].derivPath.push_back(idx);
+          off += 4;
+        }
       }
     }
   }

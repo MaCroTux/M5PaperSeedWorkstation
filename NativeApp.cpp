@@ -2608,36 +2608,58 @@ uint8_t drawGroupedAddress(M5EPD_Canvas& canvas, const String& addr, int cx, int
 void drawTxInfo() {
   title("TRANSACCION", "PSBT sin firmar - verifica con calma");
   textStyle(page, 2);
-  int y = 162;
-  page.setCursor(20, y);
-  page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
-  y += 44;
+  int y = 158;
+  page.setCursor(20, y); page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
+  y += 42;
   page.setCursor(20, y);
   if (parsedTx.hasChangeInfo)
     page.printf("Cambio: %s BTC", psbt::formatSats(parsedTx.totalChange).c_str());
   else
     page.print("Cambio: no identificado");
-  y += 44;
+  y += 42;
   page.setCursor(20, y);
   if (parsedTx.inputsComplete)
     page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
   else
     page.print("Comision: desconocida");
-  y += 44;
-  page.drawLine(20, y, 520, y, kBlack);
-  y += 14;
+  y += 50;
 
-  const size_t maxShow = 3;
+  const size_t maxShow = 2;
   for (size_t i = 0; i < parsedTx.outputs.size() && i < maxShow; ++i) {
     const auto& o = parsedTx.outputs[i];
-    if (y > 730) break;
-    page.setCursor(20, y);
+    if (y > 610) break;
+    const String addr = o.address.length() ? o.address : "direccion no estandar";
+    const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
+
+    // Aviso de pertenencia para el cambio.
+    String notice;
+    bool ours = false;
+    if (o.isChange) {
+      if (!fingerprintValid) {
+        notice = "CAMBIO: sin semilla cargada";
+      } else {
+        bool verified = tx_sign::outputMatchesWallet(
+            o, words, targetWords, passphraseActive ? activePassphrase : "", ours);
+        if (!verified) notice = "CAMBIO: no verificable";
+        else if (ours) notice = "CAMBIO: es tu direccion";
+        else notice = "CAMBIO: NO TE PERTENECE";
+      }
+    }
+
+    const int boxH = 40 + addrLines * 46 + (notice.length() ? 34 : 0) + 16;
+    page.drawRoundRect(20, y, 500, boxH, 8, kBlack);
+    textStyle(page, 2);
+    page.setCursor(34, y + 8);
     page.printf("%s: %s BTC", o.isChange ? "CAMBIO" : "PAGO",
                 psbt::formatSats(o.value).c_str());
-    y += 42;
-    const String addr = o.address.length() ? o.address : "direccion no estandar";
-    const uint8_t lines = drawGroupedAddress(page, addr, 270, y, 3, 46);
-    y += lines * 46 + 14;
+    drawGroupedAddress(page, addr, 270, y + 42, 3, 46);
+    if (notice.length()) {
+      textStyle(page, 2);
+      page.setTextDatum(MC_DATUM);
+      page.drawString(notice, 270, y + boxH - 22);
+      page.setTextDatum(TL_DATUM);
+    }
+    y += boxH + 14;
   }
   if (parsedTx.outputs.size() > maxShow) {
     page.setCursor(20, y);
