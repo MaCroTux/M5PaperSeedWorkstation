@@ -3445,15 +3445,31 @@ void handleVaultOpen(const String& name) {
   Serial.flush();
 }
 
-// Feedback de progreso del PBKDF2 durante M5VAULT OPEN (consola muestra el %).
+// Feedback de progreso del PBKDF2 (en pantalla + por serial M5PROG).
 void serialProgress(uint32_t done, uint32_t total) {
   const uint8_t pct = total ? static_cast<uint8_t>((static_cast<uint64_t>(done) * 100) / total) : 100;
+  if (pct != progressPercent) {
+    progressPercent = pct;
+    drawProgressBar(340, pct);
+  }
   static uint8_t last = 255;
   if (pct != last) {
     last = pct;
     Serial.printf("M5PROG %u\n", pct);
     Serial.flush();
   }
+}
+
+// Pantalla de progreso en el dispositivo durante el desbloqueo por serial.
+void drawSerialVaultProgress() {
+  blankPage();
+  title("ABRIR VAULT", "Descifrando y verificando...");
+  textStyle(page, 2);
+  page.setCursor(30, 260); page.println(lang::tr("No retires la tarjeta SD."));
+  page.setCursor(30, 300); page.println(lang::tr("Derivando clave (PBKDF2)..."));
+  fullRefresh(UPDATE_MODE_DU4);
+  drawProgressBar(340, 0);
+  progressPercent = 0;
 }
 
 void handleVaultPass(const String& password) {
@@ -3467,6 +3483,9 @@ void handleVaultPass(const String& password) {
 
   strncpy(vaultPassword, password.c_str(), sizeof(vaultPassword) - 1);
   vaultPassword[sizeof(vaultPassword) - 1] = 0;
+
+  // Feedback en el dispositivo durante el PBKDF2.
+  drawSerialVaultProgress();
 
   if (path.endsWith(".vlt")) {
     uint16_t recovered[24] = {};
@@ -3486,11 +3505,13 @@ void handleVaultPass(const String& password) {
     if (!valid) {
       vaultUnlockFailed();
       Serial.printf("M5ERR %s\n", resultToErr(result));
+      screen = Screen::vault_unlock; focusIndex = 0; drawVaultUnlock();
     } else {
       vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
       lastUserActivity = millis();
       Serial.printf("M5OK vault=%s fingerprint=%s words=%u\n",
                     shortName.c_str(), activeFingerprint + 4, wordCount);
+      screen = Screen::active_seed; focusIndex = 0; drawActiveSeed();
     }
   } else if (path.endsWith(".svm")) {
     uint8_t master[32] = {}, vaultId[4] = {};
@@ -3501,6 +3522,7 @@ void handleVaultPass(const String& password) {
     if (result != encrypted_seed_store::Result::ok) {
       vaultUnlockFailed();
       Serial.printf("M5ERR %s\n", resultToErr(result));
+      screen = Screen::vault_unlock; focusIndex = 0; drawVaultUnlock();
     } else {
       memcpy(sessionMasterKey, master, 32);
       memcpy(sessionVaultId, vaultId, 4);
@@ -3511,6 +3533,7 @@ void handleVaultPass(const String& password) {
       lastUserActivity = millis();
       const uint8_t loaded = loadAllSessionSeeds();
       Serial.printf("M5OK vault=%s seeds=%u\n", shortName.c_str(), loaded);
+      screen = Screen::active_seed; focusIndex = 0; drawActiveSeed();
     }
     encrypted_seed_store::wipe(master, sizeof(master));
   } else {
@@ -3571,6 +3594,8 @@ void handleTxLoad(const String& name) {
   if (txIsMultisig) Serial.printf(" multisig=%u-of-%u", txMsInfo.m, txMsInfo.n);
   Serial.println();
   Serial.flush();
+  // Mostrar la transaccion en el dispositivo para verificarla antes de firmar.
+  afterPsbtParsed(true);
 }
 
 void handleTxSign() {
