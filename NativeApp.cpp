@@ -2841,16 +2841,16 @@ void drawAnimatedQr() {
                 static_cast<unsigned>(bbqrTotalParts),
                 static_cast<unsigned>(bbqrIndex), bbqrSingle);
   memset(bbqrQrBuffer, 0, sizeof(bbqrQrBuffer));
-  static const uint16_t kAlphaCapL[] = {
-      25, 47, 77, 114, 154, 195, 224, 279, 335, 395,
-      468, 535, 619, 667, 758, 854, 938, 1046, 1153, 1249,
-      1352, 1460, 1588, 1704, 1853, 1990, 2132, 2223, 2369, 2520,
-      2677, 2840, 3009, 3183, 3351, 3537, 3729, 3927, 4087, 4296};
+  static const uint16_t kByteCapL[] = {
+      17, 32, 53, 78, 106, 134, 154, 192, 230, 271,
+      321, 367, 425, 458, 520, 586, 644, 718, 792, 858,
+      929, 1003, 1091, 1171, 1273, 1367, 1465, 1528, 1628, 1732,
+      1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953};
   uint8_t version = 40;
   for (uint8_t v = 1; v <= 40; ++v) {
-    if (frame.length() <= kAlphaCapL[v - 1]) { version = v; break; }
+    if (frame.length() <= kByteCapL[v - 1]) { version = v; break; }
   }
-  qrcode_initText(&bbqrQr, bbqrQrBuffer, version, ECC_LOW, frame.c_str());
+  const int qrRc = qrcode_initText(&bbqrQr, bbqrQrBuffer, version, ECC_LOW, frame.c_str());
 
   blankPage();
   title("BLUEWALLET", "Escanea el QR animado (BBQr)");
@@ -2862,6 +2862,13 @@ void drawAnimatedQr() {
   const int quiet = module * 4;
   const int ox = (kWidth - px) / 2;
   const int oy = 160;
+  Serial.printf("[QR] payload length=%u\n", static_cast<unsigned>(frame.length()));
+  Serial.printf("[QR] matrix size=%u\n", static_cast<unsigned>(bbqrQr.size));
+  Serial.printf("[QR] module pixels=%d\n", module);
+  Serial.printf("[QR] rendered pixels=%d\n", px);
+  Serial.printf("[QR] quiet zone=4\n");
+  Serial.printf("[QR] origin=%d,%d\n", ox - quiet, oy - quiet);
+  Serial.printf("[QR] ECC=L rc=%d version=%u\n", qrRc, version);
   page.fillRect(ox - quiet, oy - quiet, px + 2 * quiet, px + 2 * quiet, kWhite);
   for (uint8_t yy = 0; yy < bbqrQr.size; ++yy)
     for (uint8_t xx = 0; xx < bbqrQr.size; ++xx)
