@@ -2738,13 +2738,13 @@ bool buildSignedTxQr() {
       321, 367, 425, 458, 520, 586, 644, 718, 792, 858,
       929, 1003, 1091, 1171, 1273, 1367, 1465, 1528, 1628, 1732,
       1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953};
-  const uint16_t len = signedPsbtBase64.length();
+  const uint16_t len = signedTxHex.length();
   uint8_t version = 40;
   for (uint8_t v = 1; v <= 40; ++v) {
     if (len <= kByteCapL[v - 1]) { version = v; break; }
   }
   return qrcode_initText(&signedTxQr, signedTxQrBuffer, version, ECC_LOW,
-                         signedPsbtBase64.c_str()) == 0;
+                         signedTxHex.c_str()) == 0;
 }
 
 void drawSignedTx() {
@@ -2757,13 +2757,15 @@ void drawSignedTx() {
     centeredFit(page, "tenga entradas P2WPKH con ruta.", 445);
   } else {
     title("TX FIRMADA", "Escanear con BlueWallet para emitir");
-    int module = 500 / signedTxQr.size;
+    const int qrSize = signedTxQr.size;
+    int module = kWidth / (qrSize + 8);  // 4 modulos de margen blanco a cada lado
     if (module < 2) module = 2;
     if (module > 8) module = 8;
-    const int px = signedTxQr.size * module;
+    const int px = qrSize * module;
+    const int quiet = module * 4;
     const int ox = (kWidth - px) / 2;
     const int oy = 175;
-    page.fillRect(ox - 12, oy - 12, px + 24, px + 24, kWhite);
+    page.fillRect(ox - quiet, oy - quiet, px + 2 * quiet, px + 2 * quiet, kWhite);
     for (uint8_t yy = 0; yy < signedTxQr.size; ++yy)
       for (uint8_t xx = 0; xx < signedTxQr.size; ++xx)
         if (qrcode_getModule(&signedTxQr, xx, yy))
@@ -2846,8 +2848,10 @@ void processSerialTransaction(const String& payload) {
     screen = Screen::tx_review;
     focusIndex = 0;
     drawTxReview();
+    showToast("PSBT recibido por serial");
   } else {
     Serial.println("[SERIAL] error: no es un PSBT valido (base64/hex/binario)");
+    showToast("Serial: no es un PSBT valido");
   }
 }
 
