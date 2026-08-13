@@ -17,17 +17,6 @@ namespace psbt {
 constexpr size_t kMaxInputs = 128;
 constexpr size_t kMaxOutputs = 256;
 
-struct TxOutput {
-  uint64_t value = 0;                 // satoshis
-  uint8_t scriptLen = 0;
-  uint8_t script[80] = {};            // scriptPubKey
-  String address;                     // direccion o "OP_RETURN"
-  bool isChange = false;              // tiene ruta de derivacion (cambio a la wallet)
-  bool hasDerivation = false;         // ruta BIP32 presente (clave 0x02)
-  uint8_t derivFpr[4] = {};           // fingerprint del padre
-  std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
-};
-
 struct PartialSig {
   uint8_t pub[33] = {};
   uint8_t sig[74] = {};
@@ -39,6 +28,20 @@ struct SignerInfo {
   uint8_t fpr[4] = {};
   std::vector<uint32_t> path;
   bool hasDerivation = false;
+};
+
+struct TxOutput {
+  uint64_t value = 0;                 // satoshis
+  uint8_t scriptLen = 0;
+  uint8_t script[80] = {};            // scriptPubKey
+  String address;                     // direccion o "OP_RETURN"
+  bool isChange = false;              // tiene ruta de derivacion (cambio a la wallet)
+  bool hasDerivation = false;         // ruta BIP32 presente (clave 0x02)
+  uint8_t derivFpr[4] = {};           // fingerprint del padre
+  std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
+  uint8_t witnessScript[256] = {};    // witnessScript (clave 0x01, P2WSH)
+  uint8_t witnessScriptLen = 0;
+  std::vector<SignerInfo> signers;    // derivaciones por pubkey (clave 0x02)
 };
 
 struct TxInput {
@@ -316,11 +319,17 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
       i += n;
       if (data.size() - i < valLen) return false;
       const uint8_t* val = data.data() + i; i += valLen;
-      if (keyLen >= 1 && key[0] == 0x02 && valLen >= 4) {
+      if (keyLen >= 1 && key[0] == 0x01 && valLen <= sizeof(tx.outputs[outIdx].witnessScript)) {
+        // witnessScript / redeemScript del output (P2WSH).
+        memcpy(tx.outputs[outIdx].witnessScript, val, static_cast<size_t>(valLen));
+        tx.outputs[outIdx].witnessScriptLen = static_cast<uint8_t>(valLen);
+      } else if (keyLen >= 1 && key[0] == 0x02 && valLen >= 4) {
+        // BIP32 derivation: key = {0x02}|{pubkey(33)}, value = {fpr(4)}|{path}.
+        uint8_t fpr[4]; memcpy(fpr, val, 4);
         tx.outputs[outIdx].isChange = true;
         tx.hasChangeInfo = true;
         tx.outputs[outIdx].hasDerivation = true;
-        memcpy(tx.outputs[outIdx].derivFpr, val, 4);
+        memcpy(tx.outputs[outIdx].derivFpr, fpr, 4);
         tx.outputs[outIdx].derivPath.clear();
         size_t off = 4;
         while (off + 4 <= valLen) {
@@ -330,6 +339,14 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
                          (static_cast<uint32_t>(val[off + 3]) << 24);
           tx.outputs[outIdx].derivPath.push_back(idx);
           off += 4;
+        }
+        if (keyLen >= 34) {
+          SignerInfo si;
+          memcpy(si.pub, key + 1, 33);
+          memcpy(si.fpr, fpr, 4);
+          si.path = tx.outputs[outIdx].derivPath;
+          si.hasDerivation = true;
+          tx.outputs[outIdx].signers.push_back(si);
         }
       }
     }

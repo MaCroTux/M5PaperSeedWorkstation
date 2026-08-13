@@ -78,14 +78,25 @@ inline bool detect(const psbt::ParsedTx& tx, MultisigInfo& info) {
   bool haveFirst = false;
   for (const auto& in : tx.inputs) {
     // El scriptPubKey del UTXO debe ser P2WSH: 0x00 0x20 <32 bytes>.
-    if (in.utxoScriptLen != 34 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x20)
+    if (in.utxoScriptLen != 34 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x20) {
+      Serial.printf("[MULTISIG] input no P2WSH (len=%u)\n",
+                    static_cast<unsigned>(in.utxoScriptLen));
       return false;
+    }
     MultisigScript ms;
-    if (!parseSortedMulti(in.witnessScript, in.witnessScriptLen, ms)) return false;
-    // El witnessScript debe coincidir con el hash del scriptPubKey.
+    if (!parseSortedMulti(in.witnessScript, in.witnessScriptLen, ms)) {
+      Serial.println("[MULTISIG] witnessScript no es sortedmulti");
+      return false;
+    }
+    // P2WSH: el scriptPubKey contiene el SHA256 (UNA sola ronda) del witnessScript.
     uint8_t h[32] = {};
-    tx_sign::sha256d(in.witnessScript, in.witnessScriptLen, h);
-    if (memcmp(h, in.utxoScript + 2, 32) != 0) return false;
+    mbedtls_sha256_ret(in.witnessScript, in.witnessScriptLen, h, 0);
+    if (memcmp(h, in.utxoScript + 2, 32) != 0) {
+      Serial.println("[MULTISIG] witnessScript hash mismatch");
+      return false;
+    }
+    Serial.printf("[MULTISIG] detected P2WSH policy=%u-of-%u pubkeys=%u\n",
+                  ms.m, ms.n, ms.n);
     if (!haveFirst) { firstM = ms.m; firstN = ms.n; haveFirst = true; }
     else if (ms.m != firstM || ms.n != firstN) return false;
   }
@@ -124,7 +135,7 @@ inline void matchSigners(const psbt::TxInput& in, const MultisigScript& ms,
       for (size_t s = 0; s < seeds.size(); ++s) {
         uint8_t key[32] = {}, pub[33] = {};
         if (tx_sign::deriveKey(seeds[s].indices, seeds[s].count, si.fpr, si.path,
-                               seeds[s].passphrase, key, pub)) {
+                               seeds[s].passphrase, key, pub, false)) {
           const bool ok = memcmp(pub, ms.keys[k], 33) == 0;
           bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(pub, 33);
           if (ok) {
@@ -267,7 +278,7 @@ inline SignResult signMultisig(const psbt::ParsedTx& tx,
       }
       if (!target || !tx_sign::deriveKey(seeds[seedIdx].indices, seeds[seedIdx].count,
                                           target->fpr, target->path,
-                                          seeds[seedIdx].passphrase, key, pub))
+                                          seeds[seedIdx].passphrase, key, pub, false))
         { bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(pub, 33); continue; }
       if (memcmp(pub, ms.keys[k], 33) != 0) {
         Serial.println("[MULTISIG] SIGNER VERIFICATION FAILED");

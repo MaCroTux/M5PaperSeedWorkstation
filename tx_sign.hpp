@@ -269,7 +269,8 @@ inline bool testECDSARoundtrip() {
 // (p.ej. m/84'/0'/0'/1/0), como hace BlueWallet.
 inline bool deriveKey(const uint16_t* words, size_t count,
                       const uint8_t fpr[4], const std::vector<uint32_t>& path,
-                      const char* passphrase, uint8_t outKey[32], uint8_t outPub[33]) {
+                      const char* passphrase, uint8_t outKey[32], uint8_t outPub[33],
+                      bool verbose = true) {
   uint8_t seed[64] = {};
   bitcoin_hd::Node master = {}, node = {};
   uint8_t masterFpr[4] = {};
@@ -279,10 +280,14 @@ inline bool deriveKey(const uint16_t* words, size_t count,
   }
   bitcoin_hd::fingerprint(master, masterFpr);
   if (memcmp(masterFpr, fpr, 4) != 0) {
-    Serial.printf("[SIGN] FPR mismatch (master): PSBT=%02X%02X%02X%02X semilla=%02X%02X%02X%02X pass=%s\n",
-                  fpr[0], fpr[1], fpr[2], fpr[3], masterFpr[0], masterFpr[1],
-                  masterFpr[2], masterFpr[3],
-                  (passphrase && passphrase[0]) ? "SI" : "NO");
+    // En la busqueda de seeds del Vault esto es normal (se prueban varias seeds);
+    // solo se loggea si lo pide el llamante (single-sig).
+    if (verbose) {
+      Serial.printf("[SIGN] FPR mismatch (master): PSBT=%02X%02X%02X%02X semilla=%02X%02X%02X%02X pass=%s\n",
+                    fpr[0], fpr[1], fpr[2], fpr[3], masterFpr[0], masterFpr[1],
+                    masterFpr[2], masterFpr[3],
+                    (passphrase && passphrase[0]) ? "SI" : "NO");
+    }
     bitcoin_hd::wipe(seed, sizeof(seed)); bitcoin_hd::wipe(&master, sizeof(master));
     bitcoin_hd::wipe(masterFpr, 4);
     return false;

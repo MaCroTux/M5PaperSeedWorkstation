@@ -2840,7 +2840,7 @@ void drawSignedMode() {
   blankPage();
   title("EMITIR", "Elige el metodo de salida");
   buttonOn(page, kMenu[0], "SPARROW (QR estatico)", true, focusIndex == 0, Icon::qr);
-  buttonOn(page, kMenu[1], "BLUEWALLET (QR animado)", true, focusIndex == 1, Icon::qr);
+  buttonOn(page, kMenu[1], "BLUEWALLET (QR animado)", !txIsMultisig, focusIndex == 1, Icon::qr);
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 2);
   fullRefresh();
 }
@@ -2946,50 +2946,128 @@ void buildMultisigSeedCandidates(std::vector<multisig::SeedCandidate>& out) {
 
 void drawMultisigConfirm() {
   blankPage();
-  title("MULTISIG TRANSACTION", "P2WSH sortedmulti (Sparrow)");
   const uint8_t m = txMsInfo.m, n = txMsInfo.n;
+  const String sub = String(lang::tr("Politica")) + ": " + String(m) + " " +
+                     lang::tr("de") + " " + String(n) + "  P2WSH";
+  title("MULTISIG TRANSACTION", sub.c_str());
 
   std::vector<multisig::SeedCandidate> seeds;
   buildMultisigSeedCandidates(seeds);
 
-  // Cuenta firmas existentes y claves del Vault disponibles.
+  // Firmas existentes, claves del Vault disponibles y signers.
   uint8_t existingSigs = 0, vaultKeys = 0;
+  String signerLines[multisig::kMaxKeys];
+  uint8_t signerCount = 0;
   if (!parsedTx.inputs.empty()) {
     const auto& in = parsedTx.inputs[0];
     multisig::MultisigScript ms;
     if (multisig::parseSortedMulti(in.witnessScript, in.witnessScriptLen, ms)) {
       int8_t matchByKey[multisig::kMaxKeys];
       multisig::matchSigners(in, ms, seeds, matchByKey);
-      for (uint8_t k = 0; k < ms.n; ++k) {
+      for (uint8_t k = 0; k < ms.n && signerCount < multisig::kMaxKeys; ++k) {
         const uint8_t* s; size_t sl;
-        if (multisig::findSig(in.partialSigs, ms.keys[k], &s, &sl)) existingSigs++;
-        else if (matchByKey[k] >= 0) vaultKeys++;
+        const bool hasSig = multisig::findSig(in.partialSigs, ms.keys[k], &s, &sl);
+        const bool inVault = matchByKey[k] >= 0;
+        if (hasSig) existingSigs++;
+        else if (inVault) vaultKeys++;
+        String fpr = "????????";
+        for (const auto& si : in.signers)
+          if (memcmp(si.pub, ms.keys[k], 33) == 0) {
+            char buf[9] = {};
+            snprintf(buf, sizeof(buf), "%02X%02X%02X%02X",
+                     si.fpr[0], si.fpr[1], si.fpr[2], si.fpr[3]);
+            fpr = buf;
+            break;
+          }
+        const char* mark = hasSig ? "=" : inVault ? ">" : ".";
+        signerLines[signerCount++] = String(mark) + " " + fpr +
+            (hasSig ? " (" + String(lang::tr("FIRMADO")) + ")"
+                    : inVault ? " (" + String(lang::tr("VAULT")) + ")"
+                              : " (" + String(lang::tr("EXTERNO")) + ")");
       }
     }
   }
 
   textStyle(page, 2);
-  int y = 175;
-  page.setCursor(25, y); page.printf(lang::tr("Politica: %u de %u"), m, n); y += 42;
-  page.setCursor(25, y); page.print(lang::tr("Tipo: Native SegWit P2WSH")); y += 42;
-  page.setCursor(25, y); page.print(lang::tr("Firmas existentes:")); page.setCursor(320, y); page.print(existingSigs); y += 42;
-  page.setCursor(25, y); page.print(lang::tr("Claves del Vault disponibles:")); page.setCursor(320, y); page.print(vaultKeys); y += 42;
-  page.setCursor(25, y); page.print(lang::tr("Necesarias:")); page.setCursor(320, y); page.print(m); y += 42;
+  int y = 158;
+  page.setCursor(20, y);
+  page.printf(lang::tr("Entradas: %u   Salidas: %u"),
+              static_cast<unsigned>(parsedTx.inputs.size()),
+              static_cast<unsigned>(parsedTx.outputs.size()));
+  y += 34;
+  page.setCursor(20, y);
+  page.printf(lang::tr("Pago: %s BTC"), psbt::formatSats(parsedTx.totalPay).c_str());
+  y += 34;
+  page.setCursor(20, y);
+  if (parsedTx.hasChangeInfo)
+    page.printf(lang::tr("Cambio: %s BTC"), psbt::formatSats(parsedTx.totalChange).c_str());
+  else
+    page.print(lang::tr("Cambio: no marcado"));
+  y += 34;
   if (parsedTx.inputsComplete) {
-    page.setCursor(25, y); page.printf(lang::tr("Comision: %s BTC"),
-        psbt::formatSats(parsedTx.fee).c_str()); y += 42;
+    page.setCursor(20, y);
+    page.printf(lang::tr("Comision: %s BTC"), psbt::formatSats(parsedTx.fee).c_str());
+    y += 34;
   }
-  page.setCursor(25, y); page.printf(lang::tr("Pago: %s BTC"),
-      psbt::formatSats(parsedTx.totalPay).c_str()); y += 42;
+  // Informacion multisig.
+  page.setCursor(20, y);
+  page.printf(lang::tr("Firmas: %u/%u"), existingSigs, m);
+  page.setCursor(240, y);
+  page.print(String(lang::tr("Vault:")) + " " + String(vaultKeys));
+  y += 32;
+  textStyle(page, 2);
+  for (uint8_t i = 0; i < signerCount; ++i) {
+    page.setCursor(20, y);
+    page.print(signerLines[i]);
+    y += 30;
+  }
+  y += 4;
+
+  // Direcciones (PAGO/CAMBIO) en recuadro, como la pantalla single-sig.
+  const size_t maxShow = 2;
+  size_t shown = 0;
+  for (size_t i = 0; i < parsedTx.outputs.size() && shown < maxShow; ++i) {
+    const auto& o = parsedTx.outputs[i];
+    if (y > 760) break;
+    const String addr = o.address.length() ? o.address : lang::tr("direccion no estandar");
+    const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
+    const String label = o.isChange ? lang::tr("CAMBIO") : lang::tr("PAGO");
+    const int boxH = 40 + addrLines * 46 + 16;
+    page.drawRoundRect(20, y, 500, boxH, 8, kBlack);
+    textStyle(page, 2);
+    page.setCursor(34, y + 8);
+    page.printf("%s: %s BTC", label.c_str(), psbt::formatSats(o.value).c_str());
+    drawGroupedAddress(page, addr, 270, y + 42, 3, 46);
+    y += boxH + 10;
+    shown++;
+  }
+  if (parsedTx.outputs.size() > shown) {
+    page.setCursor(20, y);
+    page.printf(lang::tr("... y %u salidas mas"),
+                static_cast<unsigned>(parsedTx.outputs.size() - shown));
+  }
 
   const bool enough = (existingSigs + vaultKeys) >= m;
   buttonOn(page, kBack, lang::tr("CANCELAR"), true, focusIndex == 0);
-  String signLabel = String(lang::tr("FIRMAR")) + " (" + String(vaultKeys) + ")";
+  String signLabel = String(lang::tr("FIRMAR CON ")) + String(vaultKeys) + " " + lang::tr("claves");
   buttonOn(page, kFirmar, signLabel.c_str(), enough, focusIndex == 1, Icon::key);
   fullRefresh();
 }
 
+void drawSigningFeedback() {
+  blankPage();
+  title("FIRMANDO", "Firmando la transaccion...");
+  textStyle(page, 3);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr("Calculando firmas ECDSA."), kWidth / 2, 380);
+  textStyle(page, 2);
+  page.drawString(lang::tr("Puede tardar unos segundos."), kWidth / 2, 450);
+  page.setTextDatum(TL_DATUM);
+  fullRefresh(UPDATE_MODE_DU4);
+}
+
 void beginMultisigSign() {
+  drawSigningFeedback();
   std::vector<multisig::SeedCandidate> seeds;
   buildMultisigSeedCandidates(seeds);
   multisig::SignResult res = multisig::signMultisig(parsedTx, seeds);
@@ -3021,6 +3099,7 @@ void beginMultisigSign() {
 
 void beginSignTx() {
   if (txIsMultisig) { beginMultisigSign(); return; }
+  drawSigningFeedback();
   txSigned = false;
   signedTxHex = "";
   signedPsbtBase64 = "";
@@ -3887,7 +3966,7 @@ void updateFocusButton(uint8_t index) {
       break;
     case Screen::signed_mode:
       if (index == 0) updateButton(kMenu[0], "SPARROW (QR estatico)", true, index == focusIndex, Icon::qr);
-      else if (index == 1) updateButton(kMenu[1], "BLUEWALLET (QR animado)", true, index == focusIndex, Icon::qr);
+      else if (index == 1) updateButton(kMenu[1], "BLUEWALLET (QR animado)", !txIsMultisig, index == focusIndex, Icon::qr);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     case Screen::animated_qr:
@@ -4459,7 +4538,7 @@ void click(int x, int y) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::signed_mode) {
     if (kMenu[0].contains(x, y)) { screen = Screen::signed_tx; focusIndex = 0; drawScreen(); }
-    else if (kMenu[1].contains(x, y)) { beginAnimatedQr(); }
+    else if (kMenu[1].contains(x, y) && !txIsMultisig) { beginAnimatedQr(); }
     else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::animated_qr) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 1; drawScreen(); }
@@ -4502,7 +4581,7 @@ void click(int x, int y) {
   } else if (screen == Screen::settings_radio) {
     if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 4; drawScreen(); }
   } else if (screen == Screen::multisig_confirm) {
-    if (kBack.contains(x, y)) { screen = Screen::tx_review; focusIndex = 0; drawScreen(); }
+    if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
     else if (kFirmar.contains(x, y) && fingerprintValid) { beginMultisigSign(); }
   }
 }
