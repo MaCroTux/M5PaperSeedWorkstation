@@ -22,21 +22,25 @@ Documentación en inglés: [`README.md`](README.md).
 - **Generar entropía** dibujando en pantalla o lanzando dados.
 - **Revisión y backup** de la semilla: palabras, QR y **SEEDQR** (asistente offline).
 - **Clave pública**: derivar y mostrar xpub/zpub (BIP32), con QR.
-- **Explorador de direcciones**: derivar direcciones P2PKH, P2SH, native segwit
-  (BIP84) y taproot (BIP86), para recepción y cambio, con salto directo a un índice.
+- **Explorador de direcciones**: derivar direcciones P2PKH, P2SH y native segwit
+  (BIP84), para recepción y cambio, con salto directo a un índice.
 - **Passphrase BIP39** (cambia todas las direcciones derivadas).
 - **Vault individual**: una semilla cifrada con su propia contraseña (archivo `.vlt`).
 - **Vault de sesión**: varias semillas cifradas bajo una contraseña maestra.
 - **Recibir por WiFi** (punto de acceso + portal cautivo) o por **serial USB**:
   PSBT (fichero o texto) o semilla BIP39 en texto (esta última sin necesidad de
   tener una semilla cargada en RAM).
-- **Firmar PSBT** (segwit P2WPKH, ECDSA RFC6979 + BIP143) y emitir la transacción:
+- **Firmar PSBT** (ECDSA RFC6979 + BIP143) y emitir la transacción:
+  - **Single-sig** P2WPKH.
+  - **Multisig** P2WSH `sortedmulti` (BIP48), 2-de-2 / 2-de-3 / 3-de-3, con
+    interoperabilidad Sparrow; firma con todas las seeds del Vault en un solo paso.
   - **Sparrow**: QR estático (hex de la transacción firmada).
-  - **BlueWallet**: QR animado **BBQr** (PSBT en Base64 para payload pequeño,
-    multipart `B$HPxxxx` para payload grande).
+  - **BlueWallet**: QR animado **BBQr** (solo single-sig).
+- **Historial de transacciones**: cada PSBT recibida se guarda en la SD y se puede
+  revisar y volver a firmar más tarde.
 - **Ajustes** guardados en la SD: idioma (inglés por defecto / español),
   tiempo de bloqueo automático (1/3/5/10 min o nunca), tiempo de limpieza de seed
-  (nunca/10/30/60 min), derivación por defecto (BIP44/49/84/86) y estado de la
+  (nunca/10/30/60 min), derivación por defecto (BIP44/49/84) y estado de la
   radio (BT/WiFi/energía).
 - **Bloqueo** manual o por inactividad con **portada estática** (sin animaciones,
   para no consumir batería en e-ink) que sirve también como pantalla de apagado.
@@ -50,6 +54,7 @@ INTRODUCIR SEMILLA      (escribe una semilla BIP39)
 GENERAR ENTROPIA        (dibuja o tira dados)
 VAULT DE SESION         (crear/abrir vault de varias semillas)
 RECIBIR POR WIFI        (AP para recibir PSBT o semilla desde el móvil)
+HISTORIAL               (transacciones guardadas para revisar o volver a firmar)
 AJUSTES                 (idioma, bloqueo, derivación, radio)
 BLOQUEAR                (bloquea el dispositivo con la portada)
 ```
@@ -173,7 +178,7 @@ Flasheo fiable en USB marginal: `esptool.py --no-stub --baud 115200 write_flash 
   buffers de semilla, etc.
 - **Auto-bloqueo** por inactividad (configurable) y bloqueo manual.
 - **Self-tests al arranque**: BIP39, BIP32, fingerprint, PBKDF2 (contra
-  `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA (RFC6979), PSBT parser, direcciones BIP84/BIP86.
+  `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA (RFC6979), PSBT parser, direcciones BIP84.
 
 ---
 
@@ -190,10 +195,10 @@ Cliente BLE (`qr_ble_client.hpp/.cpp`) para recibir QR desde una Raspberry Pi
 - [x] Recepción por WiFi AP (portal cautivo + QR de conexión) con 3 modos.
 - [x] Recepción por serial USB (protocolo `M5PSBT` + SHA256).
 - [x] Decodificación de PSBT `UR:CRYPTO-PSBT` (QR de Sparrow).
-- [x] Firma de PSBT (segwit P2WPKH) + QR estático (Sparrow) y BBQr (BlueWallet).
+- [x] Firma de PSBT (single-sig P2WPKH + multisig P2WSH sortedmulti) + QR (Sparrow/BlueWallet).
 - [x] Ajustes persistentes en SD (idioma, bloqueo, derivación, radio).
+- [x] Historial de transacciones (guardar y volver a firmar PSBT recibidas).
 - [x] Traducción completa EN/ES.
-- [ ] Corregir el self-test **BIP86** (falla; BIP84 OK).
 - [ ] Base32 y zlib en BBQr (optimización futura).
 
 ---

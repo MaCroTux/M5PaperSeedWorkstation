@@ -40,7 +40,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
                      animated_qr, settings, settings_lang, settings_timeout,
                      settings_clean, settings_derivation, settings_radio,
-                     multisig_confirm };
+                     multisig_confirm, tx_history };
 
 struct Rect {
   int x, y, w, h;
@@ -49,12 +49,13 @@ struct Rect {
   }
 };
 
-constexpr Rect kMenu[] = {{40, 160, 460, 74}, {40, 243, 460, 74},
-                          {40, 326, 460, 74}, {40, 409, 460, 74},
-                          {40, 492, 460, 74}, {40, 575, 460, 74}};
+constexpr Rect kMenu[] = {{40, 152, 460, 66}, {40, 224, 460, 66},
+                          {40, 296, 460, 66}, {40, 368, 460, 66},
+                          {40, 440, 460, 66}, {40, 512, 460, 66},
+                          {40, 584, 460, 66}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "RECIBIR POR WIFI", "AJUSTES",
+                                       "RECIBIR POR WIFI", "HISTORIAL", "AJUSTES",
                                        "BLOQUEAR"};
 constexpr Rect kHelpIcon{456, 776, 64, 64};
 constexpr Rect kChoose12{40, 260, 210, 150};
@@ -175,6 +176,8 @@ encrypted_seed_store::Result vaultResult = encrypted_seed_store::Result::crypto_
 char vaultPath[64] = {};
 char vaultFiles[6][64] = {};
 uint8_t vaultFileCount = 0;
+char txFiles[6][64] = {};
+uint8_t txFileCount = 0;
 uint8_t selectedVaultFile = 0;
 bool vaultUnlockError = false;
 uint8_t vaultFailCount = 0;      // S-6: intentos fallidos de desbloqueo
@@ -646,7 +649,8 @@ const char* menuHint(uint8_t index) {
     case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
     case 3: return fingerprintValid ? "Recibe un PSBT o una semilla por WiFi desde tu movil"
                                     : "Recibe una semilla BIP39 por texto desde tu movil";
-    case 4: return "Idioma, bloqueo, derivacion y estado de la radio";
+    case 4: return "Transacciones guardadas para revisar o volver a firmar";
+    case 5: return "Idioma, bloqueo, derivacion y estado de la radio";
     default: return "Bloquea el dispositivo y muestra la portada";
   }
 }
@@ -672,8 +676,8 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Sin semilla cargada");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::wifi, Icon::wrench, Icon::lock};
-  for (uint8_t i = 0; i < 6; ++i) {
+                                    Icon::wifi, Icon::list, Icon::wrench, Icon::lock};
+  for (uint8_t i = 0; i < 7; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
@@ -1379,6 +1383,53 @@ void drawVaultList() {
 
 void openVaultList() {
   vaultDeleteMode = false; scanVaultFiles(); screen = Screen::vault_list; focusIndex = 0; drawVaultList();
+}
+
+void scanTxFiles() {
+  txFileCount = 0; memset(txFiles, 0, sizeof(txFiles));
+  if (SD.cardType() == CARD_NONE) return;
+  File root = SD.open("/");
+  if (!root || !root.isDirectory()) { if (root) root.close(); return; }
+  File entry = root.openNextFile();
+  while (entry && txFileCount < 6) {
+    String name = entry.name();
+    if (!entry.isDirectory() && name.endsWith(".psbt")) {
+      if (!name.startsWith("/")) name = "/" + name;
+      name.toCharArray(txFiles[txFileCount], sizeof(txFiles[0]));
+      ++txFileCount;
+    }
+    entry.close(); entry = root.openNextFile();
+  }
+  if (entry) entry.close(); root.close();
+}
+
+const char* txDisplayName(uint8_t index) {
+  if (index >= txFileCount) return "";
+  return txFiles[index][0] == '/' ? txFiles[index] + 1 : txFiles[index];
+}
+
+void drawTxHistory() {
+  blankPage();
+  title("HISTORIAL", "Transacciones guardadas");
+  if (SD.cardType() == CARD_NONE) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
+  } else if (!txFileCount) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString(lang::tr("NO HAY TRANSACCIONES"), 270, 350); page.setTextDatum(TL_DATUM);
+  } else {
+    for (uint8_t i = 0; i < txFileCount; ++i)
+      buttonOn(page, kVaultFiles[i], txDisplayName(i), true, focusIndex == i);
+  }
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == txFileCount);
+  fullRefresh();
+}
+
+void openTxHistory() {
+  scanTxFiles();
+  screen = Screen::tx_history;
+  focusIndex = 0;
+  drawTxHistory();
 }
 
 void drawVaultUnlock() {
@@ -3198,6 +3249,21 @@ void afterPsbtParsed(bool fromSerial) {
   }
 }
 
+void loadPsbtFromFile(const char* path) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) { showToast("No se pudo abrir"); return; }
+  std::vector<uint8_t> data(f.size());
+  f.read(data.data(), data.size());
+  f.close();
+  txIsPsbt = psbt::tryParsePsbt(data, parsedTx);
+  if (txIsPsbt) {
+    afterPsbtParsed(true);
+  } else {
+    showToast("PSBT no valido");
+    screen = Screen::tx_history; focusIndex = 0; drawTxHistory();
+  }
+}
+
 void processSerialText(const String& payload) {
   std::vector<uint8_t> data(payload.length());
   memcpy(data.data(), payload.c_str(), payload.length());
@@ -3654,6 +3720,7 @@ void drawScreen() {
     case Screen::settings_derivation: drawSettingsDerivation(); break;
     case Screen::settings_radio: drawSettingsRadio(); break;
     case Screen::multisig_confirm: drawMultisigConfirm(); break;
+    case Screen::tx_history: drawTxHistory(); break;
   }
 }
 
@@ -3661,7 +3728,8 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                        Icon::wifi, Icon::wrench, Icon::lock};
+                                        Icon::wifi, Icon::list, Icon::wrench,
+                                        Icon::lock};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -3953,6 +4021,10 @@ void updateFocusButton(uint8_t index) {
       if (index == 0) updateButton(kBack, "CANCELAR", true, index == focusIndex);
       else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
       break;
+    case Screen::tx_history:
+      if (index < txFileCount) updateButton(kVaultFiles[index], txDisplayName(index), true, index == focusIndex);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
     case Screen::tx_review:
       if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
       else if (index == 1) updateButton(kDetail, "DETALLE", true, index == focusIndex, Icon::list);
@@ -3983,7 +4055,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 6;
+  else if (screen == Screen::menu) count = 7;
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive) {
@@ -4002,6 +4074,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::settings_derivation) count = kPublicProfileCount + 1;
   else if (screen == Screen::settings_radio) count = 1;
   else if (screen == Screen::multisig_confirm) count = 2;
+  else if (screen == Screen::tx_history) count = txFileCount + 1;
   else if (screen == Screen::signed_tx) count = 1;
   else if (screen == Screen::signed_mode) count = 3;
   else if (screen == Screen::animated_qr) count = 1;
@@ -4086,8 +4159,9 @@ void click(int x, int y) {
       if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
     }     else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { openWifiMode(); }
-    else if (kMenu[4].contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
-    else if (kMenu[5].contains(x, y)) { lockDevice(); }
+    else if (kMenu[4].contains(x, y)) { openTxHistory(); }
+    else if (kMenu[5].contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
+    else if (kMenu[6].contains(x, y)) { lockDevice(); }
     else if (kHelpIcon.contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(gSettings.defaultProfile); }
@@ -4583,6 +4657,14 @@ void click(int x, int y) {
   } else if (screen == Screen::multisig_confirm) {
     if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
     else if (kFirmar.contains(x, y) && fingerprintValid) { beginMultisigSign(); }
+  } else if (screen == Screen::tx_history) {
+    for (uint8_t i = 0; i < txFileCount; ++i) {
+      if (kVaultFiles[i].contains(x, y)) {
+        loadPsbtFromFile(txFiles[i]);
+        return;
+      }
+    }
+    if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 4; drawScreen(); }
   }
 }
 
@@ -4729,6 +4811,9 @@ void activateFocus() {
     click(kBack.x + 5, kBack.y + 5);
   } else if (screen == Screen::multisig_confirm) {
     const Rect& r = focusIndex == 0 ? kBack : kFirmar;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::tx_history) {
+    const Rect& r = focusIndex < txFileCount ? kVaultFiles[focusIndex] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::signed_tx) {
     click(kAction.x + 5, kAction.y + 5);

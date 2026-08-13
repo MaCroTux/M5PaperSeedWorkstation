@@ -22,20 +22,24 @@ Documentación en español: [`README_ES.md`](README_ES.md).
 - **Generate entropy** by drawing on screen or rolling dice.
 - **Seed review & backup**: words, QR and **SEEDQR** (offline wizard).
 - **Public key**: derive and display xpub/zpub (BIP32), with QR.
-- **Address explorer**: derive P2PKH, P2SH, native segwit (BIP84) and taproot
-  (BIP86) addresses, for receive and change, with a direct index jump.
+- **Address explorer**: derive P2PKH, P2SH and native segwit (BIP84) addresses,
+  for receive and change, with a direct index jump.
 - **BIP39 passphrase** (changes every derived address).
 - **Individual vault**: one seed encrypted with its own password (`.vlt` file).
 - **Session vault**: several seeds encrypted under one master password.
 - **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
-- **Sign PSBT** (segwit P2WPKH, ECDSA RFC6979 + BIP143) and broadcast:
+- **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
+  - **Single-sig** P2WPKH.
+  - **Multisig** P2WSH `sortedmulti` (BIP48), 2-of-2 / 2-of-3 / 3-of-3, with
+    Sparrow interop; signs with all available Vault seeds in one step.
   - **Sparrow**: static QR (hex of the signed transaction).
-  - **BlueWallet**: animated **BBQr** QR (Base64 PSBT for small payloads,
-    multipart `B$HPxxxx` for large payloads).
+  - **BlueWallet**: animated **BBQr** QR (single-sig only).
+- **Transaction history**: every received PSBT is saved to SD and can be
+  reviewed and re-signed later.
 - **Settings** stored on SD: language (English by default / Spanish), auto-lock
   timeout (1/3/5/10 min or never), seed-wipe timeout (never/10/30/60 min),
-  default derivation (BIP44/49/84/86) and radio status (BT/WiFi/power).
+  default derivation (BIP44/49/84) and radio status (BT/WiFi/power).
 - **Lock** (manual or on inactivity) with a **static cover screen** (no animations,
   to save e-ink battery) that doubles as an off/screensaver screen.
 
@@ -48,6 +52,7 @@ ENTER SEED            (type a BIP39 seed)
 GENERATE ENTROPY      (draw or roll dice)
 SESSION VAULT         (create/open a multi-seed vault)
 RECEIVE VIA WIFI      (AP to receive a PSBT or seed from your phone)
+HISTORY               (saved transactions to review or sign again)
 SETTINGS              (language, lock, derivation, radio)
 LOCK                  (lock the device with the cover screen)
 ```
@@ -170,7 +175,7 @@ Reliable flashing over marginal USB: `esptool.py --no-stub --baud 115200 write_f
 - **Memory wiping**: `wipe()` (volatile) over keys, plaintext, seed buffers, etc.
 - **Auto-lock** on inactivity (configurable) plus manual lock.
 - **Boot self-tests**: BIP39, BIP32, fingerprint, PBKDF2 (against
-  `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA (RFC6979), PSBT parser, BIP84/BIP86 addresses.
+  `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA (RFC6979), PSBT parser, BIP84 addresses.
 
 ---
 
@@ -187,10 +192,10 @@ BLE client (`qr_ble_client.hpp/.cpp`) to receive a QR from a Raspberry Pi
 - [x] WiFi AP reception (captive portal + connection QR) with 3 modes.
 - [x] USB serial reception (`M5PSBT` protocol + SHA256).
 - [x] `UR:CRYPTO-PSBT` decoding (Sparrow QR).
-- [x] PSBT signing (segwit P2WPKH) + static QR (Sparrow) and BBQr (BlueWallet).
+- [x] PSBT signing (single-sig P2WPKH + multisig P2WSH sortedmulti) + QR (Sparrow/BlueWallet).
 - [x] SD-persisted settings (language, lock, derivation, radio).
+- [x] Transaction history (save and re-sign received PSBTs).
 - [x] Full EN/ES translation.
-- [ ] Fix the **BIP86** self-test (fails; BIP84 OK).
 - [ ] Base32 and zlib in BBQr (future optimization).
 
 ---

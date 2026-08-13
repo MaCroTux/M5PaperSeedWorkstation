@@ -61,7 +61,7 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `M5PaperSeedWorkstation.ino` | Punto de entrada del sketch (solo `setup`/`loop` delegados). |
 | `bip39_support.hpp` | Lista BIP39 (2048 palabras en PROGMEM), `find_exact`/`find_matches`, `checksum_valid`, `from_entropy`, self-test. |
 | `bitcoin_hd.hpp` | BIP32: `mnemonic_seed` (PBKDF2-HMAC-SHA512 2048 iter.), derivación endurecida/normal, xpub/zpub, base58check. |
-| `bitcoin_address.hpp` | Direcciones P2PKH/P2SH/native segwit (BIP84)/taproot (BIP86), bech32/bech32m. |
+| `bitcoin_address.hpp` | Direcciones P2PKH/P2SH/native segwit (BIP84), bech32/bech32m. |
 | `bitcoin_fingerprint.hpp` | Fingerprint de clave maestra (BIP32). |
 | `ripemd160_min.hpp` | RIPEMD-160 (para HASH160). |
 | `encrypted_seed_store.hpp` | Vault individual (`.vlt`): AES-256-GCM + PBKDF2 (600.000 iter.). |
@@ -98,7 +98,7 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 - Derivación endurecida (`0'`, `84'`, etc.) y normal (`0`, `1`, …) con aritmética
   de mbedTLS sobre secp256k1.
 - Perfiles soportados: BIP44 (P2PKH), BIP49 (P2SH-SegWit), **BIP84 (native SegWit,
-  por defecto)**, BIP86 (Taproot).
+  por defecto)**.
 
 ### 4.3 Vaults (cifrado en reposo)
 
@@ -125,8 +125,7 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 ### 4.5 Self-tests al arranque
 
 BIP39, BIP32 xpub/zpub (+ passphrase), fingerprint, PBKDF2 (comparado contra
-`mbedtls_pkcs5_pbkdf2_hmac`), ECDSA/RFC6979, parser PSBT y direcciones
-BIP84/BIP86. **Pendiente**: el self-test BIP86 falla (BIP84 OK).
+`mbedtls_pkcs5_pbkdf2_hmac`), ECDSA/RFC6979, parser PSBT y direcciones BIP84.
 
 ---
 
@@ -183,7 +182,7 @@ de Bluedroid en el M5Paper. No está accesible desde el menú.
 [0..3]   magia "M5CF"
 [4]      versión = 2
 [5]      idioma (0 = inglés, 1 = español)
-[6]      derivación por defecto (0..3 = BIP44/49/84/86)
+[6]      derivación por defecto (0..2 = BIP44/49/84)
 [7..10]  tiempo de bloqueo en ms (uint32 LE; 0 = nunca)
 [11..14] tiempo de limpieza de seed en ms (uint32 LE; 0 = nunca)
 ```
@@ -222,14 +221,14 @@ automáticamente; los textos dibujados directamente con `page.*` usan `lang::tr(
 
 ## 10. Problemas conocidos / pendientes
 
-- El **self-test BIP86 falla** (BIP84 correcto).
-- Operaciones de curva elíptica sin *blinding* (no constantes en tiempo) — ver
-  `AUDITORIA.md` S-1.
-- Cadenas `String` sensibles no se limpian de forma fiable (S-2).
-- Iteraciones PBKDF2 leídas del archivo sin límite superior (DoS potencial, S-3).
 - BBQr sin compresión Base32/zlib (optimización futura).
+- El soporte Taproot (BIP86) fue **eliminado** temporalmente porque su
+  self-test fallaba; queda como trabajo futuro.
+- Soporte Ethereum (v2.0) — ver [`ETH_v2.0.md`](ETH_v2.0.md), sin implementar.
 
-Consulta [`AUDITORIA.md`](AUDITORIA.md) para el detalle completo.
+Nota: los hallazgos S-1 (blinding ECC), S-2 (limpieza de `String`) y S-3
+(límite de iteraciones PBKDF2) de [`AUDITORIA.md`](AUDITORIA.md) ya fueron
+corregidos.
 
 ---
 
