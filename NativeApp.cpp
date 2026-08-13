@@ -2581,6 +2581,7 @@ Screen utxoReturnScreen = Screen::menu;
 std::vector<uint8_t> signedTxBytes;
 String signedTxHex;
 String signedPsbtBase64;
+std::vector<uint8_t> signedFinalizedPsbt;
 bool txSigned = false;
 QRCode signedTxQr;
 uint8_t signedTxQrBuffer[4096] = {};
@@ -2824,9 +2825,15 @@ void drawSignedMode() {
 }
 
 void drawAnimatedQr() {
-  const String frame = bbqr::makeFrame(signedTxBytes.data(), signedTxBytes.size(),
-                                       bbqr::kTypeTx, static_cast<uint16_t>(bbqrTotalParts),
+  const String frame = bbqr::makeFrame(signedFinalizedPsbt.data(), signedFinalizedPsbt.size(),
+                                       bbqr::kTypePsbt, static_cast<uint16_t>(bbqrTotalParts),
                                        bbqrIndex, bbqrBlockSize);
+  Serial.println("[BBQR] frame:");
+  Serial.println(frame.c_str());
+  Serial.printf("[BBQR] length=%u parts=%u index=%u\n",
+                static_cast<unsigned>(frame.length()),
+                static_cast<unsigned>(bbqrTotalParts),
+                static_cast<unsigned>(bbqrIndex));
   memset(bbqrQrBuffer, 0, sizeof(bbqrQrBuffer));
   static const uint16_t kAlphaCapL[] = {
       25, 47, 77, 114, 154, 195, 224, 279, 335, 395,
@@ -2866,11 +2873,11 @@ void drawAnimatedQr() {
 }
 
 void beginAnimatedQr() {
-  if (!txSigned || signedTxBytes.empty()) {
+  if (!txSigned || signedFinalizedPsbt.empty()) {
     screen = Screen::signed_mode; focusIndex = 0; drawScreen();
     return;
   }
-  const bbqr::Layout layout = bbqr::calculateLayout(signedTxBytes.size(),
+  const bbqr::Layout layout = bbqr::calculateLayout(signedFinalizedPsbt.size(),
                                                      bbqr::kPreferredBlockSize);
   bbqrTotalParts = layout.totalParts;
   bbqrBlockSize = layout.blockSize;
@@ -2891,6 +2898,7 @@ void beginSignTx() {
         passphraseActive ? activePassphrase : "", signedTxBytes, &finalizedPsbt)) {
     signedTxHex = hexEncode(signedTxBytes);
     signedPsbtBase64 = base64Encode(finalizedPsbt);
+    signedFinalizedPsbt = finalizedPsbt;
     txSigned = true;
     saveSignedTxToSd(signedTxHex);
     Serial.printf("[SIGNED] %s\n", signedTxHex.c_str());
