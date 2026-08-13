@@ -303,13 +303,18 @@ bool cacheCurrentSeed(const char* label = nullptr, bool markInVault = false) {
 
 bool activateLoadedSeed(uint8_t slot) {
   if (slot >= loadedSeedCount || !loadedSeeds[slot].used) return false;
+  Serial.printf("[SEED] activando slot %u (label=%s, enVault=%d)\n", slot,
+                loadedSeeds[slot].fingerprint, loadedSeeds[slot].inVault);
   if (fingerprintValid) cacheCurrentSeed();
   const LoadedSeed& item = loadedSeeds[slot];
   encrypted_seed_store::wipe(words, sizeof(words));
   memcpy(words, item.indices, item.count * sizeof(uint16_t));
   targetWords = wordCount = item.count; prefix = ""; editingWord = -1;
   activeLoadedSeed = slot; clearDerivedData(); clearPassphrase();
-  return updateFingerprint();
+  const bool ok = updateFingerprint();
+  Serial.printf("[SEED] activo ahora: %s (passphraseActive=%d)\n",
+                activeFingerprint, passphraseActive);
+  return ok;
 }
 
 void textStyle(M5EPD_Canvas& canvas, uint8_t size = 2,

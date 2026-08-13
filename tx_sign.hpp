@@ -107,23 +107,30 @@ inline bool sign(const uint8_t priv[32], const uint8_t sighash[32], uint8_t sig[
   return ok;
 }
 
-// Deriva la clave privada de una entrada a partir de la semilla, la ruta BIP32
-// (fingerprint + indices relativos) y el proposito (44/49/84/86).
-inline bool deriveKey(const uint16_t* words, size_t count, uint32_t purpose,
+// Deriva la clave privada a partir de la semilla usando la ruta BIP32 completa.
+// El fingerprint del PSBT es el de la clave MAESTRA (m), y la ruta es la completa
+// (p.ej. m/84'/0'/0'/1/0), como hace BlueWallet.
+inline bool deriveKey(const uint16_t* words, size_t count,
                       const uint8_t fpr[4], const std::vector<uint32_t>& path,
                       const char* passphrase, uint8_t outKey[32], uint8_t outPub[33]) {
-  bitcoin_hd::Node account = {}, node = {};
-  uint8_t accountFpr[4] = {};
-  if (!bitcoin_hd::account_node(words, count, purpose, account, passphrase)) return false;
-  bitcoin_hd::fingerprint(account, accountFpr);
-  if (memcmp(accountFpr, fpr, 4) != 0) {
-    Serial.printf("[SIGN] FPR mismatch: PSBT=%02X%02X%02X%02X semilla=%02X%02X%02X%02X (purpose %lu)\n",
-                  fpr[0], fpr[1], fpr[2], fpr[3], accountFpr[0], accountFpr[1],
-                  accountFpr[2], accountFpr[3], static_cast<unsigned long>(purpose));
-    bitcoin_hd::wipe(&account, sizeof(account)); bitcoin_hd::wipe(accountFpr, 4);
+  uint8_t seed[64] = {};
+  bitcoin_hd::Node master = {}, node = {};
+  uint8_t masterFpr[4] = {};
+  if (!bitcoin_hd::mnemonic_seed(words, count, seed, passphrase) ||
+      !bitcoin_hd::master(seed, master)) {
+    bitcoin_hd::wipe(seed, sizeof(seed)); return false;
+  }
+  bitcoin_hd::fingerprint(master, masterFpr);
+  if (memcmp(masterFpr, fpr, 4) != 0) {
+    Serial.printf("[SIGN] FPR mismatch (master): PSBT=%02X%02X%02X%02X semilla=%02X%02X%02X%02X pass=%s\n",
+                  fpr[0], fpr[1], fpr[2], fpr[3], masterFpr[0], masterFpr[1],
+                  masterFpr[2], masterFpr[3],
+                  (passphrase && passphrase[0]) ? "SI" : "NO");
+    bitcoin_hd::wipe(seed, sizeof(seed)); bitcoin_hd::wipe(&master, sizeof(master));
+    bitcoin_hd::wipe(masterFpr, 4);
     return false;
   }
-  node = account;
+  node = master;
   bool ok = true;
   for (uint32_t idx : path) {
     bitcoin_hd::Node next = {};
@@ -137,9 +144,8 @@ inline bool deriveKey(const uint16_t* words, size_t count, uint32_t purpose,
     memcpy(outKey, node.key, 32);
     ok = bitcoin_hd::public_key(node, outPub);
   }
-  bitcoin_hd::wipe(&account, sizeof(account));
-  bitcoin_hd::wipe(&node, sizeof(node));
-  bitcoin_hd::wipe(accountFpr, 4);
+  bitcoin_hd::wipe(seed, sizeof(seed)); bitcoin_hd::wipe(&master, sizeof(master));
+  bitcoin_hd::wipe(&node, sizeof(node)); bitcoin_hd::wipe(masterFpr, 4);
   return ok;
 }
 
@@ -233,7 +239,7 @@ inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words
   uint32_t purpose = 0;
   if (!out.hasDerivation || !scriptPurpose(out.script, out.scriptLen, purpose)) return false;
   uint8_t key[32] = {}, pub[33] = {};
-  if (!deriveKey(words, count, purpose, out.derivFpr, out.derivPath, passphrase, key, pub)) {
+  if (!deriveKey(words, count, out.derivFpr, out.derivPath, passphrase, key, pub)) {
     bitcoin_hd::wipe(key, 32); return false;
   }
   bitcoin_hd::wipe(key, 32);
@@ -365,7 +371,7 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
     uint8_t key[32] = {}, pub[33] = {};
     bool haveKey = false;
     if (in.hasDerivation) {
-      haveKey = deriveKey(words, count, 84, in.derivFpr, in.derivPath, passphrase, key, pub);
+      haveKey = deriveKey(words, count, in.derivFpr, in.derivPath, passphrase, key, pub);
     } else {
       // Sin ruta BIP32: buscar la direccion en el espacio de derivacion.
       haveKey = findKeyByAddress(words, count, 84, in.utxoScript + 2, passphrase, key, pub);
