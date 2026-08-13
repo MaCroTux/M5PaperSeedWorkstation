@@ -37,6 +37,12 @@ inline const char* tr(const char* es) {
 
     // Comunes
     {"VOLVER", "Back"},
+    {"ATRAS", "Back"},
+    {"CREAR", "Create"},
+    {"CHECKSUM INVALIDO", "Invalid checksum"},
+    {"PASSPHRASE", "Passphrase"},
+    {"Bloqueo", "Lock"},
+    {"Pulsa para desbloquear", "Press to unlock"},
     {"CANCELAR", "Cancel"},
     {"ERROR", "Error"},
     {"CONTINUAR", "Continue"},
