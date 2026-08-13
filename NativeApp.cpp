@@ -33,7 +33,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
-                     signed_tx, locked };
+                     signed_tx, locked, tx_review };
 
 struct Rect {
   int x, y, w, h;
@@ -2577,7 +2577,7 @@ std::vector<uint8_t> signedTxBytes;
 String signedTxHex;
 bool txSigned = false;
 QRCode signedTxQr;
-uint8_t signedTxQrBuffer[1024] = {};
+uint8_t signedTxQrBuffer[4096] = {};
 
 void drawWifiResult() {
   const std::vector<uint8_t>& d = wifiServer.data();
@@ -2723,7 +2723,17 @@ void saveReceivedPsbt(const std::vector<uint8_t>& data) {
 
 bool buildSignedTxQr() {
   memset(signedTxQrBuffer, 0, sizeof(signedTxQrBuffer));
-  return qrcode_initText(&signedTxQr, signedTxQrBuffer, 10, ECC_LOW,
+  static const uint16_t kByteCapL[] = {
+      17, 32, 53, 78, 106, 134, 154, 192, 230, 271,
+      321, 367, 425, 458, 520, 586, 644, 718, 792, 858,
+      929, 1003, 1091, 1171, 1273, 1367, 1465, 1528, 1628, 1732,
+      1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953};
+  const uint16_t len = signedTxHex.length();
+  uint8_t version = 40;
+  for (uint8_t v = 1; v <= 40; ++v) {
+    if (len <= kByteCapL[v - 1]) { version = v; break; }
+  }
+  return qrcode_initText(&signedTxQr, signedTxQrBuffer, version, ECC_LOW,
                          signedTxHex.c_str()) == 0;
 }
 
@@ -2737,7 +2747,9 @@ void drawSignedTx() {
     centeredFit(page, "tenga entradas P2WPKH con ruta.", 445);
   } else {
     title("TX FIRMADA", "Escanear con BlueWallet para emitir");
-    const int module = 4;
+    int module = 500 / signedTxQr.size;
+    if (module < 2) module = 2;
+    if (module > 8) module = 8;
     const int px = signedTxQr.size * module;
     const int ox = (kWidth - px) / 2;
     const int oy = 175;
@@ -2796,6 +2808,60 @@ void lockDevice() {
   screen = Screen::locked;
   focusIndex = 0;
   drawLocked();
+}
+
+void drawTxReview() {
+  blankPage();
+  drawTxInfo();
+  fullRefresh();
+}
+
+String serialBuffer;
+
+void processSerialTransaction(const String& payload) {
+  std::vector<uint8_t> data(payload.length());
+  memcpy(data.data(), payload.c_str(), payload.length());
+  if (psbt::tryParsePsbt(data, parsedTx)) {
+    txIsPsbt = true;
+    saveReceivedPsbt(data);
+    Serial.printf("[SERIAL] PSBT cargado (%u bytes), fingerprint del wallet detectado\n",
+                  static_cast<unsigned>(payload.length()));
+    screen = Screen::tx_review;
+    focusIndex = 0;
+    drawTxReview();
+  } else {
+    Serial.println("[SERIAL] error: no es un PSBT valido (base64/hex/binario)");
+  }
+}
+
+void checkSerialCommand() {
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\n' || c == '\r') {
+      serialBuffer.trim();
+      if (serialBuffer.length() > 0) {
+        const int colon = serialBuffer.indexOf(':');
+        if (colon > 0) {
+          String cmd = serialBuffer.substring(0, colon);
+          cmd.trim();
+          String payload = serialBuffer.substring(colon + 1);
+          payload.trim();
+          if (cmd.equalsIgnoreCase("incommit-transaction") ||
+              cmd.equalsIgnoreCase("psbt") ||
+              cmd.equalsIgnoreCase("firmar")) {
+            Serial.printf("[SERIAL] comando '%s' (%u chars)\n", cmd.c_str(),
+                          static_cast<unsigned>(payload.length()));
+            processSerialTransaction(payload);
+          } else {
+            Serial.printf("[SERIAL] comando desconocido: %s\n", cmd.c_str());
+          }
+        }
+      }
+      serialBuffer = "";
+    } else if (serialBuffer.length() < 16384) {
+      serialBuffer += c;
+    }
+  }
 }
 
 void drawWifiReceive() {
@@ -2890,6 +2956,7 @@ void drawScreen() {
     case Screen::wifi_receive: drawWifiReceive(); break;
     case Screen::signed_tx: drawSignedTx(); break;
     case Screen::locked: drawLocked(); break;
+    case Screen::tx_review: drawTxReview(); break;
   }
 }
 
@@ -3126,6 +3193,10 @@ void updateFocusButton(uint8_t index) {
     case Screen::signed_tx:
       updateButton(kAction, "VOLVER", true, index == focusIndex);
       break;
+    case Screen::tx_review:
+      if (index == 0) updateButton(kAction, "VOLVER", true, index == focusIndex);
+      else updateButton(kBack, "FIRMAR", true, index == focusIndex, Icon::key);
+      break;
   }
 }
 
@@ -3147,6 +3218,7 @@ void moveFocus(int direction) {
     else count = 1;
   }
   else if (screen == Screen::signed_tx) count = 1;
+  else if (screen == Screen::tx_review) count = fingerprintValid ? 2 : 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 3;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
@@ -3655,6 +3727,9 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::signed_tx) {
     if (kAction.contains(x, y)) { screen = Screen::wifi_receive; focusIndex = 0; drawScreen(); }
+  } else if (screen == Screen::tx_review) {
+    if (kBack.contains(x, y) && fingerprintValid) { beginSignTx(); }
+    else if (kAction.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
@@ -3774,6 +3849,9 @@ void activateFocus() {
     click(r->x + 5, r->y + 5);
   } else if (screen == Screen::signed_tx) {
     click(kAction.x + 5, kAction.y + 5);
+  } else if (screen == Screen::tx_review) {
+    const Rect* r = (fingerprintValid && focusIndex == 1) ? &kBack : &kAction;
+    click(r->x + 5, r->y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
@@ -3812,6 +3890,7 @@ void setup() {
 }
 
 void loop() {
+  checkSerialCommand();
   qrClient.update();
   if (screen == Screen::scan_qr) {
     const auto qp = qrClient.phase();
