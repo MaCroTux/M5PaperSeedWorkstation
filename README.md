@@ -1,6 +1,6 @@
 # M5Paper Seed Workstation
 
-**v1.1**
+**v1.2**
 
 An offline workstation for BIP39 seeds, Bitcoin key/address derivation and
 **PSBT transaction signing**, running on the **M5Paper** (ESP32 with a 540×960

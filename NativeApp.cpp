@@ -20,7 +20,7 @@
 
 namespace {
 
-constexpr char kVersion[] = "v1.1";
+constexpr char kVersion[] = "v1.2";
 constexpr int kWidth = 540;
 constexpr int kHeight = 960;
 constexpr int kRockerRightPin = 37;
