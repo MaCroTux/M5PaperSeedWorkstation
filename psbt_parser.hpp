@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <mbedtls/base64.h>
 #include "bitcoin_address.hpp"
+#include "ur_psbt.hpp"
 #include <vector>
 
 // Parser minimal de PSBT (BIP174) y de transacciones Bitcoin, para mostrar la
@@ -312,9 +313,18 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
   return true;
 }
 
-// Detecta y parsea un PSBT en binario, base64 o hex.
+// Detecta y parsea un PSBT en binario, base64, hex o UR (crypto-psbt).
 inline bool tryParsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
   if (isPsbtMagic(data.data(), data.size())) return parsePsbt(data, tx);
+
+  // UR crypto-psbt (bytewords) — p.ej. "ur:crypto-psbt/HKAD...".
+  {
+    String ur;
+    ur.reserve(data.size());
+    for (uint8_t c : data) ur += static_cast<char>(c);
+    std::vector<uint8_t> psbt;
+    if (ur::decodeCryptoPsbt(ur, psbt)) return parsePsbt(psbt, tx);
+  }
 
   // Base64 (tolerando espacios y saltos de linea).
   if (data.size() < 1024) {
