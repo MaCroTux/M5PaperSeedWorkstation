@@ -314,6 +314,55 @@ inline void serializeSignedTx(const psbt::ParsedTx& tx, const std::vector<InputS
   for (int b = 0; b < 4; ++b) out.push_back((tx.locktime >> (8 * b)) & 0xff);
 }
 
+// Serializa la transaccion SIN witness (version + vin + vout + locktime),
+// como se guarda en el campo global de un PSBT.
+inline void serializeUnsignedTx(const psbt::ParsedTx& tx, std::vector<uint8_t>& out) {
+  out.clear();
+  for (int b = 0; b < 4; ++b) out.push_back((tx.version >> (8 * b)) & 0xff);
+  pushVarint(out, tx.inputs.size());
+  for (const auto& in : tx.inputs) {
+    out.insert(out.end(), in.prevTxid, in.prevTxid + 32);
+    for (int b = 0; b < 4; ++b) out.push_back((in.prevVout >> (8 * b)) & 0xff);
+    out.push_back(0x00);  // scriptSig vacio
+    for (int b = 0; b < 4; ++b) out.push_back((in.sequence >> (8 * b)) & 0xff);
+  }
+  pushVarint(out, tx.outputs.size());
+  for (const auto& o : tx.outputs) {
+    for (int b = 0; b < 8; ++b) out.push_back((o.value >> (8 * b)) & 0xff);
+    pushVarint(out, o.scriptLen);
+    out.insert(out.end(), o.script, o.script + o.scriptLen);
+  }
+  for (int b = 0; b < 4; ++b) out.push_back((tx.locktime >> (8 * b)) & 0xff);
+}
+
+// Construye un PSBT finalizado (BIP174) con el witness de cada entrada.
+// Es el formato que BlueWallet reconoce y puede emitir.
+inline void buildFinalizedPsbt(const psbt::ParsedTx& tx, const std::vector<InputSig>& sigs,
+                               std::vector<uint8_t>& out) {
+  std::vector<uint8_t> unsignedTx;
+  serializeUnsignedTx(tx, unsignedTx);
+  out.clear();
+  const uint8_t magic[5] = {0x70, 0x73, 0x62, 0x74, 0xff};
+  out.insert(out.end(), magic, magic + 5);
+  out.push_back(0x01); out.push_back(0x00);  // global map: key 0x00 = unsigned tx
+  pushVarint(out, unsignedTx.size());
+  out.insert(out.end(), unsignedTx.begin(), unsignedTx.end());
+  out.push_back(0x00);
+  for (const auto& s : sigs) {
+    std::vector<uint8_t> witness;
+    pushVarint(witness, 2);
+    pushVarint(witness, s.derLen);
+    witness.insert(witness.end(), s.der, s.der + s.derLen);
+    pushVarint(witness, 33);
+    witness.insert(witness.end(), s.pub, s.pub + 33);
+    out.push_back(0x01); out.push_back(0x08);  // input map: key 0x08 = final witness
+    pushVarint(out, witness.size());
+    out.insert(out.end(), witness.begin(), witness.end());
+    out.push_back(0x00);
+  }
+  for (size_t i = 0; i < tx.outputs.size(); ++i) out.push_back(0x00);  // output maps vacios
+}
+
 // Busca la clave privada cuya direccion coincide con pubkeyHash20 recorriendo el
 // espacio de derivacion de la wallet (change 0/1, indices hasta kGapLimit).
 inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpose,
@@ -361,7 +410,8 @@ inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpo
 // Firma todos los inputs (solo P2WPKH / purpose 84, SIGHASH_ALL) y serializa la
 // transaccion segwit final en signedTx.
 inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t count,
-                             const char* passphrase, std::vector<uint8_t>& signedTx) {
+                             const char* passphrase, std::vector<uint8_t>& signedTx,
+                             std::vector<uint8_t>* finalizedPsbt = nullptr) {
   std::vector<InputSig> sigs(tx.inputs.size());
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
     const auto& in = tx.inputs[i];
@@ -397,6 +447,7 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
     bitcoin_hd::wipe(scriptCode, 26);
   }
   serializeSignedTx(tx, sigs, signedTx);
+  if (finalizedPsbt) buildFinalizedPsbt(tx, sigs, *finalizedPsbt);
   for (auto& s : sigs) bitcoin_hd::wipe(&s, sizeof(s));
   return !signedTx.empty();
 }

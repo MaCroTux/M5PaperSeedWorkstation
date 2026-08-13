@@ -2575,6 +2575,7 @@ psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
 std::vector<uint8_t> signedTxBytes;
 String signedTxHex;
+String signedPsbtBase64;
 bool txSigned = false;
 QRCode signedTxQr;
 uint8_t signedTxQrBuffer[4096] = {};
@@ -2721,6 +2722,15 @@ void saveReceivedPsbt(const std::vector<uint8_t>& data) {
   }
 }
 
+String base64Encode(const std::vector<uint8_t>& data) {
+  size_t olen = 0;
+  mbedtls_base64_encode(nullptr, 0, &olen, data.data(), data.size());
+  std::vector<uint8_t> buf(olen + 1);
+  if (mbedtls_base64_encode(buf.data(), buf.size(), &olen, data.data(), data.size()) != 0)
+    return String();
+  return String(reinterpret_cast<char*>(buf.data()));
+}
+
 bool buildSignedTxQr() {
   memset(signedTxQrBuffer, 0, sizeof(signedTxQrBuffer));
   static const uint16_t kByteCapL[] = {
@@ -2728,13 +2738,13 @@ bool buildSignedTxQr() {
       321, 367, 425, 458, 520, 586, 644, 718, 792, 858,
       929, 1003, 1091, 1171, 1273, 1367, 1465, 1528, 1628, 1732,
       1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953};
-  const uint16_t len = signedTxHex.length();
+  const uint16_t len = signedPsbtBase64.length();
   uint8_t version = 40;
   for (uint8_t v = 1; v <= 40; ++v) {
     if (len <= kByteCapL[v - 1]) { version = v; break; }
   }
   return qrcode_initText(&signedTxQr, signedTxQrBuffer, version, ECC_LOW,
-                         signedTxHex.c_str()) == 0;
+                         signedPsbtBase64.c_str()) == 0;
 }
 
 void drawSignedTx() {
@@ -2771,13 +2781,16 @@ void drawSignedTx() {
 void beginSignTx() {
   txSigned = false;
   signedTxHex = "";
+  signedPsbtBase64 = "";
   signedTxBytes.clear();
+  std::vector<uint8_t> finalizedPsbt;
   if (tx_sign::signSegwitP2wpkh(parsedTx, words, targetWords,
-        passphraseActive ? activePassphrase : "", signedTxBytes)) {
+        passphraseActive ? activePassphrase : "", signedTxBytes, &finalizedPsbt)) {
     signedTxHex = hexEncode(signedTxBytes);
+    signedPsbtBase64 = base64Encode(finalizedPsbt);
     txSigned = true;
     saveSignedTxToSd(signedTxHex);
-    buildSignedTxQr();
+    if (signedPsbtBase64.length()) buildSignedTxQr();
   }
   screen = Screen::signed_tx;
   focusIndex = 0;
