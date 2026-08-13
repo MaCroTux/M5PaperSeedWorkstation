@@ -28,6 +28,19 @@ struct TxOutput {
   std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
 };
 
+struct PartialSig {
+  uint8_t pub[33] = {};
+  uint8_t sig[74] = {};
+  size_t sigLen = 0;
+};
+
+struct SignerInfo {
+  uint8_t pub[33] = {};
+  uint8_t fpr[4] = {};
+  std::vector<uint32_t> path;
+  bool hasDerivation = false;
+};
+
 struct TxInput {
   uint8_t prevTxid[32] = {};
   uint32_t prevVout = 0;
@@ -40,6 +53,10 @@ struct TxInput {
   std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
   uint8_t utxoScript[80] = {};        // scriptPubKey del UTXO gastado (witness/non-witness)
   uint8_t utxoScriptLen = 0;
+  uint8_t witnessScript[256] = {};    // redeem/witness script (clave 0x05, P2WSH)
+  uint8_t witnessScriptLen = 0;
+  std::vector<PartialSig> partialSigs;  // firmas parciales ya presentes (clave 0x02)
+  std::vector<SignerInfo> signers;      // derivaciones por pubkey (clave 0x06)
 };
 
 struct ParsedTx {
@@ -245,19 +262,42 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
           tx.inputs[inIdx].address = o.address;
         }
       } else if (keyLen >= 1 && key[0] == 0x06 && valLen >= 4) {
-        // Ruta BIP32: {fingerprint(4)}{indices uint32 LE...}.
-        memcpy(tx.inputs[inIdx].derivFpr, val, 4);
-        tx.inputs[inIdx].derivPath.clear();
+        // BIP32 derivation: key = {0x06}|{pubkey(33)}, value = {fpr(4)}|{path}.
+        uint8_t fpr[4]; memcpy(fpr, val, 4);
+        std::vector<uint32_t> path;
         size_t off = 4;
         while (off + 4 <= valLen) {
           uint32_t idx = static_cast<uint32_t>(val[off]) |
                          (static_cast<uint32_t>(val[off + 1]) << 8) |
                          (static_cast<uint32_t>(val[off + 2]) << 16) |
                          (static_cast<uint32_t>(val[off + 3]) << 24);
-          tx.inputs[inIdx].derivPath.push_back(idx);
+          path.push_back(idx);
           off += 4;
         }
-        tx.inputs[inIdx].hasDerivation = true;
+        if (!tx.inputs[inIdx].hasDerivation) {
+          memcpy(tx.inputs[inIdx].derivFpr, fpr, 4);
+          tx.inputs[inIdx].derivPath = path;
+          tx.inputs[inIdx].hasDerivation = true;
+        }
+        if (keyLen >= 34) {
+          SignerInfo si;
+          memcpy(si.pub, key + 1, 33);
+          memcpy(si.fpr, fpr, 4);
+          si.path = path;
+          si.hasDerivation = true;
+          tx.inputs[inIdx].signers.push_back(si);
+        }
+      } else if (keyLen >= 1 && key[0] == 0x05 && valLen <= sizeof(tx.inputs[inIdx].witnessScript)) {
+        // witnessScript (P2WSH multisig).
+        memcpy(tx.inputs[inIdx].witnessScript, val, static_cast<size_t>(valLen));
+        tx.inputs[inIdx].witnessScriptLen = static_cast<uint8_t>(valLen);
+      } else if (keyLen >= 34 && key[0] == 0x02) {
+        // partial_sig: key = {0x02}|{pubkey(33)}, value = {signature}.
+        PartialSig ps;
+        memcpy(ps.pub, key + 1, 33);
+        ps.sigLen = valLen;
+        if (ps.sigLen <= sizeof(ps.sig)) memcpy(ps.sig, val, ps.sigLen);
+        tx.inputs[inIdx].partialSigs.push_back(ps);
       }
     }
   }

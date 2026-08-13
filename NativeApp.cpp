@@ -11,6 +11,7 @@
 #include "qr_wifi_server.hpp"
 #include "psbt_parser.hpp"
 #include "tx_sign.hpp"
+#include "multisig.hpp"
 #include "bbqr.hpp"
 #include "lang.hpp"
 #include "device_settings.hpp"
@@ -38,7 +39,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
                      wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
                      animated_qr, settings, settings_lang, settings_timeout,
-                     settings_clean, settings_derivation, settings_radio };
+                     settings_clean, settings_derivation, settings_radio,
+                     multisig_confirm };
 
 struct Rect {
   int x, y, w, h;
@@ -2585,6 +2587,8 @@ Screen wifiModeReturnScreen = Screen::menu;
 uint8_t wifiModeReturnFocus = 4;
 psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
+bool txIsMultisig = false;
+multisig::MultisigInfo txMsInfo;
 Screen utxoReturnScreen = Screen::menu;
 std::vector<uint8_t> signedTxBytes;
 String signedTxHex;
@@ -2910,7 +2914,105 @@ void beginAnimatedQr() {
   drawAnimatedQr();
 }
 
+void buildMultisigSeedCandidates(std::vector<multisig::SeedCandidate>& out) {
+  out.clear();
+  // Semilla activa (con su passphrase si la hay).
+  if (fingerprintValid) {
+    multisig::SeedCandidate c = {words, targetWords,
+                                 passphraseActive ? activePassphrase : ""};
+    out.push_back(c);
+  }
+  // Resto de semillas cargadas en RAM/vault (sin passphrase).
+  for (uint8_t i = 0; i < loadedSeedCount; ++i) {
+    if (!loadedSeeds[i].used) continue;
+    bool dup = false;
+    if (activeLoadedSeed == static_cast<int8_t>(i)) dup = true;
+    for (const auto& c : out)
+      if (c.indices == loadedSeeds[i].indices && c.count == loadedSeeds[i].count)
+        dup = true;
+    if (dup) continue;
+    multisig::SeedCandidate c = {loadedSeeds[i].indices, loadedSeeds[i].count, ""};
+    out.push_back(c);
+  }
+}
+
+void drawMultisigConfirm() {
+  blankPage();
+  title("MULTISIG TRANSACTION", "P2WSH sortedmulti (Sparrow)");
+  const uint8_t m = txMsInfo.m, n = txMsInfo.n;
+
+  std::vector<multisig::SeedCandidate> seeds;
+  buildMultisigSeedCandidates(seeds);
+
+  // Cuenta firmas existentes y claves del Vault disponibles.
+  uint8_t existingSigs = 0, vaultKeys = 0;
+  if (!parsedTx.inputs.empty()) {
+    const auto& in = parsedTx.inputs[0];
+    multisig::MultisigScript ms;
+    if (multisig::parseSortedMulti(in.witnessScript, in.witnessScriptLen, ms)) {
+      int8_t matchByKey[multisig::kMaxKeys];
+      multisig::matchSigners(in, ms, seeds, matchByKey);
+      for (uint8_t k = 0; k < ms.n; ++k) {
+        const uint8_t* s; size_t sl;
+        if (multisig::findSig(in.partialSigs, ms.keys[k], &s, &sl)) existingSigs++;
+        else if (matchByKey[k] >= 0) vaultKeys++;
+      }
+    }
+  }
+
+  textStyle(page, 2);
+  int y = 175;
+  page.setCursor(25, y); page.printf(lang::tr("Politica: %u de %u"), m, n); y += 42;
+  page.setCursor(25, y); page.print(lang::tr("Tipo: Native SegWit P2WSH")); y += 42;
+  page.setCursor(25, y); page.print(lang::tr("Firmas existentes:")); page.setCursor(320, y); page.print(existingSigs); y += 42;
+  page.setCursor(25, y); page.print(lang::tr("Claves del Vault disponibles:")); page.setCursor(320, y); page.print(vaultKeys); y += 42;
+  page.setCursor(25, y); page.print(lang::tr("Necesarias:")); page.setCursor(320, y); page.print(m); y += 42;
+  if (parsedTx.inputsComplete) {
+    page.setCursor(25, y); page.printf(lang::tr("Comision: %s BTC"),
+        psbt::formatSats(parsedTx.fee).c_str()); y += 42;
+  }
+  page.setCursor(25, y); page.printf(lang::tr("Pago: %s BTC"),
+      psbt::formatSats(parsedTx.totalPay).c_str()); y += 42;
+
+  const bool enough = (existingSigs + vaultKeys) >= m;
+  buttonOn(page, kBack, lang::tr("CANCELAR"), true, focusIndex == 0);
+  String signLabel = String(lang::tr("FIRMAR")) + " (" + String(vaultKeys) + ")";
+  buttonOn(page, kFirmar, signLabel.c_str(), enough, focusIndex == 1, Icon::key);
+  fullRefresh();
+}
+
+void beginMultisigSign() {
+  std::vector<multisig::SeedCandidate> seeds;
+  buildMultisigSeedCandidates(seeds);
+  multisig::SignResult res = multisig::signMultisig(parsedTx, seeds);
+
+  txSigned = false;
+  signedTxHex = "";
+  signedPsbtBase64 = "";
+  signedTxBytes.clear();
+  signedFinalizedPsbt.clear();
+
+  if (res.finalized) {
+    signedTxBytes = res.rawTx;
+    signedTxHex = hexEncode(signedTxBytes);
+    signedFinalizedPsbt = res.finalizedPsbt;  // (vacio: no se reconstruye el final)
+    txSigned = true;
+    saveSignedTxToSd(signedTxHex);
+    Serial.printf("[SIGNED] %s\n", signedTxHex.c_str());
+    if (signedTxHex.length()) buildSignedTxQr();
+    screen = Screen::signed_mode; focusIndex = 0; drawSignedMode();
+  } else {
+    // PSBT parcialmente firmada: exportar por QR/BBQr.
+    signedFinalizedPsbt = res.partialPsbt;
+    signedPsbtBase64 = base64Encode(res.partialPsbt);
+    txSigned = false;
+    // Reutiliza la pantalla de emision (SPARROW/BLUEWALLET) con la PSBT parcial.
+    screen = Screen::signed_mode; focusIndex = 0; drawSignedMode();
+  }
+}
+
 void beginSignTx() {
+  if (txIsMultisig) { beginMultisigSign(); return; }
   txSigned = false;
   signedTxHex = "";
   signedPsbtBase64 = "";
@@ -2995,6 +3097,20 @@ bool isBase64Char(char c) {
          (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
 }
 
+void afterPsbtParsed(bool fromSerial) {
+  txIsMultisig = multisig::detect(parsedTx, txMsInfo);
+  if (txIsMultisig) {
+    Serial.printf("[MULTISIG] detected P2WSH policy=%u-of-%u\n", txMsInfo.m, txMsInfo.n);
+    screen = Screen::multisig_confirm;
+    focusIndex = 0;
+    drawMultisigConfirm();
+  } else if (fromSerial) {
+    screen = Screen::tx_review;
+    focusIndex = 0;
+    drawTxReview();
+  }
+}
+
 void processSerialText(const String& payload) {
   std::vector<uint8_t> data(payload.length());
   memcpy(data.data(), payload.c_str(), payload.length());
@@ -3002,9 +3118,7 @@ void processSerialText(const String& payload) {
     txIsPsbt = true;
     saveReceivedPsbt(data);
     Serial.printf("[SERIAL] PSBT cargado (%u chars)\n", static_cast<unsigned>(payload.length()));
-    screen = Screen::tx_review;
-    focusIndex = 0;
-    drawTxReview();
+    afterPsbtParsed(true);
     showToast("PSBT recibido por serial");
   } else {
     Serial.println("[SERIAL] error: no es un PSBT valido (base64/hex/binario)");
@@ -3033,9 +3147,7 @@ void processSerialBinary(const std::vector<uint8_t>& payload, const String& shaH
   if (psbt::tryParsePsbt(payload, parsedTx)) {
     txIsPsbt = true;
     saveReceivedPsbt(payload);
-    screen = Screen::tx_review;
-    focusIndex = 0;
-    drawTxReview();
+    afterPsbtParsed(true);
     showToast("PSBT recibido por serial");
   } else {
     Serial.println("[SERIAL] no es un PSBT valido");
@@ -3455,6 +3567,7 @@ void drawScreen() {
     case Screen::settings_clean: drawSettingsClean(); break;
     case Screen::settings_derivation: drawSettingsDerivation(); break;
     case Screen::settings_radio: drawSettingsRadio(); break;
+    case Screen::multisig_confirm: drawMultisigConfirm(); break;
   }
 }
 
@@ -3750,6 +3863,10 @@ void updateFocusButton(uint8_t index) {
     case Screen::settings_radio:
       updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
+    case Screen::multisig_confirm:
+      if (index == 0) updateButton(kBack, "CANCELAR", true, index == focusIndex);
+      else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
+      break;
     case Screen::tx_review:
       if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
       else if (index == 1) updateButton(kDetail, "DETALLE", true, index == focusIndex, Icon::list);
@@ -3798,6 +3915,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::settings_clean) count = device_settings::kCleanOptionCount + 1;
   else if (screen == Screen::settings_derivation) count = kPublicProfileCount + 1;
   else if (screen == Screen::settings_radio) count = 1;
+  else if (screen == Screen::multisig_confirm) count = 2;
   else if (screen == Screen::signed_tx) count = 1;
   else if (screen == Screen::signed_mode) count = 3;
   else if (screen == Screen::animated_qr) count = 1;
@@ -4374,6 +4492,9 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::settings_radio) {
     if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 4; drawScreen(); }
+  } else if (screen == Screen::multisig_confirm) {
+    if (kBack.contains(x, y)) { screen = Screen::tx_review; focusIndex = 0; drawScreen(); }
+    else if (kFirmar.contains(x, y) && fingerprintValid) { beginMultisigSign(); }
   }
 }
 
@@ -4518,6 +4639,9 @@ void activateFocus() {
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings_radio) {
     click(kBack.x + 5, kBack.y + 5);
+  } else if (screen == Screen::multisig_confirm) {
+    const Rect& r = focusIndex == 0 ? kBack : kFirmar;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::signed_tx) {
     click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::signed_mode) {
@@ -4618,8 +4742,16 @@ void loop() {
         }
       } else {
         txIsPsbt = psbt::tryParsePsbt(wifiServer.data(), parsedTx);
-        if (txIsPsbt) saveReceivedPsbt(wifiServer.data());
-        drawWifiReceive();
+        if (txIsPsbt) {
+          saveReceivedPsbt(wifiServer.data());
+          txIsMultisig = multisig::detect(parsedTx, txMsInfo);
+          if (txIsMultisig) {
+            wifiServer.clear();
+            screen = Screen::multisig_confirm; focusIndex = 0; drawMultisigConfirm();
+          } else {
+            drawWifiReceive();
+          }
+        } else drawWifiReceive();
       }
     }
   }

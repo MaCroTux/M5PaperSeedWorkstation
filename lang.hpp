@@ -376,6 +376,13 @@ inline const char* tr(const char* es) {
     {"BIP84 (SegWit)", "BIP84 (SegWit)"},
     {"BIP86 (Taproot)", "BIP86 (Taproot)"},
     {"Tipo de script", "Script type"},
+    {"MULTISIG TRANSACTION", "Multisig transaction"},
+    {"P2WSH sortedmulti (Sparrow)", "P2WSH sortedmulti (Sparrow)"},
+    {"Politica: %u de %u", "Policy: %u of %u"},
+    {"Tipo: Native SegWit P2WSH", "Type: Native SegWit P2WSH"},
+    {"Firmas existentes:", "Existing signatures:"},
+    {"Claves del Vault disponibles:", "Available Vault keys:"},
+    {"Necesarias:", "Required:"},
 
     // Perfiles
     {"Legacy P2PKH", "Legacy P2PKH"},
