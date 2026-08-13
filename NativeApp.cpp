@@ -2818,14 +2818,18 @@ void drawTxReview() {
 
 String serialBuffer;
 
+bool isBase64Char(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+}
+
 void processSerialTransaction(const String& payload) {
   std::vector<uint8_t> data(payload.length());
   memcpy(data.data(), payload.c_str(), payload.length());
   if (psbt::tryParsePsbt(data, parsedTx)) {
     txIsPsbt = true;
     saveReceivedPsbt(data);
-    Serial.printf("[SERIAL] PSBT cargado (%u bytes), fingerprint del wallet detectado\n",
-                  static_cast<unsigned>(payload.length()));
+    Serial.printf("[SERIAL] PSBT cargado (%u chars)\n", static_cast<unsigned>(payload.length()));
     screen = Screen::tx_review;
     focusIndex = 0;
     drawTxReview();
@@ -2837,29 +2841,36 @@ void processSerialTransaction(const String& payload) {
 void checkSerialCommand() {
   while (Serial.available()) {
     const char c = static_cast<char>(Serial.read());
-    if (c == '\n' || c == '\r') {
-      serialBuffer.trim();
-      if (serialBuffer.length() > 0) {
-        const int colon = serialBuffer.indexOf(':');
-        if (colon > 0) {
-          String cmd = serialBuffer.substring(0, colon);
-          cmd.trim();
-          String payload = serialBuffer.substring(colon + 1);
-          payload.trim();
-          if (cmd.equalsIgnoreCase("incommit-transaction") ||
-              cmd.equalsIgnoreCase("psbt") ||
-              cmd.equalsIgnoreCase("firmar")) {
-            Serial.printf("[SERIAL] comando '%s' (%u chars)\n", cmd.c_str(),
-                          static_cast<unsigned>(payload.length()));
-            processSerialTransaction(payload);
-          } else {
-            Serial.printf("[SERIAL] comando desconocido: %s\n", cmd.c_str());
-          }
-        }
+    if (serialBuffer.length() >= 16384) serialBuffer = "";
+    serialBuffer += c;
+
+    // Buscar el comando en cualquier punto del flujo (ignora basura previa).
+    int idx = serialBuffer.indexOf("incommit-transaction:");
+    if (idx < 0) idx = serialBuffer.indexOf("psbt:");
+    if (idx < 0) idx = serialBuffer.indexOf("firmar:");
+    if (idx < 0) continue;
+
+    const int colon = serialBuffer.indexOf(':', idx);
+    if (colon < 0) { serialBuffer = ""; continue; }
+
+    // Extraer el payload: saltar espacios y capturar caracteres base64/hex.
+    String payload;
+    size_t i = colon + 1;
+    while (i < serialBuffer.length()) {
+      const char ch = serialBuffer[i];
+      if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '"') {
+        if (payload.length() == 0) { ++i; continue; }
+        break;
       }
-      serialBuffer = "";
-    } else if (serialBuffer.length() < 16384) {
-      serialBuffer += c;
+      if (isBase64Char(ch)) { payload += ch; ++i; }
+      else break;
+    }
+    serialBuffer = "";
+    if (payload.length() >= 20) {
+      Serial.printf("[SERIAL] comando detectado (%u chars)\n", static_cast<unsigned>(payload.length()));
+      processSerialTransaction(payload);
+    } else {
+      Serial.println("[SERIAL] payload vacio o demasiado corto");
     }
   }
 }
