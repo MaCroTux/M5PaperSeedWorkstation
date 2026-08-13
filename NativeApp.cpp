@@ -2633,37 +2633,38 @@ void drawTxInfo() {
   page.printf("Entradas: %u   Salidas: %u",
               static_cast<unsigned>(parsedTx.inputs.size()),
               static_cast<unsigned>(parsedTx.outputs.size()));
-  y += 40;
+  y += 34;
   if (parsedTx.inputsComplete) {
     page.setCursor(20, y);
     page.printf("Total a gastar: %s BTC", psbt::formatSats(parsedTx.totalIn).c_str());
-    y += 40;
+    y += 34;
   }
   page.setCursor(20, y);
   page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
-  y += 40;
+  y += 34;
   page.setCursor(20, y);
   if (parsedTx.hasChangeInfo)
     page.printf("Cambio: %s BTC", psbt::formatSats(parsedTx.totalChange).c_str());
   else
     page.print("Cambio: no marcado");
-  y += 40;
+  y += 34;
   if (parsedTx.inputsComplete) {
     page.setCursor(20, y);
     page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
-    y += 40;
+    y += 34;
   }
   if (parsedTx.hasChangeInfo) {
     page.setCursor(20, y);
     page.print("Comprueba tu direccion de cambio");
-    y += 36;
+    y += 34;
   }
-  y += 12;
+  y += 6;
 
+  // Mostrar siempre las dos direcciones (pago y cambio).
   const size_t maxShow = 2;
   for (size_t i = 0; i < parsedTx.outputs.size() && i < maxShow; ++i) {
     const auto& o = parsedTx.outputs[i];
-    if (y > 600) break;
+    if (y > 800) break;
     const String addr = o.address.length() ? o.address : "direccion no estandar";
     const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
 
@@ -2674,7 +2675,7 @@ void drawTxInfo() {
     page.setCursor(34, y + 8);
     page.printf("%s: %s BTC", label.c_str(), psbt::formatSats(o.value).c_str());
     drawGroupedAddress(page, addr, 270, y + 42, 3, 46);
-    y += boxH + 14;
+    y += boxH + 12;
   }
   if (parsedTx.outputs.size() > maxShow) {
     page.setCursor(20, y);
