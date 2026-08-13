@@ -2818,6 +2818,7 @@ void beginSignTx() {
     signedPsbtBase64 = base64Encode(finalizedPsbt);
     txSigned = true;
     saveSignedTxToSd(signedTxHex);
+    Serial.printf("[SIGNED] %s\n", signedTxHex.c_str());
     if (signedPsbtBase64.length()) buildSignedTxQr();
   }
   screen = Screen::signed_tx;
