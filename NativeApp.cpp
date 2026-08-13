@@ -71,7 +71,8 @@ constexpr Rect kDiceValue[] = {{30, 330, 150, 80}, {195, 330, 150, 80}, {360, 33
 constexpr Rect kDiceReset{30, 540, 480, 60};
 constexpr Rect kActiveMenu[] = {{40, 160, 460, 75}, {40, 250, 460, 75},
                                 {40, 340, 460, 75}, {40, 430, 460, 75},
-                                {40, 520, 460, 75}, {40, 610, 460, 75}};
+                                {40, 520, 460, 75}, {40, 610, 460, 75},
+                                {40, 700, 460, 75}};
 constexpr const char* kActiveLabels[] = {"VER CLAVE PUBLICA", "BACKUP SEED",
                                          "PASSPHRASE", "EXPLORAR DIRECCIONES",
                                          "DESCARTAR SEED"};
@@ -651,6 +652,7 @@ const char* activeHint(uint8_t index) {
     case 3: return "Deriva direcciones concretas para recibir o para cambio";
     case 4: return sessionUnlocked ? "Cargar o guardar semillas en el vault de sesion"
                                    : "Borra la semilla de la memoria RAM";
+    case 5: return "Recibe un PSBT o archivo por WiFi para firmar";
     default: return "Cierra el vault y borra la clave maestra de RAM";
   }
 }
@@ -1773,30 +1775,30 @@ void drawActiveSeed() {
     if (sessionUnlocked && i == 4) { label = "ACCIONES EN VAULT"; icon = Icon::folder; }
     buttonOn(page, kActiveMenu[i], label, true, focusIndex == i, icon);
   }
+  buttonOn(page, kActiveMenu[5], "RECIBIR POR WIFI", true, focusIndex == 5,
+           Icon::wifi);
   if (sessionUnlocked) {
-    buttonOn(page, kActiveMenu[5], "CERRAR VAULT", true, focusIndex == 5,
+    buttonOn(page, kActiveMenu[6], "CERRAR VAULT", true, focusIndex == 6,
              Icon::lock);
   }
   textStyle(page, 2);
   page.setTextDatum(MC_DATUM);
-  int footerY = 700;
+  int footerY = 800;
   const bool ramOnly = (activeLoadedSeed >= 0 &&
                         !loadedSeeds[activeLoadedSeed].inVault) ||
                        (activeLoadedSeed < 0 && fingerprintValid);
   if (ramOnly) {
     page.drawString("SEED SOLO EN RAM - NO EN VAULT", 270, footerY);
-    footerY += 40;
+    footerY += 36;
   }
   if (passphraseActive) {
     page.drawString("PASSPHRASE: ACTIVA EN RAM", 270, footerY);
-    footerY += 40;
+    footerY += 36;
   }
   if (sessionUnlocked && loadedSeedCount > 1) {
     page.drawString("Toca el FINGERPRINT para cambiar de semilla", 270, footerY);
-    footerY += 40;
+    footerY += 36;
   }
-  page.drawString("La semilla seguira activa", 270, footerY);
-  page.drawString("hasta que decidas descartarla", 270, footerY + 40);
   textStyle(page, 1);
   page.drawString(activeHint(focusIndex), 270, 895);
   textStyle(page, 2);
@@ -2612,6 +2614,8 @@ uint8_t drawGroupedAddress(M5EPD_Canvas& canvas, const String& addr, int cx, int
 }
 
 void drawTxInfo() {
+  Serial.printf("[TX] fingerprintValid=%d txIsPsbt=%d words=%u/%u\n",
+                fingerprintValid, txIsPsbt, wordCount, targetWords);
   title("TRANSACCION", "PSBT sin firmar - verifica con calma");
   textStyle(page, 2);
   int y = 158;
@@ -2852,12 +2856,20 @@ void updateFocusButton(uint8_t index) {
     case Screen::active_seed: {
       static const Icon kActiveIcons[] = {Icon::key, Icon::shield, Icon::lock,
                                           Icon::eye, Icon::trash};
-      const char* label = index == 4 && sessionUnlocked ? "ACCIONES EN VAULT" :
-                          kActiveLabels[index];
-      const Icon icon = index == 4 && sessionUnlocked ? Icon::folder :
-                        kActiveIcons[index];
-      updateButton(kActiveMenu[index], label, true,
-                   index == focusIndex, icon); break;
+      if (index == 5) {
+        updateButton(kActiveMenu[index], "RECIBIR POR WIFI", true,
+                     index == focusIndex, Icon::wifi);
+      } else if (index == 6) {
+        updateButton(kActiveMenu[index], "CERRAR VAULT", true,
+                     index == focusIndex, Icon::lock);
+      } else {
+        const char* label = index == 4 && sessionUnlocked ? "ACCIONES EN VAULT" :
+                            kActiveLabels[index];
+        const Icon icon = index == 4 && sessionUnlocked ? Icon::folder :
+                          kActiveIcons[index];
+        updateButton(kActiveMenu[index], label, true, index == focusIndex, icon);
+      }
+      break;
     }
     case Screen::backup_seed:
       if (sessionUnlocked) {
@@ -3072,7 +3084,7 @@ void updateFocusButton(uint8_t index) {
 void moveFocus(int direction) {
   const uint8_t previous = focusIndex;
   uint8_t count = 1;
-  if (screen == Screen::active_seed) count = sessionUnlocked ? 6 : 5;
+  if (screen == Screen::active_seed) count = sessionUnlocked ? 7 : 6;
   else if (screen == Screen::seed_switcher) count = loadedSeedCount + 1;
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
@@ -3177,7 +3189,8 @@ void click(int x, int y) {
       if (sessionUnlocked) { screen = Screen::vault_actions; focusIndex = 0; drawScreen(); }
       else { screen = Screen::discard_confirm; focusIndex = 0; drawScreen(); }
     }
-    else if (sessionUnlocked && kActiveMenu[5].contains(x, y)) lockSessionVault();
+    else if (kActiveMenu[5].contains(x, y)) { beginWifiReceive(); }
+    else if (sessionUnlocked && kActiveMenu[6].contains(x, y)) lockSessionVault();
   } else if (screen == Screen::seed_switcher) {
     for (uint8_t i = 0; i < loadedSeedCount; ++i) if (kVaultFiles[i].contains(x, y)) {
       if (activateLoadedSeed(i)) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
