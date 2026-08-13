@@ -231,20 +231,32 @@ inline String pubkeyToAddress(const uint8_t pub[33], uint32_t purpose) {
   return r;
 }
 
-// Comprueba si una salida con ruta de derivacion pertenece a nuestra semilla.
-// Devuelve true si pudo derivar/verificar, y en *isOurs* si coincide la direccion.
+// Comprueba si una salida pertenece a nuestra semilla. Si la salida trae ruta
+// de derivacion (clave 0x02) se usa esa ruta; si no (Sparrow no marca el cambio)
+// se busca la direccion en el espacio de derivacion de la wallet.
+inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpose,
+                             const uint8_t* pubkeyHash20, const char* passphrase,
+                             uint8_t outKey[32], uint8_t outPub[33]);
+
 inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words,
                                 size_t count, const char* passphrase, bool& isOurs) {
   isOurs = false;
   uint32_t purpose = 0;
-  if (!out.hasDerivation || !scriptPurpose(out.script, out.scriptLen, purpose)) return false;
+  if (!scriptPurpose(out.script, out.scriptLen, purpose)) return false;
   uint8_t key[32] = {}, pub[33] = {};
-  if (!deriveKey(words, count, out.derivFpr, out.derivPath, passphrase, key, pub)) {
-    bitcoin_hd::wipe(key, 32); return false;
+  bool ok = false;
+  if (out.hasDerivation) {
+    ok = deriveKey(words, count, out.derivFpr, out.derivPath, passphrase, key, pub);
+  } else if (purpose == 84 && out.scriptLen == 22 &&
+             out.script[0] == 0x00 && out.script[1] == 0x14) {
+    ok = findKeyByAddress(words, count, 84, out.script + 2, passphrase, key, pub);
+  } else if (purpose == 44 && out.scriptLen == 25 &&
+             out.script[0] == 0x76 && out.script[1] == 0xa9 && out.script[2] == 0x14) {
+    ok = findKeyByAddress(words, count, 44, out.script + 3, passphrase, key, pub);
   }
-  bitcoin_hd::wipe(key, 32);
+  if (!ok) { bitcoin_hd::wipe(key, 32); return false; }
   const String derived = pubkeyToAddress(pub, purpose);
-  bitcoin_hd::wipe(pub, 33);
+  bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(pub, 33);
   isOurs = derived.length() > 0 && derived == out.address;
   return derived.length() > 0;
 }

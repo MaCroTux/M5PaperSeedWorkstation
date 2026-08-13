@@ -2627,51 +2627,71 @@ void drawTxInfo() {
   Serial.printf("[TX] fingerprintValid=%d txIsPsbt=%d words=%u/%u\n",
                 fingerprintValid, txIsPsbt, wordCount, targetWords);
   title("TRANSACCION", "PSBT sin firmar - verifica con calma");
+
+  // Clasificar cada salida: nuestra (cambio) o externa (pago), buscando la
+  // direccion en la wallet (Sparrow no marca el cambio en el PSBT).
+  const bool haveSeed = fingerprintValid;
+  uint64_t payTotal = 0, changeTotal = 0;
+  for (size_t i = 0; i < parsedTx.outputs.size(); ++i) {
+    bool ours = false;
+    if (haveSeed)
+      tx_sign::outputMatchesWallet(parsedTx.outputs[i], words, targetWords,
+                                   passphraseActive ? activePassphrase : "", ours);
+    if (ours) changeTotal += parsedTx.outputs[i].value;
+    else payTotal += parsedTx.outputs[i].value;
+  }
+
   textStyle(page, 2);
   int y = 158;
-  page.setCursor(20, y); page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
-  y += 42;
   page.setCursor(20, y);
-  if (parsedTx.hasChangeInfo)
-    page.printf("Cambio: %s BTC", psbt::formatSats(parsedTx.totalChange).c_str());
-  else
-    page.print("Cambio: no identificado");
-  y += 42;
+  page.printf("Entradas: %u   Salidas: %u",
+              static_cast<unsigned>(parsedTx.inputs.size()),
+              static_cast<unsigned>(parsedTx.outputs.size()));
+  y += 40;
+  if (parsedTx.inputsComplete) {
+    page.setCursor(20, y);
+    page.printf("Total a gastar: %s BTC", psbt::formatSats(parsedTx.totalIn).c_str());
+    y += 40;
+  }
   page.setCursor(20, y);
-  if (parsedTx.inputsComplete)
+  page.printf("Pago: %s BTC", psbt::formatSats(payTotal).c_str());
+  y += 40;
+  page.setCursor(20, y);
+  if (haveSeed) page.printf("Cambio: %s BTC", psbt::formatSats(changeTotal).c_str());
+  else page.print("Cambio: carga la semilla");
+  y += 40;
+  if (parsedTx.inputsComplete) {
+    page.setCursor(20, y);
     page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
-  else
-    page.print("Comision: desconocida");
-  y += 50;
+    y += 40;
+  }
+  y += 12;
 
   const size_t maxShow = 2;
   for (size_t i = 0; i < parsedTx.outputs.size() && i < maxShow; ++i) {
     const auto& o = parsedTx.outputs[i];
-    if (y > 610) break;
+    if (y > 600) break;
     const String addr = o.address.length() ? o.address : "direccion no estandar";
     const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
 
-    // Aviso de pertenencia para el cambio.
-    String notice;
     bool ours = false;
-    if (o.isChange) {
-      if (!fingerprintValid) {
-        notice = "CAMBIO: sin semilla cargada";
-      } else {
-        bool verified = tx_sign::outputMatchesWallet(
-            o, words, targetWords, passphraseActive ? activePassphrase : "", ours);
-        if (!verified) notice = "CAMBIO: no verificable";
-        else if (ours) notice = "CAMBIO: es tu direccion";
-        else notice = "CAMBIO: NO TE PERTENECE";
-      }
-    }
+    bool verified = false;
+    if (haveSeed)
+      verified = tx_sign::outputMatchesWallet(o, words, targetWords,
+                   passphraseActive ? activePassphrase : "", ours);
+
+    String label;
+    if (!haveSeed) label = "SALIDA";
+    else if (ours) label = "CAMBIO (tuya)";
+    else label = "PAGO";
+    String notice;
+    if (haveSeed && verified && !ours) notice = "direccion externa";
 
     const int boxH = 40 + addrLines * 46 + (notice.length() ? 34 : 0) + 16;
     page.drawRoundRect(20, y, 500, boxH, 8, kBlack);
     textStyle(page, 2);
     page.setCursor(34, y + 8);
-    page.printf("%s: %s BTC", o.isChange ? "CAMBIO" : "PAGO",
-                psbt::formatSats(o.value).c_str());
+    page.printf("%s: %s BTC", label.c_str(), psbt::formatSats(o.value).c_str());
     drawGroupedAddress(page, addr, 270, y + 42, 3, 46);
     if (notice.length()) {
       textStyle(page, 2);
@@ -2832,6 +2852,9 @@ void drawTxReview() {
 }
 
 std::vector<uint8_t> serialBuf;
+bool serialWaitingPayload = false;
+uint32_t serialExpectedLen = 0;
+String serialShaHex;
 
 bool isBase64Char(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -2890,6 +2913,18 @@ void checkSerialCommand() {
   while (Serial.available()) serialBuf.push_back(static_cast<uint8_t>(Serial.read()));
   if (serialBuf.size() > 20000) serialBuf.erase(serialBuf.begin(), serialBuf.begin() + 10000);
 
+  // Esperando el payload binario tras haber recibido la cabecera.
+  if (serialWaitingPayload) {
+    if (serialBuf.size() >= serialExpectedLen) {
+      std::vector<uint8_t> payload(serialBuf.begin(), serialBuf.begin() + serialExpectedLen);
+      serialBuf.erase(serialBuf.begin(), serialBuf.begin() + serialExpectedLen);
+      serialWaitingPayload = false;
+      processSerialBinary(payload, serialShaHex);
+    } else {
+      return;
+    }
+  }
+
   // Protocolo binario del script: "M5PSBT <len> <sha256>\n" + payload binario.
   static const char kHdr[] = "M5PSBT ";
   const size_t hlen = 7;
@@ -2908,12 +2943,15 @@ void checkSerialCommand() {
     if (j < serialBuf.size() && (serialBuf[j] == '\n' || serialBuf[j] == '\r')) ++j;
     const uint32_t len = lenStr.toInt();
     if (len == 0) { serialBuf.erase(serialBuf.begin(), serialBuf.begin() + j); break; }
-    if (j + len > serialBuf.size()) break;  // aun no llego el payload completo
-    std::vector<uint8_t> payload(serialBuf.begin() + j, serialBuf.begin() + j + len);
-    serialBuf.erase(serialBuf.begin(), serialBuf.begin() + j + len);
-    processSerialBinary(payload, sha);
+    serialBuf.erase(serialBuf.begin(), serialBuf.begin() + j);
+    serialExpectedLen = len;
+    serialShaHex = sha;
+    serialWaitingPayload = true;
+    Serial.println("READY");
+    Serial.flush();
     break;
   }
+  if (serialWaitingPayload) return;
 
   // Comando de texto: incommit-transaction:/psbt:/firmar: <base64/hex>.
   static const char* kCmds[] = {"incommit-transaction:", "psbt:", "firmar:"};
