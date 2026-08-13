@@ -250,10 +250,10 @@ inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words
     ok = deriveKey(words, count, out.derivFpr, out.derivPath, passphrase, key, pub);
   } else if (purpose == 84 && out.scriptLen == 22 &&
              out.script[0] == 0x00 && out.script[1] == 0x14) {
-    ok = findKeyByAddress(words, count, 84, out.script + 2, passphrase, key, pub, true, 50);
+    ok = findKeyByAddress(words, count, 84, out.script + 2, passphrase, key, pub, true, 20);
   } else if (purpose == 44 && out.scriptLen == 25 &&
              out.script[0] == 0x76 && out.script[1] == 0xa9 && out.script[2] == 0x14) {
-    ok = findKeyByAddress(words, count, 44, out.script + 3, passphrase, key, pub, true, 50);
+    ok = findKeyByAddress(words, count, 44, out.script + 3, passphrase, key, pub, true, 20);
   }
   if (!ok) { bitcoin_hd::wipe(key, 32); return false; }
   const String derived = pubkeyToAddress(pub, purpose);

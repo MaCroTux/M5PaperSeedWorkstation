@@ -2626,21 +2626,32 @@ uint8_t drawGroupedAddress(M5EPD_Canvas& canvas, const String& addr, int cx, int
 void drawTxInfo() {
   Serial.printf("[TX] fingerprintValid=%d txIsPsbt=%d words=%u/%u\n",
                 fingerprintValid, txIsPsbt, wordCount, targetWords);
-  title("TRANSACCION", "PSBT sin firmar - verifica con calma");
+  const bool haveSeed = fingerprintValid;
 
   // Clasificar cada salida: nuestra (cambio) o externa (pago), buscando la
-  // direccion en la wallet (Sparrow no marca el cambio en el PSBT).
-  const bool haveSeed = fingerprintValid;
+  // direccion en la rama de cambio de la wallet.
+  bool outputOurs[8] = {false};
   uint64_t payTotal = 0, changeTotal = 0;
-  for (size_t i = 0; i < parsedTx.outputs.size(); ++i) {
-    bool ours = false;
-    if (haveSeed)
+  if (haveSeed) {
+    title("TRANSACCION", "Verificando direccion de cambio...");
+    textStyle(page, 2);
+    page.setCursor(20, 240); page.println("Buscando tu direccion de cambio");
+    page.setCursor(20, 285); page.println("en las primeras 20 direcciones...");
+    fullRefresh();
+
+    for (size_t i = 0; i < parsedTx.outputs.size() && i < 8; ++i) {
+      bool ours = false;
       tx_sign::outputMatchesWallet(parsedTx.outputs[i], words, targetWords,
                                    passphraseActive ? activePassphrase : "", ours);
-    if (ours) changeTotal += parsedTx.outputs[i].value;
-    else payTotal += parsedTx.outputs[i].value;
+      outputOurs[i] = ours;
+      if (ours) changeTotal += parsedTx.outputs[i].value;
+      else payTotal += parsedTx.outputs[i].value;
+    }
+  } else {
+    payTotal = parsedTx.totalOut;
   }
 
+  title("TRANSACCION", "PSBT sin firmar - verifica con calma");
   textStyle(page, 2);
   int y = 158;
   page.setCursor(20, y);
@@ -2674,18 +2685,14 @@ void drawTxInfo() {
     const String addr = o.address.length() ? o.address : "direccion no estandar";
     const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
 
-    bool ours = false;
-    bool verified = false;
-    if (haveSeed)
-      verified = tx_sign::outputMatchesWallet(o, words, targetWords,
-                   passphraseActive ? activePassphrase : "", ours);
-
+    const bool ours = outputOurs[i];
     String label;
     if (!haveSeed) label = "SALIDA";
     else if (ours) label = "CAMBIO (tuya)";
     else label = "PAGO";
     String notice;
-    if (haveSeed && verified && !ours) notice = "direccion externa";
+    if (haveSeed && !ours && !o.hasDerivation)
+      notice = "cambio no en tus 20 primeras";
 
     const int boxH = 40 + addrLines * 46 + (notice.length() ? 34 : 0) + 16;
     page.drawRoundRect(20, y, 500, boxH, 8, kBlack);
