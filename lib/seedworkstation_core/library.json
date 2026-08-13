@@ -1,0 +1,7 @@
+{
+  "name": "SeedWorkstationCore",
+  "version": "1.2.0",
+  "description": "Logica comun (BIP39/BIP32/PSBT/firma/multisig/vault/QR) del Seed Workstation. Compartida entre M5Paper y M5Core2.",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

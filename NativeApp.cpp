@@ -1,5 +1,6 @@
 #include <M5EPD.h>
 #include <bootloader_random.h>
+#include "platform/platform.hpp"
 
 #include "bip39_support.hpp"
 #include "bitcoin_fingerprint.hpp"
@@ -21,13 +22,11 @@
 namespace {
 
 constexpr char kVersion[] = "v1.2";
-constexpr int kWidth = 540;
-constexpr int kHeight = 960;
+constexpr int kWidth = DEVICE_WIDTH;
+constexpr int kHeight = DEVICE_HEIGHT;
 constexpr int kRockerRightPin = 37;
 constexpr int kRockerPressPin = 38;
 constexpr int kRockerLeftPin = 39;
-constexpr uint8_t kWhite = 0;
-constexpr uint8_t kBlack = 15;
 
 enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_seed, vault_actions, length, keyboard, review, plain_qr,
                     seedqr, public_key, public_key_qr, entropy_length, entropy, dice,
@@ -335,7 +334,7 @@ bool activateLoadedSeed(uint8_t slot) {
 }
 
 void textStyle(M5EPD_Canvas& canvas, uint8_t size = 2,
-               uint8_t foreground = kBlack, uint8_t background = kWhite) {
+               Color foreground = kBlack, Color background = kWhite) {
   canvas.setTextColor(foreground, background);
   canvas.setTextSize(size);
   canvas.setTextDatum(TL_DATUM);
@@ -381,7 +380,7 @@ enum class Icon : uint8_t {
   shield, x, check, wifi
 };
 
-void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, uint8_t c) {
+void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, Color c) {
   switch (icon) {
     case Icon::key:
       canvas.fillCircle(cx - 4, cy, 6, c);
@@ -544,8 +543,8 @@ void buttonOn(M5EPD_Canvas& canvas, const Rect& r, const char* label,
               bool enabled = true, bool selected = false,
               Icon icon = Icon::none) {
   const char* l = lang::tr(label);
-  const uint8_t background = selected && enabled ? kBlack : kWhite;
-  const uint8_t foreground = selected && enabled ? kWhite : kBlack;
+  const Color background = selected && enabled ? kBlack : kWhite;
+  const Color foreground = selected && enabled ? kWhite : kBlack;
   canvas.fillRoundRect(r.x, r.y, r.w, r.h, 10, background);
   canvas.drawRoundRect(r.x, r.y, r.w, r.h, 10, foreground);
   canvas.setTextColor(foreground, background);
