@@ -12,12 +12,14 @@
 #include "psbt_parser.hpp"
 #include "tx_sign.hpp"
 #include "bbqr.hpp"
+#include "lang.hpp"
+#include "device_settings.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
 namespace {
 
-constexpr char kVersion[] = "v1.0";
+constexpr char kVersion[] = "v1.1";
 constexpr int kWidth = 540;
 constexpr int kHeight = 960;
 constexpr int kRockerRightPin = 37;
@@ -34,8 +36,9 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
-                     signed_tx, locked, tx_review, utxo_detail, signed_mode,
-                     animated_qr };
+                     wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
+                     animated_qr, settings, settings_lang, settings_timeout,
+                     settings_derivation, settings_radio };
 
 struct Rect {
   int x, y, w, h;
@@ -44,12 +47,14 @@ struct Rect {
   }
 };
 
-constexpr Rect kMenu[] = {{40, 165, 460, 80}, {40, 260, 460, 80},
-                          {40, 355, 460, 80}, {40, 450, 460, 80},
-                          {40, 545, 460, 80}, {40, 640, 460, 80}};
+constexpr Rect kMenu[] = {{40, 160, 460, 74}, {40, 243, 460, 74},
+                          {40, 326, 460, 74}, {40, 409, 460, 74},
+                          {40, 492, 460, 74}, {40, 575, 460, 74}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "AYUDA", "RECIBIR POR WIFI", "BLOQUEAR"};
+                                       "RECIBIR POR WIFI", "AJUSTES",
+                                       "BLOQUEAR"};
+constexpr Rect kHelpIcon{456, 776, 64, 64};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
@@ -203,6 +208,9 @@ constexpr uint32_t kSessionTimeoutMs = 180000;
 constexpr uint32_t kSessionTimeoutWarnMs = 15000;
 uint32_t lastWarnSecond = 0;
 Screen sessionLockReturn = Screen::menu;
+device_settings::Settings gSettings = device_settings::defaults();
+Screen screensaverReturn = Screen::menu;
+bool screensaverHardLock = false;
 constexpr uint8_t kMaxLoadedSeeds = 6;
 struct LoadedSeed {
   uint16_t indices[24];
@@ -264,7 +272,7 @@ void clearDerivedData() {
   publicExtendedKey = ""; activeAddress = "";
   memset(publicKeyQrBuffer, 0, sizeof(publicKeyQrBuffer));
   memset(addressQrBuffer, 0, sizeof(addressQrBuffer));
-  addressIndex = 0; addressChange = 0; publicKeyProfile = 2;
+  addressIndex = 0; addressChange = 0; publicKeyProfile = gSettings.defaultProfile;
 }
 
 void clearPassphrase() {
@@ -330,36 +338,37 @@ void textStyle(M5EPD_Canvas& canvas, uint8_t size = 2,
 
 void centeredFit(M5EPD_Canvas& canvas, const char* text, int y,
                  int maxWidth = 500, uint8_t preferredSize = 2) {
+  const char* t = lang::tr(text);
   uint8_t size = preferredSize;
   textStyle(canvas, size);
-  while (size > 1 && canvas.textWidth(text) > maxWidth) {
+  while (size > 1 && canvas.textWidth(t) > maxWidth) {
     textStyle(canvas, --size);
   }
   canvas.setTextDatum(MC_DATUM);
-  canvas.drawString(text, kWidth / 2, y);
+  canvas.drawString(t, kWidth / 2, y);
   canvas.setTextDatum(TL_DATUM);
 }
 
-void fingerprintIcon(M5EPD_Canvas& canvas, int cx, int cy) {
-  // Huella monocroma sencilla: lineas concentricas, sin grises ni tramados.
-  canvas.drawEllipse(cx, cy, 20, 27, kBlack);
-  canvas.drawEllipse(cx, cy, 15, 22, kBlack);
-  canvas.drawEllipse(cx, cy, 10, 17, kBlack);
-  canvas.drawEllipse(cx, cy, 5, 11, kBlack);
-  canvas.drawLine(cx, cy + 2, cx, cy + 25, kWhite);
-  canvas.drawLine(cx - 1, cy + 8, cx - 6, cy + 25, kBlack);
-  canvas.drawLine(cx + 1, cy + 8, cx + 6, cy + 25, kBlack);
+void fingerprintIcon(M5EPD_Canvas& canvas, int cx, int cy, uint8_t c, uint8_t bg) {
+  // Huella estilizada: arcos concentricos + "delta" inferior.
+  canvas.drawEllipse(cx, cy, 22, 29, c);
+  canvas.drawEllipse(cx, cy, 17, 24, c);
+  canvas.drawEllipse(cx, cy, 12, 19, c);
+  canvas.drawEllipse(cx, cy, 7, 14, c);
+  canvas.drawEllipse(cx, cy, 3, 9, c);
+  canvas.drawLine(cx, cy + 2, cx, cy + 25, bg);
+  canvas.drawLine(cx - 1, cy + 9, cx - 7, cy + 25, c);
+  canvas.drawLine(cx + 1, cy + 9, cx + 7, cy + 25, c);
 }
 
 void fingerprintBadge() {
   const Rect& badge = kFingerprintBadge;
-  page.fillRoundRect(badge.x, badge.y, badge.w, badge.h, 8, kWhite);
-  page.drawRoundRect(badge.x, badge.y, badge.w, badge.h, 8, kBlack);
-  fingerprintIcon(page, badge.x + 31, badge.y + 35);
-  textStyle(page, 1);
-  page.setCursor(badge.x + 62, badge.y + 10);
+  page.fillRoundRect(badge.x, badge.y, badge.w, badge.h, 12, kBlack);
+  fingerprintIcon(page, badge.x + 32, badge.y + 36, kWhite, kBlack);
+  textStyle(page, 1, kWhite, kBlack);
+  page.setCursor(badge.x + 60, badge.y + 12);
   page.println("FINGERPRINT");
-  textStyle(page, 2);
+  textStyle(page, 2, kWhite, kBlack);
   page.setTextDatum(MR_DATUM);
   const char* value = !fingerprintSelfTest ? "ERROR" :
                       fingerprintValid ? activeFingerprint + 5 : "--------";
@@ -370,10 +379,10 @@ void fingerprintBadge() {
 void title(const char* heading, const char* subtitle) {
   textStyle(page, 3);
   page.setCursor(20, 20);
-  page.println(heading);
+  page.println(lang::tr(heading));
   textStyle(page, 2);
   page.setCursor(20, 88);
-  page.println(subtitle);
+  page.println(lang::tr(subtitle));
   fingerprintBadge();
   page.drawFastHLine(20, 140, kWidth - 40, kBlack);
 }
@@ -546,6 +555,7 @@ void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, uint8_t c) {
 void buttonOn(M5EPD_Canvas& canvas, const Rect& r, const char* label,
               bool enabled = true, bool selected = false,
               Icon icon = Icon::none) {
+  const char* l = lang::tr(label);
   const uint8_t background = selected && enabled ? kBlack : kWhite;
   const uint8_t foreground = selected && enabled ? kWhite : kBlack;
   canvas.fillRoundRect(r.x, r.y, r.w, r.h, 10, background);
@@ -553,13 +563,13 @@ void buttonOn(M5EPD_Canvas& canvas, const Rect& r, const char* label,
   canvas.setTextColor(foreground, background);
   canvas.setTextSize(2);
   const int textLimit = icon == Icon::none ? r.w - 24 : r.w - 68;
-  if (canvas.textWidth(label) > textLimit) canvas.setTextSize(1);
+  if (canvas.textWidth(l) > textLimit) canvas.setTextSize(1);
   canvas.setTextDatum(MC_DATUM);
   if (icon == Icon::none) {
-    canvas.drawString(label, r.x + r.w / 2, r.y + r.h / 2);
+    canvas.drawString(l, r.x + r.w / 2, r.y + r.h / 2);
   } else {
     drawIcon(canvas, icon, r.x + 30, r.y + r.h / 2, foreground);
-    canvas.drawString(label, r.x + 30 + (r.w - 52) / 2, r.y + r.h / 2);
+    canvas.drawString(l, r.x + 30 + (r.w - 52) / 2, r.y + r.h / 2);
   }
   if (!enabled) {
     canvas.drawLine(r.x + 12, r.y + r.h / 2, r.x + r.w - 12,
@@ -605,7 +615,7 @@ void storeProgress(uint32_t done, uint32_t total) {
 }
 
 void showToast(const char* msg) {
-  strncpy(toastMessage, msg, sizeof(toastMessage) - 1);
+  strncpy(toastMessage, lang::tr(msg), sizeof(toastMessage) - 1);
   toastMessage[sizeof(toastMessage) - 1] = '\0';
   toastUntil = millis() + 1600;
   M5EPD_Canvas t(&M5.EPD);
@@ -628,7 +638,7 @@ void blankPage() {
   page.setTextDatum(BL_DATUM);
   page.drawString(String("Firmware: ") + kVersion, 20, 954);
   page.setTextDatum(BR_DATUM);
-  page.drawString("NO USAR FONDOS REALES (DEV)", 520, 954);
+  page.drawString(lang::tr("NO USAR FONDOS REALES (DEV)"), 520, 954);
   page.setTextDatum(TL_DATUM);
   textStyle(page);
 }
@@ -639,7 +649,6 @@ const char* menuLabel(uint8_t index) {
 
 bool menuEnabled(uint8_t index) {
   if (index == 1) return !fingerprintValid;  // GENERAR ENTROPIA
-  if (index == 4) return fingerprintValid;   // RECIBIR POR WIFI (necesita semilla)
   return true;
 }
 
@@ -650,9 +659,9 @@ const char* menuHint(uint8_t index) {
     case 1: return fingerprintValid ? "Descarta la semilla activa para crear otra"
                                     : "Genera una semilla aleatoria con entropia propia";
     case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
-    case 3: return "Conceptos basicos y glosario";
-    case 4: return fingerprintValid ? "Recibe un archivo o QR por WiFi desde tu movil"
-                                    : "Carga una semilla para poder recibir y firmar";
+    case 3: return fingerprintValid ? "Recibe un PSBT o una semilla por WiFi desde tu movil"
+                                    : "Recibe una semilla BIP39 por texto desde tu movil";
+    case 4: return "Idioma, bloqueo, derivacion y estado de la radio";
     default: return "Bloquea el dispositivo y muestra la portada";
   }
 }
@@ -675,12 +684,17 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Sin semilla cargada");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::none, Icon::wifi, Icon::lock};
+                                    Icon::wifi, Icon::wrench, Icon::lock};
   for (uint8_t i = 0; i < 6; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
-  page.drawString(menuHint(focusIndex), 270, 660);
+  page.drawString(lang::tr(menuHint(focusIndex)), 270, 670);
+  // Icono de ayuda (opcion secundaria, abajo a la derecha).
+  page.fillCircle(kHelpIcon.x + 32, kHelpIcon.y + 32, 30, kBlack);
+  textStyle(page, 3, kWhite, kBlack);
+  page.setTextDatum(MC_DATUM);
+  page.drawString("?", kHelpIcon.x + 32, kHelpIcon.y + 32);
   page.setTextDatum(TL_DATUM);
   fullRefresh();
 }
@@ -768,7 +782,7 @@ void drawEntropy() {
   title("DIBUJA ENTROPIA", "Traza movimientos largos e irregulares");
   textStyle(page, 2);
   page.setCursor(20, 145);
-  page.printf("Mezcla: %u/%u | RNG: %s", entropySamples, kEntropyTarget,
+  page.printf(lang::tr("Mezcla: %u/%u | RNG: %s"), entropySamples, kEntropyTarget,
               entropyHealthOk ? "FISICO" : "ERROR");
   if (entropyCanvasReady) entropyCanvas.pushToCanvas(kEntropyArea.x,
                                                      kEntropyArea.y, &page);
@@ -922,10 +936,10 @@ void drawDice() {
   buttonOn(page, kDiceLength24, "24 PALABRAS", true, diceTargetWords == 24, Icon::list);
   textStyle(page, 2);
   page.setTextDatum(MC_DATUM);
-  page.drawString(String("Lanzamientos: ") + diceRolls + "/" + diceTarget +
-                  (diceLastRoll ? String("   Ultimo: ") + diceLastRoll : ""),
+  page.drawString(String(lang::tr("Lanzamientos: ")) + diceRolls + "/" + diceTarget +
+                  (diceLastRoll ? String(lang::tr("   Ultimo: ")) + diceLastRoll : ""),
                   270, 288);
-  page.drawString("Toca la cara del dado que ha salido", 270, 320);
+  page.drawString(lang::tr("Toca la cara del dado que ha salido"), 270, 320);
   page.setTextDatum(TL_DATUM);
   for (uint8_t i = 0; i < 6; ++i) {
     buttonOn(page, kDiceValue[i], String(i + 1).c_str(), true, false, Icon::dice);
@@ -1071,9 +1085,9 @@ void drawPassphraseInput() {
         "Las mayusculas importan (ASCII)");
   char* value = currentPassphraseEntry(); const size_t length = strlen(value);
   textStyle(page, 2); page.setCursor(20, 150);
-  page.println(passphraseMismatch ? "NO COINCIDEN. REPITE LA CONFIRMACION." :
-               passphraseActive ? "Hay una passphrase activa en RAM." :
-               "No se guardara. 'Casa' y 'casa' son distintas.");
+  page.println(passphraseMismatch ? lang::tr("NO COINCIDEN. REPITE LA CONFIRMACION.") :
+               passphraseActive ? lang::tr("Hay una passphrase activa en RAM.") :
+               lang::tr("No se guardara. 'Casa' y 'casa' son distintas."));
   page.drawRoundRect(20, 195, 500, 52, 8, kBlack); page.setCursor(35, 204);
   if (passphraseReveal) page.print(value);
   else for (size_t i = 0; i < length; ++i) page.print('*');
@@ -1119,8 +1133,8 @@ void drawVaultLabel() {
         sessionSeed ? "Nombre reconocible dentro del Vault" :
         sessionCreate ? "Nombre del Vault de sesion" : "Nombre reconocible para la copia cifrada");
   textStyle(page, 2); page.setCursor(20, 155);
-  page.println("1-16 letras. Ejemplos:");
-  page.setCursor(20, 180); page.println("ahorro, viajes o casa");
+  page.println(lang::tr("1-16 letras. Ejemplos:"));
+  page.setCursor(20, 180); page.println(lang::tr("ahorro, viajes o casa"));
   page.drawRoundRect(20, 205, 500, 52, 8, kBlack);
   page.setCursor(35, 214); page.print(vaultLabel[0] ? vaultLabel : "_");
   drawKeyboardKeys();
@@ -1169,8 +1183,8 @@ void drawVaultPassword() {
   const size_t length = strlen(value);
   textStyle(page, 2);
   page.setCursor(20, 155);
-  page.println(vaultMismatch ? "NO COINCIDEN: repite la segunda contrasena."
-                             : "Minimo 12 letras. No podremos recuperarla.");
+  page.println(vaultMismatch ? lang::tr("NO COINCIDEN: repite la segunda contrasena.")
+                             : lang::tr("Minimo 12 letras. No podremos recuperarla."));
   page.drawRoundRect(20, 205, 500, 52, 8, kBlack);
   page.setCursor(35, 214);
   const bool revealed = vaultRevealUntil &&
@@ -1240,13 +1254,13 @@ void drawVaultResult() {
   page.drawString(vaultResultText(vaultResult), 270, 290);
   textStyle(page, 2);
   if (vaultResult == encrypted_seed_store::Result::ok) {
-    page.drawString(sessionRecord ? "AES-256-GCM / clave de sesion" :
+    page.drawString(sessionRecord ? lang::tr("AES-256-GCM / clave de sesion") :
                     "AES-256-GCM + PBKDF2 (600.000)", 270, 390);
-    page.drawString(String("Archivo: ") + vaultPath, 270, 445);
-    page.drawString("La semilla sigue activa en memoria.", 270, 510);
+    page.drawString(String(lang::tr("Archivo: ")) + vaultPath, 270, 445);
+    page.drawString(lang::tr("La semilla sigue activa en memoria."), 270, 510);
   } else if (vaultResult == encrypted_seed_store::Result::exists) {
-    page.drawString("El archivo existente", 270, 400);
-    page.drawString("no se ha sobrescrito.", 270, 445);
+    page.drawString(lang::tr("El archivo existente"), 270, 400);
+    page.drawString(lang::tr("no se ha sobrescrito."), 270, 445);
   }
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kAction, "VOLVER AL MENU SEED", true, true);
@@ -1267,9 +1281,9 @@ void saveVault() {
   blankPage();
   title("VAULT SEGURO", "Cifrando y verificando la tarjeta SD...");
   textStyle(page, 2); page.setCursor(30, 260);
-  page.println("Puede tardar. No retires la tarjeta.");
+  page.println(lang::tr("Puede tardar. No retires la tarjeta."));
   page.setCursor(30, 300);
-  page.println("Derivando clave (PBKDF2)...");
+  page.println(lang::tr("Derivando clave (PBKDF2)..."));
   fullRefresh(UPDATE_MODE_DU4);
   drawProgressBar(340, 0); progressPercent = 0;
   vaultResult = encrypted_seed_store::save(vaultPath, vaultPassword, words, targetWords, storeProgress);
@@ -1361,10 +1375,10 @@ void drawVaultList() {
                      "Selecciona una copia cifrada de la SD");
   if (SD.cardType() == CARD_NONE) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
-    page.drawString("SD NO DETECTADA", 270, 350); page.setTextDatum(TL_DATUM);
+    page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
   } else if (!vaultFileCount) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
-    page.drawString("NO HAY ARCHIVOS .VLT", 270, 350); page.setTextDatum(TL_DATUM);
+    page.drawString(lang::tr("NO HAY ARCHIVOS .VLT"), 270, 350); page.setTextDatum(TL_DATUM);
   } else {
     for (uint8_t i = 0; i < vaultFileCount; ++i)
       buttonOn(page, kVaultFiles[i], vaultDisplayName(i), true, focusIndex == i);
@@ -1385,8 +1399,8 @@ void drawVaultUnlock() {
   blankPage(); title("DESBLOQUEAR VAULT", name);
   const size_t length = strlen(vaultPassword);
   textStyle(page, 2); page.setCursor(20, 155);
-  page.println(vaultUnlockError ? "CONTRASENA INCORRECTA O ARCHIVO ALTERADO"
-                                : "Introduce la contrasena del Vault");
+  page.println(vaultUnlockError ? lang::tr("CONTRASENA INCORRECTA O ARCHIVO ALTERADO")
+                                : lang::tr("Introduce la contrasena del Vault"));
   page.drawRoundRect(20, 205, 500, 52, 8, kBlack); page.setCursor(35, 214);
   const bool revealed = vaultRevealUntil &&
       static_cast<int32_t>(vaultRevealUntil - millis()) > 0;
@@ -1417,8 +1431,8 @@ void drawVaultLoaded() {
 
 void loadSelectedVault() {
   blankPage(); title("ABRIR VAULT", "Descifrando y verificando...");
-  textStyle(page, 2); page.setCursor(30, 260); page.println("No retires la tarjeta SD.");
-  page.setCursor(30, 300); page.println("Derivando clave (PBKDF2)...");
+  textStyle(page, 2); page.setCursor(30, 260); page.println(lang::tr("No retires la tarjeta SD."));
+  page.setCursor(30, 300); page.println(lang::tr("Derivando clave (PBKDF2)..."));
   fullRefresh(UPDATE_MODE_DU4);
   drawProgressBar(340, 0); progressPercent = 0;
   uint16_t recovered[24] = {}; uint8_t recoveredCount = 0;
@@ -1520,7 +1534,7 @@ void drawSessionMenu() {
     buttonOn(page, kMenu[2], "VOLVER", true, focusIndex == 2);
   } else {
     textStyle(page, 2); page.setCursor(25, 155);
-    page.printf("Sesion activa: %s", sessionLabel);
+    page.printf(lang::tr("Sesion activa: %s"), sessionLabel);
     buttonOn(page, kMenu[0], "CARGAR SEMILLA", true, focusIndex == 0, Icon::folder);
     buttonOn(page, kMenu[1], "BLOQUEAR VAULT", true, focusIndex == 1, Icon::lock);
     buttonOn(page, kMenu[2], "VOLVER", true, focusIndex == 2);
@@ -1532,7 +1546,7 @@ void drawSessionMetaList() {
   blankPage(); title("VAULT DE SESION", "Selecciona el Vault que quieres abrir");
   if (!sessionMetaCount) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
-    page.drawString("NO HAY VAULTS DE SESION", 270, 350); page.setTextDatum(TL_DATUM);
+    page.drawString(lang::tr("NO HAY VAULTS DE SESION"), 270, 350); page.setTextDatum(TL_DATUM);
   } else for (uint8_t i = 0; i < sessionMetaCount; ++i)
     buttonOn(page, kVaultFiles[i], sessionMetaFiles[i] + 1, true, focusIndex == i);
   buttonOn(page, kBack, "VOLVER", true, focusIndex == sessionMetaCount); fullRefresh();
@@ -1544,7 +1558,7 @@ void drawSessionSeedList() {
         sessionDeleteMode ? "Selecciona el registro que quieres borrar" : sessionLabel);
   if (!sessionSeedCount) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
-    page.drawString("VAULT VACIO", 270, 350); page.setTextDatum(TL_DATUM);
+    page.drawString(lang::tr("VAULT VACIO"), 270, 350); page.setTextDatum(TL_DATUM);
   } else for (uint8_t i = 0; i < sessionSeedCount; ++i)
     buttonOn(page, kVaultFiles[i], sessionSeedFiles[i] + 1, true, focusIndex == i);
   if (!sessionDeleteMode) {
@@ -1571,12 +1585,12 @@ void drawDeleteConfirm() {
                      "Esta operacion no se puede deshacer");
   warningIcon(page, 270, 185);
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
-  page.drawString("Se eliminara de la tarjeta SD:", 270, 345);
+  page.drawString(lang::tr("Se eliminara de la tarjeta SD:"), 270, 345);
   String display = pendingDeletePath[0] == '/' ? pendingDeletePath + 1 : pendingDeletePath;
   uint8_t size = 2; textStyle(page, size);
   while (size > 1 && page.textWidth(display) > 500) { --size; textStyle(page, size); }
   page.drawString(display, 270, 410);
-  textStyle(page, 2); page.drawString("La semilla activa no se descarta.", 270, 480);
+  textStyle(page, 2); page.drawString(lang::tr("La semilla activa no se descarta."), 270, 480);
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, "ELIMINAR ARCHIVO", true, focusIndex == 1, Icon::trash);
@@ -1602,8 +1616,8 @@ void createSessionVault() {
   blankPage();
   title("VAULT DE SESION", "Creando vault seguro...");
   textStyle(page, 2); page.setCursor(30, 260);
-  page.println("Derivando la clave maestra (PBKDF2).");
-  page.setCursor(30, 300); page.println("Puede tardar varios segundos.");
+  page.println(lang::tr("Derivando la clave maestra (PBKDF2)."));
+  page.setCursor(30, 300); page.println(lang::tr("Puede tardar varios segundos."));
   fullRefresh(UPDATE_MODE_DU4);
   drawProgressBar(340, 0); progressPercent = 0;
   const auto result = session_vault_store::create(sessionMetaPath, vaultLabel,
@@ -1622,9 +1636,9 @@ void unlockSessionVault() {
   title("VAULT DE SESION", "DESBLOQUEANDO...");
   warningIcon(page, 270, 205);
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
-  page.drawString("Derivando la clave maestra", 270, 365);
-  page.drawString("Puede tardar varios segundos.", 270, 420);
-  page.drawString("No retires la tarjeta SD.", 270, 475);
+  page.drawString(lang::tr("Derivando la clave maestra"), 270, 365);
+  page.drawString(lang::tr("Puede tardar varios segundos."), 270, 420);
+  page.drawString(lang::tr("No retires la tarjeta SD."), 270, 475);
   page.setTextDatum(TL_DATUM);
   fullRefresh(UPDATE_MODE_DU4);
   delay(80);
@@ -1765,7 +1779,7 @@ void drawReview() {
   const bool complete = wordCount == targetWords;
   const bool valid = complete && bip39::checksum_valid(words, targetWords);
   page.setCursor(20, 795);
-  page.printf("Checksum: %s", !complete ? "INCOMPLETA" : valid ? "VALIDO" : "INVALIDO");
+  page.printf(lang::tr("Checksum: %s"), !complete ? lang::tr("INCOMPLETA") : valid ? lang::tr("VALIDO") : lang::tr("INVALIDO"));
   const char* actionLabel = newSeedIntent == NewSeedIntent::to_vault ? "GUARDAR EN VAULT" :
                             newSeedIntent == NewSeedIntent::ram_only ? "ACTIVAR EN RAM" :
                             "MENU SEED";
@@ -1801,19 +1815,20 @@ void drawActiveSeed() {
                         !loadedSeeds[activeLoadedSeed].inVault) ||
                        (activeLoadedSeed < 0 && fingerprintValid);
   if (ramOnly) {
-    page.drawString("SEED SOLO EN RAM - NO EN VAULT", 270, footerY);
+    page.drawString(lang::tr("SEED SOLO EN RAM - NO EN VAULT"), 270, footerY);
     footerY += 36;
   }
   if (passphraseActive) {
-    page.drawString("PASSPHRASE: ACTIVA EN RAM", 270, footerY);
+    page.drawString(lang::tr("PASSPHRASE: ACTIVA EN RAM"), 270, footerY);
     footerY += 36;
   }
   if (sessionUnlocked && loadedSeedCount > 1) {
-    page.drawString("Toca el FINGERPRINT para cambiar de semilla", 270, footerY);
+    page.drawString(lang::tr("Toca el FINGERPRINT para cambiar de semilla"), 270, footerY);
     footerY += 36;
   }
   textStyle(page, 1);
-  page.drawString(activeHint(focusIndex), 270, 895);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr(activeHint(focusIndex)), 270, 895);
   textStyle(page, 2);
   page.setTextDatum(TL_DATUM);
   fullRefresh();
@@ -2077,13 +2092,13 @@ void drawPublicKey() {
   page.setCursor(20, 170);
   page.printf("Mainnet  %s", selected.path);
   page.setCursor(20, 215);
-  page.println("Revela direcciones e historial.");
+  page.println(lang::tr("Revela direcciones e historial."));
   page.setCursor(20, 255);
-  page.println("No permite gastar.");
+  page.println(lang::tr("No permite gastar."));
   if (!hdSelfTest || !publicExtendedKey.length()) {
     textStyle(page, 3);
     page.setCursor(20, 340);
-    page.println("ERROR DE DERIVACION");
+    page.println(lang::tr("ERROR DE DERIVACION"));
   } else {
     textStyle(page, 2);
     constexpr uint8_t charsPerLine = 36;
@@ -2096,7 +2111,7 @@ void drawPublicKey() {
   }
   if (publicKeyProfile == 3) {
     textStyle(page, 1); page.setCursor(20, 610);
-    page.println("BIP86 conserva prefijo xpub: la ruta identifica Taproot.");
+    page.println(lang::tr("BIP86 conserva prefijo xpub: la ruta identifica Taproot."));
   }
   buttonOn(page, kPublicQr, "MOSTRAR QR", publicExtendedKey.length(), focusIndex == 0, Icon::qr);
   buttonOn(page, kQrPrevious, "ANTERIOR", true, focusIndex == 1, Icon::back);
@@ -2127,7 +2142,7 @@ void drawPublicKeyQr() {
         page.fillRect(ox + x * module, oy + y * module, module, module, kBlack);
   textStyle(page, 2);
   page.setTextDatum(MC_DATUM);
-  page.drawString("CLAVE PUBLICA - DATOS SENSIBLES", 270, 700);
+  page.drawString(lang::tr("CLAVE PUBLICA - DATOS SENSIBLES"), 270, 700);
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kAction, "VOLVER A CLAVE", true, true);
   fullRefresh();
@@ -2157,10 +2172,10 @@ void drawAddressExplorer() {
   const PublicProfile& profile = kPublicProfiles[publicKeyProfile];
   blankPage(); title("DIRECCIONES", profile.type);
   textStyle(page, 2); page.setCursor(20, 160);
-  page.printf("Ruta: %s/%u/%lu", profile.path, addressChange,
+  page.printf(lang::tr("Ruta: %s/%u/%lu"), profile.path, addressChange,
               static_cast<unsigned long>(addressIndex));
   page.setCursor(20, 210);
-  page.printf("Rama: %s", addressChange ? "CAMBIO" : "RECIBIR");
+  page.printf(lang::tr("Rama: %s"), addressChange ? lang::tr("CAMBIO") : lang::tr("RECIBIR"));
   buttonOn(page, kAddressValue, activeAddress.length() ? "" : "ERROR DE DERIVACION");
   if (activeAddress.length()) {
     String lines[4]; uint8_t lineCount = 0;
@@ -2191,7 +2206,7 @@ void drawAddressExplorer() {
   buttonOn(page, kAction, "QR DIRECCION", activeAddress.length(), focusIndex == 6,
            Icon::qr);
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
-  page.drawString("Toca el indice para ir a uno concreto (0-999999)", 270, 765);
+  page.drawString(lang::tr("Toca el indice para ir a uno concreto (0-999999)"), 270, 765);
   page.setTextDatum(TL_DATUM);
   fullRefresh();
 }
@@ -2223,7 +2238,7 @@ void drawAddressIndexInput() {
 }
 
 void openAddressExplorer() {
-  publicKeyProfile = 2;  // BIP84 Native SegWit como opcion predeterminada.
+  publicKeyProfile = gSettings.defaultProfile;
   addressChange = 0; addressIndex = 0;
   updateAddress(); screen = Screen::address_explorer; focusIndex = 0;
   drawAddressExplorer();
@@ -2253,9 +2268,9 @@ void drawDiscardConfirm() {
   blankPage();
   title("DESCARTAR SEED", "Esta accion elimina la semilla de RAM");
   textStyle(page, 2);
-  page.setCursor(30, 220); page.println("Comprueba el fingerprint");
-  page.setCursor(30, 260); page.println("antes de continuar.");
-  page.setCursor(30, 320); page.println("No se puede deshacer.");
+  page.setCursor(30, 220); page.println(lang::tr("Comprueba el fingerprint"));
+  page.setCursor(30, 260); page.println(lang::tr("antes de continuar."));
+  page.setCursor(30, 320); page.println(lang::tr("No se puede deshacer."));
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, "CONFIRMAR DESCARTE", true, focusIndex == 1, Icon::trash);
   fullRefresh();
@@ -2266,9 +2281,9 @@ void drawUnlockConfirm() {
   title("ABRIR VAULT", "Hay una semilla activa en RAM");
   warningIcon(page, 270, 200);
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
-  page.drawString("Al abrir el vault se descartara", 270, 360);
-  page.drawString("la semilla que esta activa ahora.", 270, 405);
-  page.drawString("Si no esta guardada, se perdera.", 270, 460);
+  page.drawString(lang::tr("Al abrir el vault se descartara"), 270, 360);
+  page.drawString(lang::tr("la semilla que esta activa ahora."), 270, 405);
+  page.drawString(lang::tr("Si no esta guardada, se perdera."), 270, 460);
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, "CONTINUAR", true, focusIndex == 1, Icon::folder);
@@ -2280,17 +2295,17 @@ void drawDiagnostics() {
   title("DIAGNOSTICO", "Controlador nativo M5EPD");
   textStyle(page, 2);
   page.setCursor(25, 180);
-  page.println("Pantalla: 540 x 960");
+  page.println(lang::tr("Pantalla: 540 x 960"));
   page.setCursor(25, 235);
-  page.println("Tactil GT911: activo");
+  page.println(lang::tr("Tactil GT911: activo"));
   page.setCursor(25, 290);
-  page.println("Refresco: Canvas A2 / DU4");
+  page.println(lang::tr("Refresco: Canvas A2 / DU4"));
   page.setCursor(25, 345);
   page.printf("BIP39: %s", bip39::self_test() ? "OK" : "ERROR");
   page.setCursor(25, 400);
   page.printf("BIP32 xpub/zpub: %s", hdSelfTest ? "OK" : "ERROR");
   page.setCursor(25, 455);
-  page.printf("microSD: %s", SD.cardType() == CARD_NONE ? "NO DETECTADA" : "OK");
+  page.printf(lang::tr("microSD: %s"), SD.cardType() == CARD_NONE ? lang::tr("NO DETECTADA") : "OK");
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
   fullRefresh();
 }
@@ -2320,7 +2335,7 @@ void drawHelp() {
   int y = 165;
   for (const char* line : lines) {
     page.setCursor(20, y);
-    page.println(line);
+    page.println(lang::tr(line));
     y += 38;
   }
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
@@ -2575,6 +2590,8 @@ void renderScanQrDynamic() {
 
 qr_wifi::QRWiFiServer wifiServer;
 bool wifiResultShown = false;
+Screen wifiModeReturnScreen = Screen::menu;
+uint8_t wifiModeReturnFocus = 4;
 psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
 Screen utxoReturnScreen = Screen::menu;
@@ -2643,32 +2660,32 @@ void drawTxInfo() {
   textStyle(page, 2);
   int y = 158;
   page.setCursor(20, y);
-  page.printf("Entradas: %u   Salidas: %u",
+  page.printf(lang::tr("Entradas: %u   Salidas: %u"),
               static_cast<unsigned>(parsedTx.inputs.size()),
               static_cast<unsigned>(parsedTx.outputs.size()));
   y += 34;
   if (parsedTx.inputsComplete) {
     page.setCursor(20, y);
-    page.printf("Total a gastar: %s BTC", psbt::formatSats(parsedTx.totalIn).c_str());
+    page.printf(lang::tr("Total a gastar: %s BTC"), psbt::formatSats(parsedTx.totalIn).c_str());
     y += 34;
   }
   page.setCursor(20, y);
-  page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
+  page.printf(lang::tr("Pago: %s BTC"), psbt::formatSats(parsedTx.totalPay).c_str());
   y += 34;
   page.setCursor(20, y);
   if (parsedTx.hasChangeInfo)
-    page.printf("Cambio: %s BTC", psbt::formatSats(parsedTx.totalChange).c_str());
+    page.printf(lang::tr("Cambio: %s BTC"), psbt::formatSats(parsedTx.totalChange).c_str());
   else
-    page.print("Cambio: no marcado");
+    page.print(lang::tr("Cambio: no marcado"));
   y += 34;
   if (parsedTx.inputsComplete) {
     page.setCursor(20, y);
-    page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
+    page.printf(lang::tr("Comision: %s BTC"), psbt::formatSats(parsedTx.fee).c_str());
     y += 34;
   }
   if (parsedTx.hasChangeInfo) {
     page.setCursor(20, y);
-    page.print("Comprueba tu direccion de cambio");
+    page.print(lang::tr("Comprueba tu direccion de cambio"));
     y += 34;
   }
   y += 6;
@@ -2678,10 +2695,10 @@ void drawTxInfo() {
   for (size_t i = 0; i < parsedTx.outputs.size() && i < maxShow; ++i) {
     const auto& o = parsedTx.outputs[i];
     if (y > 800) break;
-    const String addr = o.address.length() ? o.address : "direccion no estandar";
+    const String addr = o.address.length() ? o.address : lang::tr("direccion no estandar");
     const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
 
-    const String label = o.isChange ? "CAMBIO" : "PAGO";
+    const String label = o.isChange ? lang::tr("CAMBIO") : lang::tr("PAGO");
     const int boxH = 40 + addrLines * 46 + 16;
     page.drawRoundRect(20, y, 500, boxH, 8, kBlack);
     textStyle(page, 2);
@@ -2692,7 +2709,7 @@ void drawTxInfo() {
   }
   if (parsedTx.outputs.size() > maxShow) {
     page.setCursor(20, y);
-    page.printf("... y %u salidas mas",
+    page.printf(lang::tr("... y %u salidas mas"),
                 static_cast<unsigned>(parsedTx.outputs.size() - maxShow));
   }
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
@@ -2714,13 +2731,13 @@ void drawUtxoDetail() {
     page.printf("#%u  %s BTC", static_cast<unsigned>(i + 1),
                 psbt::formatSats(in.amount).c_str());
     y += 34;
-    const String addr = in.address.length() ? in.address : "direccion no disponible";
+    const String addr = in.address.length() ? in.address : lang::tr("direccion no disponible");
     const uint8_t lines = drawGroupedAddress(page, addr, 270, y, 2, 30);
     y += lines * 30 + 12;
   }
   if (parsedTx.inputs.size() > maxShow) {
     page.setCursor(20, y);
-    page.printf("... y %u entradas mas",
+    page.printf(lang::tr("... y %u entradas mas"),
                 static_cast<unsigned>(parsedTx.inputs.size() - maxShow));
   }
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
@@ -2808,7 +2825,7 @@ void drawSignedTx() {
           page.fillRect(ox + xx * module, oy + yy * module, module, module, kBlack);
     textStyle(page, 1);
     page.setTextDatum(MC_DATUM);
-    page.drawString("Transaccion firmada y guardada en la SD", 270, oy + px + 20);
+    page.drawString(lang::tr("Transaccion firmada y guardada en la SD"), 270, oy + px + 20);
     page.drawString("(" + String(signedTxBytes.size()) + " bytes)", 270, oy + px + 40);
     page.setTextDatum(TL_DATUM);
   }
@@ -2879,7 +2896,7 @@ void drawAnimatedQr() {
   page.drawString(String(static_cast<uint32_t>(bbqrIndex) + 1) + " / " +
                   String(static_cast<uint32_t>(bbqrTotalParts)), 270, oy + px + 40);
   textStyle(page, 2);
-  page.drawString("Manten el movil quieto", 270, oy + px + 80);
+  page.drawString(lang::tr("Manten el movil quieto"), 270, oy + px + 80);
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
   fullRefresh();
@@ -2923,20 +2940,33 @@ void beginSignTx() {
   drawSignedMode();
 }
 
-void drawLocked() {
-  blankPage();
+void drawScreensaver(bool hardLock) {
+  page.fillCanvas(kWhite);
   const int cx = kWidth / 2;
-  const int cy = 300;
-  page.fillCircle(cx, cy, 130, kBlack);
+
+  textStyle(page, 2);
+  page.setTextDatum(MC_DATUM);
+  page.drawString("M5Paper Seed Workstation", cx, 150);
+
+  page.fillCircle(cx, 400, 125, kBlack);
   textStyle(page, 7, kWhite, kBlack);
   page.setTextDatum(MC_DATUM);
-  page.drawString("B", cx, cy);
-  textStyle(page, 2, kBlack, kWhite);
-  page.drawString("M5Paper Seed Workstation", cx, 470);
-  textStyle(page, 3);
-  page.drawString("BLOQUEADO", cx, 545);
+  page.drawString("B", cx, 400);
+
+  if (hardLock) {
+    textStyle(page, 4);
+    page.setTextDatum(MC_DATUM);
+    page.drawString(lang::tr("BLOQUEADO"), cx, 590);
+  }
+
   textStyle(page, 2);
-  page.drawString("Pulsa o toca para desbloquear", cx, 620);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr("Pulsa o toca para desbloquear"), cx, hardLock ? 655 : 590);
+
+  textStyle(page, 1);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(String("Firmware: ") + kVersion + "   " +
+                  String(M5.getBatteryVoltage()) + " mV", cx, 900);
   page.setTextDatum(TL_DATUM);
   fullRefresh();
 }
@@ -2944,9 +2974,18 @@ void drawLocked() {
 void lockDevice() {
   if (sessionUnlocked) lockSessionVault();
   else if (fingerprintValid) discardActiveSeed();
+  screensaverHardLock = true;
   screen = Screen::locked;
   focusIndex = 0;
-  drawLocked();
+  drawScreensaver(true);
+}
+
+void enterScreensaver() {
+  screensaverReturn = screen;
+  screensaverHardLock = false;
+  screen = Screen::screensaver;
+  focusIndex = 0;
+  drawScreensaver(false);
 }
 
 void drawTxReview() {
@@ -3090,12 +3129,24 @@ void checkSerialCommand() {
   }
 }
 
+const char* wifiModeTitle(qr_wifi::Mode mode);
+const char* wifiModeHint(qr_wifi::Mode mode);
+
 void drawWifiReceive() {
   blankPage();
   const auto p = wifiServer.phase();
+  const qr_wifi::Mode mode = wifiServer.mode();
   if (p == qr_wifi::Phase::Received) {
-    if (txIsPsbt) drawTxInfo();
-    else {
+    if (mode == qr_wifi::Mode::kSeedText) {
+      title("SEMILLA NO VALIDA", "No se pudo importar la semilla");
+      warningIcon(page, 270, 200);
+      centeredFit(page, "ERROR", 320, 500, 3);
+      centeredFit(page, "Revisa las palabras y que sean 12 o 24.", 400);
+      buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+      buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
+    } else if (txIsPsbt) {
+      drawTxInfo();
+    } else {
       title("RECIBIDO", "Datos recibidos por WiFi");
       drawWifiResult();
     }
@@ -3107,7 +3158,7 @@ void drawWifiReceive() {
     buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
     buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
   } else {
-    title("RECIBIR POR WIFI", "Escanea el QR para conectarte");
+    title("RECIBIR POR WIFI", wifiModeHint(mode));
     const int module = 8;
     const int px = wifiQr.size * module;
     const int ox = (kWidth - px) / 2;
@@ -3119,26 +3170,219 @@ void drawWifiReceive() {
           page.fillRect(ox + x * module, oy + y * module, module, module, kBlack);
     const int ty = oy + px + 25;
     textStyle(page, 2); page.setTextDatum(MC_DATUM);
-    page.drawString("SSID: " + String(qr_wifi::kApSsid), 270, ty);
-    page.drawString("Clave: " + String(wifiServer.password()), 270, ty + 40);
+    page.drawString(String("SSID: ") + qr_wifi::kApSsid, 270, ty);
+    page.drawString(String(lang::tr("Clave: ")) + wifiServer.password(), 270, ty + 40);
     page.drawString("URL: http://192.168.4.1", 270, ty + 80);
     textStyle(page, 1);
-    page.drawString("Conecta, abre la URL y pega o sube el archivo", 270, ty + 130);
+    page.drawString(String(lang::tr("Modo: ")) + lang::tr(wifiModeTitle(mode)), 270, ty + 130);
     page.setTextDatum(TL_DATUM);
     buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
   }
   fullRefresh();
 }
 
-void beginWifiReceive() {
+const char* wifiModeTitle(qr_wifi::Mode mode) {
+  return mode == qr_wifi::Mode::kFile ? "Subir fichero PSBT" :
+         mode == qr_wifi::Mode::kTxText ? "Pegar transaccion" : "Pegar semilla BIP39";
+}
+
+const char* wifiModeHint(qr_wifi::Mode mode) {
+  return mode == qr_wifi::Mode::kFile
+             ? "Conectate y sube el fichero PSBT desde la web"
+         : mode == qr_wifi::Mode::kTxText
+             ? "Conectate y pega la transaccion en la web"
+             : "Conectate y pega la semilla BIP39 en la web";
+}
+
+void openWifiMode() {
+  wifiModeReturnScreen = screen;
+  wifiModeReturnFocus = focusIndex;
+  screen = Screen::wifi_mode;
+  focusIndex = 0;
+  drawScreen();
+}
+
+void returnFromWifiReceive() {
+  wifiServer.clear();
+  screen = wifiModeReturnScreen;
+  focusIndex = wifiModeReturnFocus;
+  drawScreen();
+}
+
+void drawWifiMode() {
+  blankPage();
+  title("RECIBIR POR WIFI", "Elige que vas a enviar");
+  buttonOn(page, kMenu[0], "SUBIR FICHERO (PSBT)", fingerprintValid, focusIndex == 0, Icon::wifi);
+  buttonOn(page, kMenu[1], "PEGAR TRANSACCION (PSBT)", fingerprintValid, focusIndex == 1, Icon::wifi);
+  buttonOn(page, kMenu[2], "PEGAR SEMILLA BIP39", true, focusIndex == 2, Icon::key);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 3);
+  fullRefresh();
+}
+
+void beginWifiReceive(qr_wifi::Mode mode) {
   wifiResultShown = false;
   txIsPsbt = false;
   wifiServer.clear();
-  wifiServer.start();
+  wifiServer.start(mode);
   buildWifiQr();
   screen = Screen::wifi_receive;
   focusIndex = 0;
   drawWifiReceive();
+}
+
+bool loadSeedText(const std::vector<uint8_t>& data) {
+  if (data.empty() || !isValidUtf8(data)) return false;
+  String text = scanPayloadText(data);
+  text.trim();
+  text.toLowerCase();
+
+  uint16_t indices[24] = {};
+  size_t count = 0;
+  size_t pos = 0;
+  const size_t len = text.length();
+  while (pos < len && count < 24) {
+    while (pos < len && (text[pos] == ' ' || text[pos] == '\t' ||
+                         text[pos] == '\n' || text[pos] == '\r')) ++pos;
+    if (pos >= len) break;
+    const size_t start = pos;
+    while (pos < len && text[pos] != ' ' && text[pos] != '\t' &&
+           text[pos] != '\n' && text[pos] != '\r') ++pos;
+    const String w = text.substring(start, pos);
+    const uint16_t idx = bip39::find_exact(w);
+    if (idx == bip39::kInvalidWord) return false;
+    indices[count++] = idx;
+  }
+  if (pos < len) return false;
+  if (count != 12 && count != 24) return false;
+  if (!bip39::checksum_valid(indices, count)) return false;
+
+  if (fingerprintValid) discardActiveSeed();
+  resetPhrase(static_cast<uint8_t>(count));
+  memcpy(words, indices, count * sizeof(uint16_t));
+  wordCount = static_cast<uint8_t>(count);
+  targetWords = static_cast<uint8_t>(count);
+  prefix = "";
+  editingWord = -1;
+  const bool ok = updateFingerprint();
+  encrypted_seed_store::wipe(indices, sizeof(indices));
+  return ok;
+}
+
+const char* timeoutLabel(uint32_t ms) {
+  if (ms == device_settings::kTimeoutNone) return lang::tr("Nunca");
+  if (ms == device_settings::kTimeout1m) return lang::tr("1 minuto");
+  if (ms == device_settings::kTimeout3m) return lang::tr("3 minutos");
+  if (ms == device_settings::kTimeout5m) return lang::tr("5 minutos");
+  return lang::tr("10 minutos");
+}
+
+const char* profileLabel(uint8_t p) {
+  switch (p) {
+    case 0: return lang::tr("BIP44 (P2PKH)");
+    case 1: return lang::tr("BIP49 (P2SH)");
+    case 2: return lang::tr("BIP84 (SegWit)");
+    default: return lang::tr("BIP86 (Taproot)");
+  }
+}
+
+void saveSettingsNow() {
+  if (device_settings::save(gSettings)) showToast("Guardado en la SD");
+  else showToast("No se pudo guardar la configuracion");
+}
+
+String settingsLangLabel() {
+  return String(lang::tr("Idioma")) + ": " +
+      (gSettings.language == 1 ? lang::tr("Espanol") : lang::tr("Ingles"));
+}
+
+String settingsTimeoutLabel() {
+  return String(lang::tr("Tiempo de bloqueo")) + ": " +
+      timeoutLabel(gSettings.lockTimeoutMs);
+}
+
+String settingsDerivLabel() {
+  return String(lang::tr("Derivacion por defecto")) + ": " +
+      profileLabel(gSettings.defaultProfile);
+}
+
+void drawSettings() {
+  blankPage();
+  title("AJUSTES", "Configuracion del dispositivo");
+  buttonOn(page, kMenu[0], settingsLangLabel().c_str(), true, focusIndex == 0, Icon::none);
+  buttonOn(page, kMenu[1], settingsTimeoutLabel().c_str(), true, focusIndex == 1, Icon::lock);
+  buttonOn(page, kMenu[2], settingsDerivLabel().c_str(), true, focusIndex == 2, Icon::key);
+  buttonOn(page, kMenu[3], lang::tr("Estado de la radio"), true, focusIndex == 3, Icon::wifi);
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 4);
+  fullRefresh();
+}
+
+void drawSettingsLang() {
+  blankPage();
+  title(lang::tr("Idioma"), lang::tr("Elige el idioma de la interfaz"));
+  buttonOn(page, kMenu[0], lang::tr("Ingles"), true,
+           gSettings.language == 0 && focusIndex == 0, Icon::none);
+  buttonOn(page, kMenu[1], lang::tr("Espanol"), true,
+           gSettings.language == 1 && focusIndex == 1, Icon::none);
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 2);
+  fullRefresh();
+}
+
+void drawSettingsTimeout() {
+  blankPage();
+  title(lang::tr("Tiempo de bloqueo"), lang::tr("Bloqueo automatico por inactividad"));
+  for (uint8_t i = 0; i < device_settings::kTimeoutOptionCount; ++i) {
+    const uint32_t ms = device_settings::kTimeoutOptions[i];
+    buttonOn(page, kMenu[i], timeoutLabel(ms), true,
+             gSettings.lockTimeoutMs == ms && focusIndex == i, Icon::lock);
+  }
+  buttonOn(page, kBack, lang::tr("VOLVER"), true,
+           focusIndex == device_settings::kTimeoutOptionCount);
+  fullRefresh();
+}
+
+void drawSettingsDerivation() {
+  blankPage();
+  title(lang::tr("Derivacion por defecto"), lang::tr("Tipo de script"));
+  for (uint8_t i = 0; i < kPublicProfileCount; ++i) {
+    buttonOn(page, kMenu[i], profileLabel(i), true,
+             gSettings.defaultProfile == i && focusIndex == i, Icon::key);
+  }
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == kPublicProfileCount);
+  fullRefresh();
+}
+
+void drawSettingsRadio() {
+  blankPage();
+  title(lang::tr("Estado de la radio"), lang::tr("Radios y energia"));
+  const bool bleOn = scanQrActive();
+  const auto wp = wifiServer.phase();
+  const bool wifiOn = wp == qr_wifi::Phase::Starting || wp == qr_wifi::Phase::Waiting ||
+                      wp == qr_wifi::Phase::Received;
+  const bool sdOk = SD.cardType() != CARD_NONE;
+
+  textStyle(page, 2);
+  int y = 170;
+  page.setCursor(20, y);
+  page.print(lang::tr("Bluetooth"));
+  page.setCursor(300, y);
+  page.print(bleOn ? lang::tr("ESCANEANDO") : lang::tr("APAGADO"));
+  y += 40;
+  page.setCursor(20, y);
+  page.print(lang::tr("WiFi"));
+  page.setCursor(300, y);
+  page.print(wifiOn ? lang::tr("PUNTO DE ACCESO") : lang::tr("APAGADO"));
+  y += 40;
+  page.setCursor(20, y);
+  page.print(lang::tr("microSD"));
+  page.setCursor(300, y);
+  page.print(sdOk ? lang::tr("OK") : lang::tr("NO DETECTADA"));
+  y += 40;
+  page.setCursor(20, y);
+  page.print(lang::tr("Bateria"));
+  page.setCursor(300, y);
+  page.print(String(M5.getBatteryVoltage()) + " mV");
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 0);
+  fullRefresh();
 }
 
 void drawScreen() {
@@ -3180,12 +3424,19 @@ void drawScreen() {
     case Screen::diagnostics: drawDiagnostics(); break;
     case Screen::scan_qr: drawScanQr(); break;
     case Screen::wifi_receive: drawWifiReceive(); break;
+    case Screen::wifi_mode: drawWifiMode(); break;
     case Screen::signed_tx: drawSignedTx(); break;
-    case Screen::locked: drawLocked(); break;
+    case Screen::locked: drawScreensaver(true); break;
+    case Screen::screensaver: drawScreensaver(false); break;
     case Screen::tx_review: drawTxReview(); break;
     case Screen::utxo_detail: drawUtxoDetail(); break;
     case Screen::signed_mode: drawSignedMode(); break;
     case Screen::animated_qr: drawAnimatedQr(); break;
+    case Screen::settings: drawSettings(); break;
+    case Screen::settings_lang: drawSettingsLang(); break;
+    case Screen::settings_timeout: drawSettingsTimeout(); break;
+    case Screen::settings_derivation: drawSettingsDerivation(); break;
+    case Screen::settings_radio: drawSettingsRadio(); break;
   }
 }
 
@@ -3193,7 +3444,7 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                        Icon::none, Icon::wifi, Icon::lock};
+                                        Icon::wifi, Icon::wrench, Icon::lock};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -3412,7 +3663,10 @@ void updateFocusButton(uint8_t index) {
         if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
         else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
       } else if (p == qr_wifi::Phase::Received) {
-        if (txIsPsbt) {
+        if (wifiServer.mode() == qr_wifi::Mode::kSeedText) {
+          if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+          else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
+        } else if (txIsPsbt) {
           if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
           else if (index == 1) updateButton(kDetail, "DETALLE", true, index == focusIndex, Icon::list);
           else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
@@ -3424,6 +3678,47 @@ void updateFocusButton(uint8_t index) {
       }
       break;
     }
+    case Screen::wifi_mode: {
+      static const Icon kWifiModeIcons[] = {Icon::wifi, Icon::wifi, Icon::key, Icon::none};
+      static const char* kWifiModeLabels[] = {"SUBIR FICHERO (PSBT)",
+                                              "PEGAR TRANSACCION (PSBT)",
+                                              "PEGAR SEMILLA BIP39", "VOLVER"};
+      const bool psbtOk = fingerprintValid;
+      if (index == 0 || index == 1) updateButton(kMenu[index], kWifiModeLabels[index], psbtOk,
+                                                 index == focusIndex, kWifiModeIcons[index]);
+      else if (index == 2) updateButton(kMenu[index], kWifiModeLabels[index], true,
+                                        index == focusIndex, kWifiModeIcons[index]);
+      else updateButton(kBack, kWifiModeLabels[3], true, index == focusIndex);
+      break;
+    }
+    case Screen::settings: {
+      if (index == 0) updateButton(kMenu[0], settingsLangLabel().c_str(), true, index == focusIndex);
+      else if (index == 1) updateButton(kMenu[1], settingsTimeoutLabel().c_str(), true, index == focusIndex, Icon::lock);
+      else if (index == 2) updateButton(kMenu[2], settingsDerivLabel().c_str(), true, index == focusIndex, Icon::key);
+      else if (index == 3) updateButton(kMenu[3], "Estado de la radio", true, index == focusIndex, Icon::wifi);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    }
+    case Screen::settings_lang:
+      if (index == 0) updateButton(kMenu[0], "Ingles", true, index == focusIndex && gSettings.language == 0);
+      else if (index == 1) updateButton(kMenu[1], "Espanol", true, index == focusIndex && gSettings.language == 1);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::settings_timeout:
+      if (index < device_settings::kTimeoutOptionCount)
+        updateButton(kMenu[index], timeoutLabel(device_settings::kTimeoutOptions[index]), true,
+                     index == focusIndex && gSettings.lockTimeoutMs == device_settings::kTimeoutOptions[index], Icon::lock);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::settings_derivation:
+      if (index < kPublicProfileCount)
+        updateButton(kMenu[index], profileLabel(index), true,
+                     index == focusIndex && gSettings.defaultProfile == index, Icon::key);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::settings_radio:
+      updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
     case Screen::tx_review:
       if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
       else if (index == 1) updateButton(kDetail, "DETALLE", true, index == focusIndex, Icon::list);
@@ -3459,10 +3754,18 @@ void moveFocus(int direction) {
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive) {
     if (wifiServer.phase() == qr_wifi::Phase::Failed) count = 2;
+    else if (wifiServer.phase() == qr_wifi::Phase::Received &&
+             wifiServer.mode() == qr_wifi::Mode::kSeedText) count = 2;
     else if (wifiServer.phase() == qr_wifi::Phase::Received && txIsPsbt)
       count = fingerprintValid ? 3 : 2;
     else count = 1;
   }
+  else if (screen == Screen::wifi_mode) count = 4;
+  else if (screen == Screen::settings) count = 5;
+  else if (screen == Screen::settings_lang) count = 3;
+  else if (screen == Screen::settings_timeout) count = device_settings::kTimeoutOptionCount + 1;
+  else if (screen == Screen::settings_derivation) count = kPublicProfileCount + 1;
+  else if (screen == Screen::settings_radio) count = 1;
   else if (screen == Screen::signed_tx) count = 1;
   else if (screen == Screen::signed_mode) count = 3;
   else if (screen == Screen::animated_qr) count = 1;
@@ -3486,8 +3789,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::address_explorer) count = 7;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
   if (screen == Screen::menu) {
-    const bool skip = (fingerprintValid && focusIndex == 1) ||
-                      (!fingerprintValid && focusIndex == 4);
+    const bool skip = (fingerprintValid && focusIndex == 1);
     if (skip) focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
   }
   updateFocusButton(previous);
@@ -3537,7 +3839,7 @@ void click(int x, int y) {
       focusIndex = activeLoadedSeed >= 0 ? static_cast<uint8_t>(activeLoadedSeed) : 0;
       drawScreen();
     }
-    else openPublicKey(2);
+    else openPublicKey(gSettings.defaultProfile);
     return;
   }
   if (screen == Screen::menu) {
@@ -3547,11 +3849,12 @@ void click(int x, int y) {
     } else if (kMenu[1].contains(x, y)) {
       if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
     }     else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
-    else if (kMenu[3].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
-    else if (kMenu[4].contains(x, y) && fingerprintValid) { beginWifiReceive(); }
+    else if (kMenu[3].contains(x, y)) { openWifiMode(); }
+    else if (kMenu[4].contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
     else if (kMenu[5].contains(x, y)) { lockDevice(); }
+    else if (kHelpIcon.contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
-    if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
+    if (kActiveMenu[0].contains(x, y)) { openPublicKey(gSettings.defaultProfile); }
     else if (kActiveMenu[1].contains(x, y)) {
       screen = Screen::backup_seed; focusIndex = 0; drawScreen();
     }
@@ -3561,7 +3864,7 @@ void click(int x, int y) {
       if (sessionUnlocked) { screen = Screen::vault_actions; focusIndex = 0; drawScreen(); }
       else { screen = Screen::discard_confirm; focusIndex = 0; drawScreen(); }
     }
-    else if (kActiveMenu[5].contains(x, y)) { beginWifiReceive(); }
+    else if (kActiveMenu[5].contains(x, y)) { openWifiMode(); }
     else if (sessionUnlocked && kActiveMenu[6].contains(x, y)) lockSessionVault();
   } else if (screen == Screen::seed_switcher) {
     for (uint8_t i = 0; i < loadedSeedCount; ++i) if (kVaultFiles[i].contains(x, y)) {
@@ -3966,19 +4269,27 @@ void click(int x, int y) {
   } else if (screen == Screen::wifi_receive) {
     const auto p = wifiServer.phase();
     if (p == qr_wifi::Phase::Received) {
-      if (txIsPsbt) {
+      if (wifiServer.mode() == qr_wifi::Mode::kSeedText) {
+        if (kBack.contains(x, y)) { returnFromWifiReceive(); }
+        else if (kAction.contains(x, y)) { beginWifiReceive(qr_wifi::Mode::kSeedText); }
+      } else if (txIsPsbt) {
         if (kFirmar.contains(x, y) && fingerprintValid) { beginSignTx(); }
         else if (kDetail.contains(x, y)) { utxoReturnScreen = screen; screen = Screen::utxo_detail; focusIndex = 0; drawScreen(); }
-        else if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
+        else if (kBack.contains(x, y)) { returnFromWifiReceive(); }
       } else if (kAction.contains(x, y)) {
-        wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen();
+        returnFromWifiReceive();
       }
     } else if (p == qr_wifi::Phase::Failed) {
-      if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
-      else if (kAction.contains(x, y)) { beginWifiReceive(); }
+      if (kBack.contains(x, y)) { returnFromWifiReceive(); }
+      else if (kAction.contains(x, y)) { beginWifiReceive(wifiServer.mode()); }
     } else if (kAction.contains(x, y)) {
-      wifiServer.cancel(); screen = Screen::menu; focusIndex = 4; drawScreen();
+      wifiServer.cancel(); returnFromWifiReceive();
     }
+  } else if (screen == Screen::wifi_mode) {
+    if (kMenu[0].contains(x, y) && fingerprintValid) { beginWifiReceive(qr_wifi::Mode::kFile); }
+    else if (kMenu[1].contains(x, y) && fingerprintValid) { beginWifiReceive(qr_wifi::Mode::kTxText); }
+    else if (kMenu[2].contains(x, y)) { beginWifiReceive(qr_wifi::Mode::kSeedText); }
+    else if (kBack.contains(x, y)) { returnFromWifiReceive(); }
   } else if (screen == Screen::signed_tx) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::signed_mode) {
@@ -3996,7 +4307,29 @@ void click(int x, int y) {
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
-    screen = Screen::menu; focusIndex = 3; drawScreen();
+    screen = Screen::menu; focusIndex = 0; drawScreen();
+  } else if (screen == Screen::settings) {
+    if (kMenu[0].contains(x, y)) { screen = Screen::settings_lang; focusIndex = 0; drawScreen(); }
+    else if (kMenu[1].contains(x, y)) { screen = Screen::settings_timeout; focusIndex = 0; drawScreen(); }
+    else if (kMenu[2].contains(x, y)) { screen = Screen::settings_derivation; focusIndex = 0; drawScreen(); }
+    else if (kMenu[3].contains(x, y)) { screen = Screen::settings_radio; focusIndex = 0; drawScreen(); }
+    else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 5; drawScreen(); }
+  } else if (screen == Screen::settings_lang) {
+    if (kMenu[0].contains(x, y)) { gSettings.language = 0; lang::set(lang::Lang::EN); saveSettingsNow(); drawSettingsLang(); }
+    else if (kMenu[1].contains(x, y)) { gSettings.language = 1; lang::set(lang::Lang::ES); saveSettingsNow(); drawSettingsLang(); }
+    else if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
+  } else if (screen == Screen::settings_timeout) {
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 1; drawScreen(); }
+    else for (uint8_t i = 0; i < device_settings::kTimeoutOptionCount; ++i) {
+      if (kMenu[i].contains(x, y)) { gSettings.lockTimeoutMs = device_settings::kTimeoutOptions[i]; saveSettingsNow(); drawSettingsTimeout(); return; }
+    }
+  } else if (screen == Screen::settings_derivation) {
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 2; drawScreen(); }
+    else for (uint8_t i = 0; i < kPublicProfileCount; ++i) {
+      if (kMenu[i].contains(x, y)) { gSettings.defaultProfile = i; saveSettingsNow(); drawSettingsDerivation(); return; }
+    }
+  } else if (screen == Screen::settings_radio) {
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 3; drawScreen(); }
   }
 }
 
@@ -4107,12 +4440,36 @@ void activateFocus() {
     const auto p = wifiServer.phase();
     const Rect* r = &kAction;
     if (p == qr_wifi::Phase::Failed && focusIndex == 0) r = &kBack;
+    else if (p == qr_wifi::Phase::Received &&
+             wifiServer.mode() == qr_wifi::Mode::kSeedText) {
+      r = focusIndex == 0 ? &kBack : &kAction;
+    }
     else if (p == qr_wifi::Phase::Received && txIsPsbt) {
       if (focusIndex == 0) r = &kBack;
       else if (focusIndex == 1) r = &kDetail;
       else r = &kFirmar;
     }
     click(r->x + 5, r->y + 5);
+  } else if (screen == Screen::wifi_mode) {
+    const Rect& r = focusIndex == 0 ? kMenu[0] :
+                    focusIndex == 1 ? kMenu[1] :
+                    focusIndex == 2 ? kMenu[2] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings) {
+    const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
+                    focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_lang) {
+    const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_timeout) {
+    const Rect& r = focusIndex < device_settings::kTimeoutOptionCount ? kMenu[focusIndex] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_derivation) {
+    const Rect& r = focusIndex < kPublicProfileCount ? kMenu[focusIndex] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_radio) {
+    click(kBack.x + 5, kBack.y + 5);
   } else if (screen == Screen::signed_tx) {
     click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::signed_mode) {
@@ -4159,11 +4516,23 @@ void setup() {
                 addressBip84SelfTest ? "OK" : "ERROR");
   Serial.printf("Bitcoin address BIP86 self-test: %s\n",
                 addressBip86SelfTest ? "OK" : "ERROR");
+  gSettings = device_settings::load();
+  lang::set(gSettings.language == 1 ? lang::Lang::ES : lang::Lang::EN);
+  lastUserActivity = millis();
   drawScreen();
 }
 
 void loop() {
   checkSerialCommand();
+
+  if (screen == Screen::locked || screen == Screen::screensaver) {
+    // Pantalla estatica (e-ink): sin animaciones para no consumir bateria.
+  } else if (gSettings.lockTimeoutMs != 0 &&
+             static_cast<uint32_t>(millis() - lastUserActivity) >= gSettings.lockTimeoutMs) {
+    enterScreensaver();
+    return;
+  }
+
   if (screen == Screen::animated_qr && bbqrTotalParts > 1 &&
       static_cast<uint32_t>(millis() - bbqrLastFrameMs) >= 1000) {
     bbqrLastFrameMs = millis();
@@ -4189,9 +4558,21 @@ void loop() {
       screen = Screen::menu; focusIndex = 4; drawScreen();
     } else if (wp == qr_wifi::Phase::Received && !wifiResultShown) {
       wifiResultShown = true;
-      txIsPsbt = psbt::tryParsePsbt(wifiServer.data(), parsedTx);
-      if (txIsPsbt) saveReceivedPsbt(wifiServer.data());
-      drawWifiReceive();
+      if (wifiServer.mode() == qr_wifi::Mode::kSeedText) {
+        if (loadSeedText(wifiServer.data())) {
+          wifiServer.clear();
+          newSeedIntent = NewSeedIntent::none;
+          screen = Screen::review;
+          focusIndex = 0;
+          drawScreen();
+        } else {
+          drawWifiReceive();
+        }
+      } else {
+        txIsPsbt = psbt::tryParsePsbt(wifiServer.data(), parsedTx);
+        if (txIsPsbt) saveReceivedPsbt(wifiServer.data());
+        drawWifiReceive();
+      }
     }
   }
 
@@ -4229,10 +4610,13 @@ void loop() {
   const int left = digitalRead(kRockerLeftPin);
   const int press = digitalRead(kRockerPressPin);
   const int right = digitalRead(kRockerRightPin);
-  if (screen == Screen::locked && (left == LOW || right == LOW || press == LOW)) {
+  if ((screen == Screen::locked || screen == Screen::screensaver) &&
+      (left == LOW || right == LOW || press == LOW)) {
     if (millis() - lastRocker >= 120) {
       lastRocker = millis(); lastUserActivity = millis();
-      screen = Screen::menu; focusIndex = 0; drawScreen();
+      if (screen == Screen::screensaver) { screen = screensaverReturn; }
+      else { screen = Screen::menu; }
+      focusIndex = 0; drawScreen();
     }
   } else if (screen == Screen::session_lock_warning &&
       (left == LOW || right == LOW || press == LOW)) {
@@ -4254,6 +4638,7 @@ void loop() {
     const bool down = !M5.TP.isFingerUp();
     if (down) {
       tx = M5.TP.readFingerX(0); ty = M5.TP.readFingerY(0);
+      lastUserActivity = millis();
       static uint32_t lastEntropySample = 0;
       if (screen == Screen::entropy && millis() - lastEntropySample >= 12) {
         lastEntropySample = millis();
@@ -4263,6 +4648,8 @@ void loop() {
       lastUserActivity = millis();
       if (screen == Screen::locked) {
         screen = Screen::menu; focusIndex = 0; drawScreen();
+      } else if (screen == Screen::screensaver) {
+        screen = screensaverReturn; focusIndex = 0; drawScreen();
       } else if (screen == Screen::session_lock_warning) {
         screen = sessionLockReturn; focusIndex = 0; drawScreen();
       } else {

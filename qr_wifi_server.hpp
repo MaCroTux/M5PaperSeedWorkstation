@@ -6,46 +6,35 @@
 #include <esp_system.h>
 #include <vector>
 
-// Servidor WiFi (modo Access Point) para recibir un archivo o contenido de QR
-// desde un movil, sin depender de la Raspberry Pi.
+// Servidor WiFi (modo Access Point) para recibir contenido desde un movil.
+// Tres modos de entrada, cada uno con su propia pagina web:
+//   kFile     -> subir un fichero (PSBT)
+//   kTxText   -> pegar una transaccion (PSBT/tx) en texto
+//   kSeedText -> pegar una semilla BIP39 en texto
 //
-// Flujo: el M5Paper crea un AP "M5Paper-QR" con una clave ALEATORIA por sesion
-// (se muestra como QR de conexion WIFI:T:WPA;S:...;P:...;; en la pantalla). El
-// movil escanea el QR, se conecta, abre http://192.168.4.1 y pega texto o sube
-// un archivo. Al recibir el contenido se apaga el AP automaticamente.
-//
-// La integridad la garantiza TCP (no hay terceros); el contenido (p.ej. PSBT)
-// se validara despues en la app. El telefono es NO confiable: aqui solo se
-// recoge el dato, no se interpreta.
+// Flujo: el M5Paper crea un AP "M5Paper-QR" con clave aleatoria y portal cautivo.
+// El movil se conecta, abre http://192.168.4.1 y envia el contenido. Al recibirlo
+// se apaga el AP automaticamente.
 
 namespace qr_wifi {
 
 constexpr size_t MAX_PAYLOAD = 32768;
 constexpr char kApSsid[] = "M5Paper-QR";
 
-const char kHtmlPage[] = R"rawliteral(
+enum class Mode : uint8_t { kFile, kTxText, kSeedText };
+
+const char kHtmlFile[] = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>M5Paper</title></head>
 <body style="font-family:sans-serif;max-width:32em;margin:1em auto;padding:1em">
-<h1>M5Paper Seed Workstation</h1>
-<h2>1. Pegar contenido de QR</h2>
-<textarea id="txt" rows="6" style="width:100%" placeholder="Pega aqui el texto del QR..."></textarea><br>
-<button onclick="paste()">Enviar texto</button>
-<hr>
-<h2>2. Subir archivo (PSBT, etc.)</h2>
+<h1>M5Paper</h1>
+<h2>Subir fichero (PSBT)</h2>
 <input type="file" id="f"><br><br>
-<button onclick="upload()">Subir archivo</button>
-<hr>
+<button onclick="upload()">Subir fichero</button>
 <div id="st"></div>
 <script>
 function st(m){document.getElementById('st').textContent=m;}
-async function paste(){
- var t=document.getElementById('txt').value;
- if(!t){st('Vacio');return;}
- st('Enviando...');
- try{var r=await fetch('/paste',{method:'POST',headers:{'Content-Type':'text/plain'},body:t});st(r.ok?'OK':'ERROR '+r.status);}catch(e){st('Fallo: '+e);}
-}
 async function upload(){
  var f=document.getElementById('f').files[0];
  if(!f){st('Elige archivo');return;}
@@ -57,15 +46,60 @@ async function upload(){
 </body></html>
 )rawliteral";
 
+const char kHtmlTxText[] = R"rawliteral(
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M5Paper</title></head>
+<body style="font-family:sans-serif;max-width:32em;margin:1em auto;padding:1em">
+<h1>M5Paper</h1>
+<h2>Pegar transaccion (PSBT/tx)</h2>
+<textarea id="txt" rows="8" style="width:100%" placeholder="Pega aqui el PSBT (base64, hex o UR)..."></textarea><br>
+<button onclick="paste()">Enviar</button>
+<div id="st"></div>
+<script>
+function st(m){document.getElementById('st').textContent=m;}
+async function paste(){
+ var t=document.getElementById('txt').value;
+ if(!t){st('Vacio');return;}
+ st('Enviando...');
+ try{var r=await fetch('/paste',{method:'POST',headers:{'Content-Type':'text/plain'},body:t});st(r.ok?'OK':'ERROR '+r.status);}catch(e){st('Fallo: '+e);}
+}
+</script>
+</body></html>
+)rawliteral";
+
+const char kHtmlSeedText[] = R"rawliteral(
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M5Paper</title></head>
+<body style="font-family:sans-serif;max-width:32em;margin:1em auto;padding:1em">
+<h1>M5Paper</h1>
+<h2>Pegar semilla BIP39</h2>
+<textarea id="txt" rows="6" style="width:100%" placeholder="Escribe las 12 o 24 palabras separadas por espacios..."></textarea><br>
+<button onclick="paste()">Enviar semilla</button>
+<div id="st"></div>
+<script>
+function st(m){document.getElementById('st').textContent=m;}
+async function paste(){
+ var t=document.getElementById('txt').value;
+ if(!t){st('Vacio');return;}
+ st('Enviando...');
+ try{var r=await fetch('/paste',{method:'POST',headers:{'Content-Type':'text/plain'},body:t});st(r.ok?'OK':'ERROR '+r.status);}catch(e){st('Fallo: '+e);}
+}
+</script>
+</body></html>
+)rawliteral";
+
 enum class Phase : uint8_t { Idle, Starting, Waiting, Received, Failed, Cancelled };
 
 class QRWiFiServer {
 public:
   QRWiFiServer() : server_(80) {}
 
-  void start() {
+  void start(Mode mode) {
     if (phase_ == Phase::Starting || phase_ == Phase::Waiting) return;
     teardown();
+    mode_ = mode;
     data_.clear();
     format_ = ""; type_ = "";
     ready_ = false;
@@ -126,6 +160,7 @@ public:
   }
 
   Phase phase() const { return phase_; }
+  Mode mode() const { return mode_; }
   bool ready() const { return ready_; }
   const std::vector<uint8_t>& data() const { return data_; }
   String format() const { return format_; }
@@ -163,7 +198,9 @@ private:
   }
 
   void handleRoot() {
-    server_.send(200, "text/html", kHtmlPage);
+    if (mode_ == Mode::kFile) server_.send(200, "text/html", kHtmlFile);
+    else if (mode_ == Mode::kTxText) server_.send(200, "text/html", kHtmlTxText);
+    else server_.send(200, "text/html", kHtmlSeedText);
   }
 
   void handlePaste() {
@@ -173,7 +210,8 @@ private:
     if (n > MAX_PAYLOAD) { server_.send(413, "text/plain", "TOO LARGE"); return; }
     const uint8_t* p = reinterpret_cast<const uint8_t*>(body.c_str());
     data_.assign(p, p + n);
-    format_ = "PLAIN"; type_ = "TEXT";
+    if (mode_ == Mode::kSeedText) { format_ = "SEED"; type_ = "TEXT"; }
+    else { format_ = "PLAIN"; type_ = "TEXT"; }
     ready_ = true;
     phase_ = Phase::Received;
     server_.send(200, "text/plain", "OK");
@@ -214,6 +252,7 @@ private:
   }
 
   Phase phase_ = Phase::Idle;
+  Mode mode_ = Mode::kFile;
   WebServer server_;
   DNSServer dnsServer_;
   std::vector<uint8_t> data_;

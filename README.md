@@ -1,183 +1,200 @@
 # M5Paper Seed Workstation
 
-**v1.0**
+**v1.1**
 
-Estación de trabajo offline para semillas BIP39, derivación de claves/direcciones
-Bitcoin y **firma de transacciones PSBT**, ejecutada sobre un **M5Paper** (ESP32
-con pantalla e-paper de 540×960 y táctil GT911).
+An offline workstation for BIP39 seeds, Bitcoin key/address derivation and
+**PSBT transaction signing**, running on the **M5Paper** (ESP32 with a 540×960
+e-paper display and GT911 touch).
 
-> **AVISO**: los datos son de prueba. **NO USAR CON FONDOS REALES** hasta completar
-> una revisión de seguridad formal.
+> **WARNING**: this is test data only. **DO NOT USE WITH REAL FUNDS** until a
+> formal security review is completed.
 
----
+> **Note**: this project was built with **Vibe Coding**, as an **experiment**.
+> Do not use it with real funds.
 
-## 1. Qué hace
-
-- **Introducir semilla BIP39** (teclado con autocompletado de las 2048 palabras).
-- **Generar entropía** dibujando en pantalla o lanzando dados.
-- **Revisión y backup** de la semilla: palabras, QR y **SEEDQR** (asistente offline).
-- **Clave pública**: derivar y mostrar xpub/zpub (BIP32), con QR.
-- **Explorador de direcciones**: derivar direcciones P2PKH, P2SH, native segwit
-  (BIP84) y taproot (BIP86), para recepción y cambio, con salto directo a un índice.
-- **Passphrase BIP39** (cambia todas las direcciones derivadas).
-- **Vault individual**: una semilla cifrada con su propia contraseña (archivo `.vlt`).
-- **Vault de sesión**: varias semillas cifradas bajo una contraseña maestra.
-- **Recibir PSBT por WiFi** (punto de acceso + portal cautivo) o por **serial USB**.
-- **Firmar PSBT** (segwit P2WPKH, ECDSA RFC6979 + BIP143) y emitir la transacción:
-  - **Sparrow**: QR estático (hex de la transacción firmada).
-  - **BlueWallet**: QR animado **BBQr** (PSBT en Base64 para payload pequeño,
-    multipart `B$HPxxxx` para payload grande).
-- Auto-bloqueo de la sesión por inactividad y **bloqueo manual** con portada.
+Documentación en español: [`README_ES.md`](README_ES.md).
 
 ---
 
-## 2. Menú principal
+## 1. What it does
 
-```
-INTRODUCIR SEMILLA      (escribe una semilla BIP39)
-GENERAR ENTROPIA        (dibuja o tira dados)
-VAULT DE SESION         (crear/abrir vault de varias semillas)
-AYUDA                   (glosario de conceptos)
-RECIBIR POR WIFI        (AP para recibir PSBT desde el móvil)
-BLOQUEAR                (borra semilla/sesión y muestra la portada)
-```
-
-Cuando hay una semilla activa, la primera opción pasa a **SEMILLA ACTIVA** y
-"GENERAR ENTROPIA" se deshabilita. "RECIBIR POR WIFI" solo se activa con semilla
-cargada.
-
----
-
-## 3. Flujo de firma (PSBT)
-
-```
-PSBT (WiFi o serial)
-   ↓
-M5Paper decodifica y muestra la transacción
-   (PAGO / CAMBIO / COMISIÓN + direcciones en recuadro)
-   ↓
-[ DETALLE ] → lista de UTXOs (entradas)
-   ↓
-[ FIRMAR ]  → firma cada entrada (segwit P2WPKH)
-   ↓
-[ EMITIR ]  → SPARROW (QR estático hex)  |  BLUEWALLET (QR BBQr)
-   ↓
-Wallet externa reconoce y emite la transacción
-```
-
-Verificado de extremo a extremo: BlueWallet lee la transacción firmada y el
-resultado coincide con Coinb.in.
+- **Enter a BIP39 seed** (on-screen keyboard with autocomplete of the 2048 words).
+- **Generate entropy** by drawing on screen or rolling dice.
+- **Seed review & backup**: words, QR and **SEEDQR** (offline wizard).
+- **Public key**: derive and display xpub/zpub (BIP32), with QR.
+- **Address explorer**: derive P2PKH, P2SH, native segwit (BIP84) and taproot
+  (BIP86) addresses, for receive and change, with a direct index jump.
+- **BIP39 passphrase** (changes every derived address).
+- **Individual vault**: one seed encrypted with its own password (`.vlt` file).
+- **Session vault**: several seeds encrypted under one master password.
+- **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
+  (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
+- **Sign PSBT** (segwit P2WPKH, ECDSA RFC6979 + BIP143) and broadcast:
+  - **Sparrow**: static QR (hex of the signed transaction).
+  - **BlueWallet**: animated **BBQr** QR (Base64 PSBT for small payloads,
+    multipart `B$HPxxxx` for large payloads).
+- **Settings** stored on SD: language (English by default / Spanish), auto-lock
+  timeout (1/3/5/10 min or never), default derivation (BIP44/49/84/86) and radio
+  status (BT/WiFi/power).
+- **Lock** (manual or on inactivity) with a **static cover screen** (no animations,
+  to save e-ink battery) that doubles as an off/screensaver screen.
 
 ---
 
-## 4. Recibir PSBT
+## 2. Main menu
 
-### Por WiFi
+```
+ENTER SEED            (type a BIP39 seed)
+GENERATE ENTROPY      (draw or roll dice)
+SESSION VAULT         (create/open a multi-seed vault)
+RECEIVE VIA WIFI      (AP to receive a PSBT or seed from your phone)
+SETTINGS              (language, lock, derivation, radio)
+LOCK                  (lock the device with the cover screen)
+```
 
-1. **SEMILLA ACTIVA → RECIBIR POR WIFI** (o menú principal).
-2. El M5Paper crea un AP `M5Paper-QR` (clave aleatoria) con **QR de conexión** y
-   **portal cautivo**.
-3. El móvil escanea el QR, se conecta, y la web se abre sola.
-4. Sube el fichero `.psbt` o pega el contenido.
+**Help** is available through the `?` icon in the bottom-right corner of the main
+menu (secondary option).
 
-### Por serial (desarrollo)
+When a seed is active, the first entry becomes **ACTIVE SEED** and
+"GENERATE ENTROPY" is disabled.
+
+---
+
+## 3. Signing flow (PSBT)
+
+```
+PSBT (WiFi or serial)
+   ↓
+M5Paper decodes and shows the transaction
+   (PAYMENT / CHANGE / FEE + addresses in a box)
+   ↓
+[ DETAILS ] → list of UTXOs (inputs)
+   ↓
+[ SIGN ]    → signs each input (segwit P2WPKH)
+   ↓
+[ BROADCAST ] → SPARROW (static hex QR)  |  BLUEWALLET (BBQr QR)
+   ↓
+External wallet recognizes and broadcasts the transaction
+```
+
+Verified end-to-end: BlueWallet reads the signed transaction and the result
+matches Coinb.in.
+
+---
+
+## 4. Receiving a PSBT / seed
+
+### Via WiFi
+
+1. **RECEIVE VIA WIFI** (main menu or active-seed menu).
+2. Choose the input mode:
+   - **UPLOAD FILE (PSBT)**: upload a `.psbt` file (requires a loaded seed).
+   - **PASTE TRANSACTION (PSBT)**: paste the PSBT as text (base64, hex or UR) (requires a loaded seed).
+   - **PASTE BIP39 SEED**: import a 12/24-word seed (no prior seed required).
+3. The M5Paper creates an AP `M5Paper-QR` (random key) with a **connection QR**
+   and a **captive portal** adapted to the chosen mode.
+4. Scan the QR with your phone, connect, and the web page opens automatically.
+5. Upload/paste the content. The AP turns off automatically once received.
+
+### Via serial (development)
 
 ```bash
-python3 PSBTSerialSend.py archivo.psbt
+python3 PSBTSerialSend.py transaction.psbt
 ```
 
-Protocolo: `M5PSBT <len> <sha256>\n` + payload binario + `\nM5END\n`.
-El M5Paper responde `READY` y verifica el SHA256 antes de procesar.
+Protocol: `M5PSBT <len> <sha256>\n` + binary payload + `\nM5END\n`.
+The M5Paper replies `READY` and verifies the SHA256 before processing.
 
-También acepta `incommit-transaction: <base64>` como comando de texto.
+It also accepts `incommit-transaction: <base64>` as a text command.
 
 ---
 
-## 5. Arquitectura de ficheros
+## 5. File layout
 
-| Fichero | Rol |
+| File | Role |
 |---|---|
-| `NativeApp.cpp` | UI principal (M5EPD): pantallas, navegación, máquina de estados. |
-| `M5PaperSeedWorkstation.ino` | UI legacy (M5GFX), inactiva (guarda `LEGACY_M5GFX_BUILD`). |
-| `bip39_support.hpp` | Lista BIP39, búsqueda por prefijo, checksum, `from_entropy`, self-tests. |
-| `bitcoin_hd.hpp` | BIP32: BIP39→seed, derivación endurecida/normal, xpub/zpub, base58check. |
-| `bitcoin_address.hpp` | Direcciones P2PKH/P2SH/native segwit/taproot (bech32, bech32m). |
-| `bitcoin_fingerprint.hpp` | Fingerprint de la clave maestra. |
+| `NativeApp.cpp` | Main UI (M5EPD): screens, navigation, state machine. |
+| `M5PaperSeedWorkstation.ino` | Sketch entry point (the UI lives in `NativeApp.cpp`). |
+| `bip39_support.hpp` | BIP39 list, prefix search, checksum, `from_entropy`, self-tests. |
+| `bitcoin_hd.hpp` | BIP32: BIP39→seed, hardened/normal derivation, xpub/zpub, base58check. |
+| `bitcoin_address.hpp` | P2PKH/P2SH/native segwit/taproot addresses (bech32, bech32m). |
+| `bitcoin_fingerprint.hpp` | Master key fingerprint. |
 | `ripemd160_min.hpp` | RIPEMD-160. |
-| `encrypted_seed_store.hpp` | Vault individual: AES-256-GCM + PBKDF2. |
-| `session_vault_store.hpp` | Vault de sesión: clave maestra + semillas. |
-| `psbt_parser.hpp` | Parser de PSBT (BIP174) y transacciones, detección binario/base64/hex. |
-| `tx_sign.hpp` | Firma segwit: RFC6979, sighash BIP143, finalización y serialización. |
-| `bbqr.hpp` | Codificación BBQr (BIP-129 / Coinkite): cabecera `B$HPxxxx` + hex. |
-| `seedqr_qrcode.c/.h` | Generación de QR (licencia MIT). |
-| `generated/bip39_english.h` | Las 2048 palabras en PROGMEM. |
-| `qr_wifi_server.hpp` | Punto de acceso WiFi + servidor HTTP + portal cautivo. |
-| `qr_ble_client.hpp/.cpp` | Cliente BLE (NimBLE) — **oculto en el menú, no eliminado**. |
-| `AUDITORIA.md` | Auditoría de seguridad y UX. |
+| `encrypted_seed_store.hpp` | Individual vault: AES-256-GCM + PBKDF2. |
+| `session_vault_store.hpp` | Session vault: master key + seeds. |
+| `psbt_parser.hpp` | PSBT parser (BIP174) + transactions, binary/base64/hex/UR detection. |
+| `ur_psbt.hpp` | `UR:CRYPTO-PSBT` decoding (bytewords + CBOR). |
+| `tx_sign.hpp` | Segwit signing: RFC6979, BIP143 sighash, finalization & serialization. |
+| `bbqr.hpp` | BBQr encoding (BIP-129 / Coinkite): `B$HPxxxx` header + hex. |
+| `seedqr_qrcode.c/.h` | QR generation (MIT license). |
+| `generated/bip39_english.h` | The 2048 words in PROGMEM. |
+| `qr_wifi_server.hpp` | WiFi access point + HTTP server + captive portal. |
+| `qr_ble_client.hpp/.cpp` | BLE client (NimBLE) — **hidden in the menu, not removed**. |
+| `lang.hpp` | EN/ES translation (`lang::tr`) with a Spanish→English table. |
+| `device_settings.hpp` | SD-persisted settings (`/m5settings.cfg`): language, lock, derivation. |
+| `AUDITORIA.md` | Security & UX audit (Spanish). |
+| `TECHNICAL.md` | Detailed technical documentation. |
 
 ---
 
-## 6. Compilación
+## 6. Building
 
-### PlatformIO (validación de compilación)
+### PlatformIO (compile validation)
 
 ```bash
 ~/.platformio/penv/bin/pio run -e native
 ```
 
-El entorno `native` usa `espressif32@5.0.0` (core arduino-esp32 **2.0.3**),
-placa `m5stack-fire`, librería `M5EPD` desde `~/Documents/Arduino/libraries/M5EPD`
-y `NimBLE-Arduino@^1.4.0`.
+The `native` environment uses `espressif32@5.0.0` (arduino-esp32 core **2.0.3**),
+board `m5stack-fire`, `M5EPD` from `~/Documents/Arduino/libraries/M5EPD` and
+`NimBLE-Arduino@^1.4.0`.
 
-### Arduino IDE (build real / flasheo)
+### Arduino IDE (real build / flashing)
 
-- Tarjeta: **M5Stack-FIRE**, core **esp32 2.0.3**.
-- Librerías en `~/Documents/Arduino/libraries`: `M5EPD`, `NimBLE-Arduino` (v1.4.x).
+- Board: **M5Stack-FIRE**, core **esp32 2.0.3**.
+- Libraries in `~/Documents/Arduino/libraries`: `M5EPD`, `NimBLE-Arduino` (v1.4.x).
 
-Flasheo fiable en USB marginal: `esptool.py --no-stub --baud 115200 write_flash 0x10000 firmware.bin`.
-
----
-
-## 7. Diseño de seguridad
-
-- **Cifrado en reposo**: AES-256-GCM con cabecera completa como AAD; detecta
-  manipulación de sal, nonce y metadatos.
-- **Derivación de clave**: PBKDF2-HMAC-SHA256 con **600.000 iteraciones** y sal de
-  16 bytes aleatoria por archivo (RNG de hardware `esp_fill_random`).
-- **Firma**: ECDSA secp256k1 con **nonce determinista RFC6979** + **low-S**; sighash
-  **BIP143** (segwit v0). Verificación de la ruta BIP32 por fingerprint maestra.
-- **Limpieza de memoria**: funciones `wipe()` (volátil) sobre claves, plaintext,
-  buffers de semilla, etc.
-- **Auto-bloqueo de sesión** (3 min) y bloqueo manual.
-- **Self-tests al arranque**: BIP39, BIP32, fingerprint, PBKDF2 (contra
-  `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA (RFC6979), PSBT parser, direcciones BIP84/BIP86.
+Reliable flashing over marginal USB: `esptool.py --no-stub --baud 115200 write_flash 0x10000 firmware.bin`.
 
 ---
 
-## 8. Bluetooth (oculto, no eliminado)
+## 7. Security design
 
-Cliente BLE (`qr_ble_client.hpp/.cpp`) para recibir QR desde una Raspberry Pi
-(servidor GATT `M5Paper-QR`), **desactivado** en el menú (la entrada apunta a WiFi).
-Se pasó de Bluedroid a **NimBLE** porque Bluedroid producía `configASSERT` internos
-(`BTA_GATTC_Open` → `prvCopyDataToQueue`) en el M5Paper.
-
----
-
-## 9. Estado / pendientes
-
-- [x] Auditoría de seguridad y UX (`AUDITORIA.md`).
-- [x] Mejoras de navegación y UX.
-- [x] Recepción por WiFi AP (portal cautivo + QR de conexión).
-- [x] Recepción por serial USB (protocolo `M5PSBT` + SHA256).
-- [x] Parsing de PSBT (BIP174) y desglose PAGO/CAMBIO/COMISIÓN.
-- [x] Firma de PSBT (segwit P2WPKH) + salida QR estático (Sparrow) y BBQr (BlueWallet).
-- [ ] Corregir el self-test **BIP86** (falla; BIP84 OK).
-- [ ] Consolidar la UI legacy (`.ino`) en `NativeApp.cpp`.
-- [ ] Base32 y zlib en BBQr (optimización futura).
+- **Encryption at rest**: AES-256-GCM with the full header as AAD; detects
+  tampering of salt, nonce and metadata.
+- **Key derivation**: PBKDF2-HMAC-SHA256 with **600,000 iterations** and a random
+  16-byte salt per file (hardware RNG `esp_fill_random`).
+- **Signing**: ECDSA secp256k1 with **deterministic nonce RFC6979** + **low-S**;
+  **BIP143** sighash (segwit v0). BIP32 path verified via master fingerprint.
+- **Memory wiping**: `wipe()` (volatile) over keys, plaintext, seed buffers, etc.
+- **Auto-lock** on inactivity (configurable) plus manual lock.
+- **Boot self-tests**: BIP39, BIP32, fingerprint, PBKDF2 (against
+  `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA (RFC6979), PSBT parser, BIP84/BIP86 addresses.
 
 ---
 
-## 10. Advertencia de uso
+## 8. Bluetooth (hidden, not removed)
 
-Este firmware gestiona claves privadas. No usar con fondos reales hasta completar
-una revisión de seguridad formal y pruebas físicas exhaustivas.
+BLE client (`qr_ble_client.hpp/.cpp`) to receive a QR from a Raspberry Pi
+(`M5Paper-QR` GATT server), **disabled** in the menu. Bluedroid was replaced with
+**NimBLE** because Bluedroid produced internal `configASSERT` on the M5Paper.
+
+---
+
+## 9. Status / backlog
+
+- [x] WiFi AP reception (captive portal + connection QR) with 3 modes.
+- [x] USB serial reception (`M5PSBT` protocol + SHA256).
+- [x] `UR:CRYPTO-PSBT` decoding (Sparrow QR).
+- [x] PSBT signing (segwit P2WPKH) + static QR (Sparrow) and BBQr (BlueWallet).
+- [x] SD-persisted settings (language, lock, derivation, radio).
+- [x] Full EN/ES translation.
+- [ ] Fix the **BIP86** self-test (fails; BIP84 OK).
+- [ ] Base32 and zlib in BBQr (future optimization).
+
+---
+
+## 10. Usage warning
+
+This firmware handles private keys. Do not use with real funds until a formal
+security review and exhaustive physical testing are completed.
