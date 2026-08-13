@@ -3312,7 +3312,13 @@ void processSerialBinary(const std::vector<uint8_t>& payload, const String& shaH
 }
 
 // ===== Protocolo serial de consola (lineas ASCII) =====
-// Nuevos comandos: M5PING, M5TIME, M5VAULT LIST/SEEDS/OPEN, M5PASS, M5SEED.
+// Nuevos comandos: M5PING, M5TIME, M5VAULT LIST/SEEDS/OPEN, M5PASS, M5SEED,
+// M5TX LIST/LOAD/SIGN, M5STATE.
+//
+// INVARIANTE DE SEGURIDAD (crítico, no romper):
+//   La SEMILLA y la CLAVE PRIVADA NUNCA salen por serial.
+//   Solo se emiten: fingerprint (4 bytes), firmas, transacciones firmadas,
+//   resumenes y metadata en claro de la SD. Nada de palabras ni indices.
 // Los comandos binario (M5PSBT) y de texto (psbt:/incommit-transaction:) se
 // mantienen intactos en checkSerialCommand().
 
@@ -3515,6 +3521,92 @@ void handleSeed(const String& wordsStr) {
   Serial.flush();
 }
 
+void handleTxList() {
+  if (SD.cardType() == CARD_NONE) { Serial.println("M5ERR no_sd"); Serial.flush(); return; }
+  scanTxFiles();
+  Serial.printf("M5TXS %u\n", txFileCount);
+  for (uint8_t i = 0; i < txFileCount; ++i) {
+    String name = txFiles[i];
+    if (name.startsWith("/")) name.remove(0, 1);
+    Serial.printf("PSBT\t%s\n", name.c_str());
+  }
+  Serial.println("M5END");
+  Serial.flush();
+}
+
+void handleTxLoad(const String& name) {
+  String path = name.startsWith("/") ? name : "/" + name;
+  File f = SD.open(path, FILE_READ);
+  if (!f) { Serial.println("M5ERR not_found"); Serial.flush(); return; }
+  std::vector<uint8_t> data(f.size());
+  f.read(data.data(), data.size());
+  f.close();
+  if (!psbt::tryParsePsbt(data, parsedTx)) {
+    txIsPsbt = false;
+    Serial.println("M5ERR invalid");
+    Serial.flush();
+    return;
+  }
+  txIsPsbt = true;
+  txIsMultisig = multisig::detect(parsedTx, txMsInfo);
+  String shortName = path;
+  if (shortName.startsWith("/")) shortName.remove(0, 1);
+  Serial.printf("M5OK tx=%s inputs=%u outputs=%u",
+                shortName.c_str(), static_cast<unsigned>(parsedTx.inputs.size()),
+                static_cast<unsigned>(parsedTx.outputs.size()));
+  if (parsedTx.inputsComplete) Serial.printf(" fee=%lld", static_cast<long long>(parsedTx.fee));
+  Serial.printf(" pago=%lld", static_cast<long long>(parsedTx.totalPay));
+  if (parsedTx.hasChangeInfo) Serial.printf(" cambio=%lld", static_cast<long long>(parsedTx.totalChange));
+  if (txIsMultisig) Serial.printf(" multisig=%u-of-%u", txMsInfo.m, txMsInfo.n);
+  Serial.println();
+  Serial.flush();
+}
+
+void handleTxSign() {
+  if (!txIsPsbt) { Serial.println("M5ERR no_tx"); Serial.flush(); return; }
+  if (!fingerprintValid) { Serial.println("M5ERR no_seed"); Serial.flush(); return; }
+  std::vector<uint8_t> signedTx, finalizedPsbt;
+  if (txIsMultisig) {
+    std::vector<multisig::SeedCandidate> seeds;
+    buildMultisigSeedCandidates(seeds);
+    const multisig::SignResult res = multisig::signMultisig(parsedTx, seeds);
+    if (res.finalized) {
+      const String hex = hexEncode(res.rawTx);
+      saveSignedTxToSd(hex);
+      Serial.printf("M5OK signed=tx hex=%s\n", hex.c_str());
+    } else {
+      const String b64 = base64Encode(res.partialPsbt);
+      Serial.printf("M5OK signed=partial sigs=%u/%u base64=%s\n",
+                    res.totalSigs, res.needed, b64.c_str());
+    }
+  } else {
+    const bool ok = tx_sign::signSegwitP2wpkh(parsedTx, words, targetWords,
+        passphraseActive ? activePassphrase : "", signedTx, &finalizedPsbt);
+    if (ok) {
+      const String hex = hexEncode(signedTx);
+      saveSignedTxToSd(hex);
+      Serial.printf("M5OK signed=tx hex=%s\n", hex.c_str());
+    } else {
+      Serial.println("M5ERR sign_failed");
+    }
+  }
+  Serial.flush();
+}
+
+void handleState() {
+  Serial.printf("M5OK fingerprint=%s words=%u",
+                fingerprintValid ? (activeFingerprint + 4) : "-", wordCount);
+  if (txIsPsbt) {
+    if (txIsMultisig) Serial.printf(" tx=multisig multisig=%u-of-%u", txMsInfo.m, txMsInfo.n);
+    else Serial.print(" tx=single");
+  } else {
+    Serial.print(" tx=none");
+  }
+  if (sessionUnlocked) Serial.printf(" session=%s", sessionLabel);
+  Serial.println();
+  Serial.flush();
+}
+
 void handleSerialLine(const String& line) {
   if (line.startsWith("M5PING")) {
     Serial.printf("M5OK version=%s\n", kVersion);
@@ -3531,6 +3623,14 @@ void handleSerialLine(const String& line) {
     handleVaultPass(line.substring(7));
   } else if (line.startsWith("M5SEED ")) {
     handleSeed(line.substring(7));
+  } else if (line == "M5TX LIST") {
+    handleTxList();
+  } else if (line.startsWith("M5TX LOAD ")) {
+    handleTxLoad(line.substring(9));
+  } else if (line == "M5TX SIGN") {
+    handleTxSign();
+  } else if (line == "M5STATE") {
+    handleState();
   }
 }
 
@@ -3562,7 +3662,8 @@ void checkSerialCommand() {
     while (line.length() && line[line.length() - 1] == '\r') line.remove(line.length() - 1);
     const bool isNewCmd = line.startsWith("M5PING") || line.startsWith("M5TIME ") ||
         line.startsWith("M5VAULT ") || line.startsWith("M5PASS ") ||
-        line.startsWith("M5SEED ");
+        line.startsWith("M5SEED ") || line.startsWith("M5TX ") ||
+        line == "M5STATE";
     if (!isNewCmd) break;
     serialBuf.erase(serialBuf.begin(), serialBuf.begin() + nl + 1);
     handleSerialLine(line);

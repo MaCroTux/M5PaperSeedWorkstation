@@ -128,9 +128,17 @@ serial con comandos ASCII por línea (cada uno acaba en `\n`):
 | `M5VAULT OPEN <nombre>` | `READY` (luego espera `M5PASS`) |
 | `M5PASS <contraseña>` | `M5OK vault=… [fingerprint=… words=… | seeds=…]` |
 | `M5SEED <palabras>` | `M5OK fingerprint=<fpr> words=<n>` |
+| `M5TX LIST` | `M5TXS N` + `PSBT\t<fichero>` … `M5END` |
+| `M5TX LOAD <nombre>` | `M5OK tx=… inputs=… outputs=… [fee/pago/cambio/multisig]` |
+| `M5TX SIGN` | `M5OK signed=tx hex=…` / `M5OK signed=partial …` |
+| `M5STATE` | `M5OK fingerprint=… words=… tx=…` |
 
 Los errores se reportan como `M5ERR <código>` (`no_sd`, `io_error`,
 `wrong_password`, `locked`, `invalid_seed`, `invalid`, `not_found`, `bad_cmd`).
+
+**Invariante de seguridad**: la semilla (palabras/índices) y la clave privada
+**nunca** salen por serial. Solo salen el fingerprint (4 bytes), las firmas, las
+transacciones firmadas, los resúmenes y la metadata en claro de la SD.
 
 ---
 

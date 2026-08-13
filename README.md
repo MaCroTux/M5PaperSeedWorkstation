@@ -126,9 +126,17 @@ ASCII line commands (each ends in `\n`):
 | `M5VAULT OPEN <name>` | `READY` (then wait for `M5PASS`) |
 | `M5PASS <password>` | `M5OK vault=… [fingerprint=… words=… | seeds=…]` |
 | `M5SEED <words>` | `M5OK fingerprint=<fpr> words=<n>` |
+| `M5TX LIST` | `M5TXS N` + `PSBT\t<file>` … `M5END` |
+| `M5TX LOAD <name>` | `M5OK tx=… inputs=… outputs=… [fee/pago/cambio/multisig]` |
+| `M5TX SIGN` | `M5OK signed=tx hex=…` / `M5OK signed=partial …` |
+| `M5STATE` | `M5OK fingerprint=… words=… tx=…` |
 
 Errors are reported as `M5ERR <code>` (`no_sd`, `io_error`, `wrong_password`,
 `locked`, `invalid_seed`, `invalid`, `not_found`, `bad_cmd`).
+
+**Security invariant**: the seed (words/indices) and private key are **never**
+sent over serial. Only the fingerprint (4 bytes), signatures, signed transactions,
+summaries and clear SD metadata leave the device.
 
 ---
 
