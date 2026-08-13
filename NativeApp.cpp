@@ -11,6 +11,7 @@
 #include "qr_wifi_server.hpp"
 #include "psbt_parser.hpp"
 #include "tx_sign.hpp"
+#include "bbqr.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -2583,6 +2584,12 @@ String signedPsbtBase64;
 bool txSigned = false;
 QRCode signedTxQr;
 uint8_t signedTxQrBuffer[4096] = {};
+QRCode bbqrQr;
+uint8_t bbqrQrBuffer[4096] = {};
+size_t bbqrTotalParts = 1;
+size_t bbqrBlockSize = 0;
+uint16_t bbqrIndex = 0;
+uint32_t bbqrLastFrameMs = 0;
 
 void drawWifiResult() {
   const std::vector<uint8_t>& d = wifiServer.data();
@@ -2817,14 +2824,61 @@ void drawSignedMode() {
 }
 
 void drawAnimatedQr() {
+  const String frame = bbqr::makeFrame(signedTxBytes.data(), signedTxBytes.size(),
+                                       bbqr::kTypeTx, static_cast<uint16_t>(bbqrTotalParts),
+                                       bbqrIndex, bbqrBlockSize);
+  memset(bbqrQrBuffer, 0, sizeof(bbqrQrBuffer));
+  static const uint16_t kAlphaCapL[] = {
+      25, 47, 77, 114, 154, 195, 224, 279, 335, 395,
+      468, 535, 619, 667, 758, 854, 938, 1046, 1153, 1249,
+      1352, 1460, 1588, 1704, 1853, 1990, 2132, 2223, 2369, 2520,
+      2677, 2840, 3009, 3183, 3351, 3537, 3729, 3927, 4087, 4296};
+  uint8_t version = 40;
+  for (uint8_t v = 1; v <= 40; ++v) {
+    if (frame.length() <= kAlphaCapL[v - 1]) { version = v; break; }
+  }
+  qrcode_initText(&bbqrQr, bbqrQrBuffer, version, ECC_LOW, frame.c_str());
+
   blankPage();
-  title("BLUEWALLET", "QR animado (UR)");
-  warningIcon(page, 270, 240);
-  centeredFit(page, "EN DESARROLLO", 340, 500, 3);
-  centeredFit(page, "El QR animado UR se implementara", 420);
-  centeredFit(page, "en el proximo paso.", 460);
+  title("BLUEWALLET", "Escanea el QR animado (BBQr)");
+  const int qrSize = bbqrQr.size;
+  int module = kWidth / (qrSize + 8);
+  if (module < 2) module = 2;
+  if (module > 8) module = 8;
+  const int px = qrSize * module;
+  const int quiet = module * 4;
+  const int ox = (kWidth - px) / 2;
+  const int oy = 160;
+  page.fillRect(ox - quiet, oy - quiet, px + 2 * quiet, px + 2 * quiet, kWhite);
+  for (uint8_t yy = 0; yy < bbqrQr.size; ++yy)
+    for (uint8_t xx = 0; xx < bbqrQr.size; ++xx)
+      if (qrcode_getModule(&bbqrQr, xx, yy))
+        page.fillRect(ox + xx * module, oy + yy * module, module, module, kBlack);
+  textStyle(page, 3);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(String(static_cast<uint32_t>(bbqrIndex) + 1) + " / " +
+                  String(static_cast<uint32_t>(bbqrTotalParts)), 270, oy + px + 40);
+  textStyle(page, 2);
+  page.drawString("Manten el movil quieto", 270, oy + px + 80);
+  page.setTextDatum(TL_DATUM);
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
   fullRefresh();
+}
+
+void beginAnimatedQr() {
+  if (!txSigned || signedTxBytes.empty()) {
+    screen = Screen::signed_mode; focusIndex = 0; drawScreen();
+    return;
+  }
+  const bbqr::Layout layout = bbqr::calculateLayout(signedTxBytes.size(),
+                                                     bbqr::kPreferredBlockSize);
+  bbqrTotalParts = layout.totalParts;
+  bbqrBlockSize = layout.blockSize;
+  bbqrIndex = 0;
+  bbqrLastFrameMs = millis();
+  screen = Screen::animated_qr;
+  focusIndex = 0;
+  drawAnimatedQr();
 }
 
 void beginSignTx() {
@@ -3907,7 +3961,7 @@ void click(int x, int y) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::signed_mode) {
     if (kMenu[0].contains(x, y)) { screen = Screen::signed_tx; focusIndex = 0; drawScreen(); }
-    else if (kMenu[1].contains(x, y)) { screen = Screen::animated_qr; focusIndex = 0; drawScreen(); }
+    else if (kMenu[1].contains(x, y)) { beginAnimatedQr(); }
     else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::animated_qr) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 1; drawScreen(); }
@@ -4088,6 +4142,12 @@ void setup() {
 
 void loop() {
   checkSerialCommand();
+  if (screen == Screen::animated_qr && bbqrTotalParts > 1 &&
+      static_cast<uint32_t>(millis() - bbqrLastFrameMs) >= 1000) {
+    bbqrLastFrameMs = millis();
+    bbqrIndex = (bbqrIndex + 1) % bbqrTotalParts;
+    drawAnimatedQr();
+  }
   qrClient.update();
   if (screen == Screen::scan_qr) {
     const auto qp = qrClient.phase();
