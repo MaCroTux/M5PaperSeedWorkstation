@@ -3445,6 +3445,17 @@ void handleVaultOpen(const String& name) {
   Serial.flush();
 }
 
+// Feedback de progreso del PBKDF2 durante M5VAULT OPEN (consola muestra el %).
+void serialProgress(uint32_t done, uint32_t total) {
+  const uint8_t pct = total ? static_cast<uint8_t>((static_cast<uint64_t>(done) * 100) / total) : 100;
+  static uint8_t last = 255;
+  if (pct != last) {
+    last = pct;
+    Serial.printf("M5PROG %u\n", pct);
+    Serial.flush();
+  }
+}
+
 void handleVaultPass(const String& password) {
   if (serialOpenVaultPath.length() == 0) { Serial.println("M5ERR bad_cmd"); Serial.flush(); return; }
   if (vaultUnlockBlocked()) { serialOpenVaultPath = ""; Serial.println("M5ERR locked"); Serial.flush(); return; }
@@ -3461,7 +3472,7 @@ void handleVaultPass(const String& password) {
     uint16_t recovered[24] = {};
     uint8_t recoveredCount = 0;
     const auto result = encrypted_seed_store::load(path.c_str(), vaultPassword,
-        recovered, recoveredCount, nullptr);
+        recovered, recoveredCount, serialProgress);
     bool valid = result == encrypted_seed_store::Result::ok &&
         bip39::checksum_valid(recovered, recoveredCount);
     if (valid) {
@@ -3485,7 +3496,7 @@ void handleVaultPass(const String& password) {
     uint8_t master[32] = {}, vaultId[4] = {};
     char label[17] = {};
     const auto result = session_vault_store::unlock(path.c_str(), vaultPassword,
-        master, vaultId, label, nullptr);
+        master, vaultId, label, serialProgress);
     encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
     if (result != encrypted_seed_store::Result::ok) {
       vaultUnlockFailed();
@@ -3593,6 +3604,17 @@ void handleTxSign() {
   Serial.flush();
 }
 
+void handleTxDelete(const String& name) {
+  String path = name.startsWith("/") ? name : "/" + name;
+  if (SD.cardType() == CARD_NONE) { Serial.println("M5ERR no_sd"); Serial.flush(); return; }
+  if (SD.remove(path)) {
+    Serial.printf("M5OK deleted=%s\n", name.c_str());
+  } else {
+    Serial.println("M5ERR not_found");
+  }
+  Serial.flush();
+}
+
 void handleState() {
   Serial.printf("M5OK fingerprint=%s words=%u",
                 fingerprintValid ? (activeFingerprint + 4) : "-", wordCount);
@@ -3626,7 +3648,9 @@ void handleSerialLine(const String& line) {
   } else if (line == "M5TX LIST") {
     handleTxList();
   } else if (line.startsWith("M5TX LOAD ")) {
-    handleTxLoad(line.substring(9));
+    handleTxLoad(line.substring(10));
+  } else if (line.startsWith("M5TX DELETE ")) {
+    handleTxDelete(line.substring(12));
   } else if (line == "M5TX SIGN") {
     handleTxSign();
   } else if (line == "M5STATE") {

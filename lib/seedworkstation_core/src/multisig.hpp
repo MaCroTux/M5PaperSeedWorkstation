@@ -79,24 +79,18 @@ inline bool detect(const psbt::ParsedTx& tx, MultisigInfo& info) {
   for (const auto& in : tx.inputs) {
     // El scriptPubKey del UTXO debe ser P2WSH: 0x00 0x20 <32 bytes>.
     if (in.utxoScriptLen != 34 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x20) {
-      Serial.printf("[MULTISIG] input no P2WSH (len=%u)\n",
-                    static_cast<unsigned>(in.utxoScriptLen));
       return false;
     }
     MultisigScript ms;
     if (!parseSortedMulti(in.witnessScript, in.witnessScriptLen, ms)) {
-      Serial.println("[MULTISIG] witnessScript no es sortedmulti");
       return false;
     }
     // P2WSH: el scriptPubKey contiene el SHA256 (UNA sola ronda) del witnessScript.
     uint8_t h[32] = {};
     mbedtls_sha256_ret(in.witnessScript, in.witnessScriptLen, h, 0);
     if (memcmp(h, in.utxoScript + 2, 32) != 0) {
-      Serial.println("[MULTISIG] witnessScript hash mismatch");
       return false;
     }
-    Serial.printf("[MULTISIG] detected P2WSH policy=%u-of-%u pubkeys=%u\n",
-                  ms.m, ms.n, ms.n);
     if (!haveFirst) { firstM = ms.m; firstN = ms.n; haveFirst = true; }
     else if (ms.m != firstM || ms.n != firstN) return false;
   }
