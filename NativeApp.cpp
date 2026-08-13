@@ -673,7 +673,7 @@ const char* activeHint(uint8_t index) {
 void drawMenu() {
   blankPage();
   title("SEED WORKSTATION",
-        fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
+        fingerprintValid ? "Semilla activa en memoria" : "Sin semilla cargada");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
                                     Icon::none, Icon::wifi, Icon::lock};
   for (uint8_t i = 0; i < 6; ++i) {
@@ -2792,7 +2792,7 @@ void drawSignedTx() {
     centeredFit(page, "Comprueba la semilla y que el PSBT", 400);
     centeredFit(page, "tenga entradas P2WPKH con ruta.", 445);
   } else {
-    title("TX FIRMADA", "Escanear con BlueWallet para emitir");
+    title("TX FIRMADA", "Escanear con Sparrow para emitir");
     const int qrSize = signedTxQr.size;
     int module = kWidth / (qrSize + 8);  // 4 modulos de margen blanco a cada lado
     if (module < 2) module = 2;
