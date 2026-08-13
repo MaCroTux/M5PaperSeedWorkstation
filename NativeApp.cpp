@@ -33,7 +33,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
-                     signed_tx, locked, tx_review, utxo_detail };
+                     signed_tx, locked, tx_review, utxo_detail, signed_mode,
+                     animated_qr };
 
 struct Rect {
   int x, y, w, h;
@@ -2806,6 +2807,26 @@ void drawSignedTx() {
   fullRefresh();
 }
 
+void drawSignedMode() {
+  blankPage();
+  title("EMITIR", "Elige el metodo de salida");
+  buttonOn(page, kMenu[0], "SPARROW (QR estatico)", true, focusIndex == 0, Icon::qr);
+  buttonOn(page, kMenu[1], "BLUEWALLET (QR animado)", true, focusIndex == 1, Icon::qr);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 2);
+  fullRefresh();
+}
+
+void drawAnimatedQr() {
+  blankPage();
+  title("BLUEWALLET", "QR animado (UR)");
+  warningIcon(page, 270, 240);
+  centeredFit(page, "EN DESARROLLO", 340, 500, 3);
+  centeredFit(page, "El QR animado UR se implementara", 420);
+  centeredFit(page, "en el proximo paso.", 460);
+  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+  fullRefresh();
+}
+
 void beginSignTx() {
   txSigned = false;
   signedTxHex = "";
@@ -2821,9 +2842,9 @@ void beginSignTx() {
     Serial.printf("[SIGNED] %s\n", signedTxHex.c_str());
     if (signedPsbtBase64.length()) buildSignedTxQr();
   }
-  screen = Screen::signed_tx;
+  screen = Screen::signed_mode;
   focusIndex = 0;
-  drawSignedTx();
+  drawSignedMode();
 }
 
 void drawLocked() {
@@ -3087,6 +3108,8 @@ void drawScreen() {
     case Screen::locked: drawLocked(); break;
     case Screen::tx_review: drawTxReview(); break;
     case Screen::utxo_detail: drawUtxoDetail(); break;
+    case Screen::signed_mode: drawSignedMode(); break;
+    case Screen::animated_qr: drawAnimatedQr(); break;
   }
 }
 
@@ -3336,6 +3359,14 @@ void updateFocusButton(uint8_t index) {
     case Screen::signed_tx:
       updateButton(kAction, "VOLVER", true, index == focusIndex);
       break;
+    case Screen::signed_mode:
+      if (index == 0) updateButton(kMenu[0], "SPARROW (QR estatico)", true, index == focusIndex, Icon::qr);
+      else if (index == 1) updateButton(kMenu[1], "BLUEWALLET (QR animado)", true, index == focusIndex, Icon::qr);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::animated_qr:
+      updateButton(kAction, "VOLVER", true, index == focusIndex);
+      break;
   }
 }
 
@@ -3357,6 +3388,8 @@ void moveFocus(int direction) {
     else count = 1;
   }
   else if (screen == Screen::signed_tx) count = 1;
+  else if (screen == Screen::signed_mode) count = 3;
+  else if (screen == Screen::animated_qr) count = 1;
   else if (screen == Screen::tx_review) count = fingerprintValid ? 3 : 2;
   else if (screen == Screen::utxo_detail) count = 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
@@ -3871,7 +3904,13 @@ void click(int x, int y) {
       wifiServer.cancel(); screen = Screen::menu; focusIndex = 4; drawScreen();
     }
   } else if (screen == Screen::signed_tx) {
-    if (kAction.contains(x, y)) { screen = Screen::wifi_receive; focusIndex = 0; drawScreen(); }
+    if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 0; drawScreen(); }
+  } else if (screen == Screen::signed_mode) {
+    if (kMenu[0].contains(x, y)) { screen = Screen::signed_tx; focusIndex = 0; drawScreen(); }
+    else if (kMenu[1].contains(x, y)) { screen = Screen::animated_qr; focusIndex = 0; drawScreen(); }
+    else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
+  } else if (screen == Screen::animated_qr) {
+    if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 1; drawScreen(); }
   } else if (screen == Screen::tx_review) {
     if (kFirmar.contains(x, y) && fingerprintValid) { beginSignTx(); }
     else if (kDetail.contains(x, y)) { utxoReturnScreen = screen; screen = Screen::utxo_detail; focusIndex = 0; drawScreen(); }
@@ -3999,6 +4038,11 @@ void activateFocus() {
     }
     click(r->x + 5, r->y + 5);
   } else if (screen == Screen::signed_tx) {
+    click(kAction.x + 5, kAction.y + 5);
+  } else if (screen == Screen::signed_mode) {
+    const Rect& r = focusIndex == 0 ? kMenu[0] : (focusIndex == 1 ? kMenu[1] : kBack);
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::animated_qr) {
     click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::tx_review) {
     const Rect* r = focusIndex == 0 ? &kBack : (focusIndex == 1 ? &kDetail : &kFirmar);
