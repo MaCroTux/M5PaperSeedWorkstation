@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr char kVersion[] = "native-passphrase-4";
+constexpr char kVersion[] = "v1.0";
 constexpr int kWidth = 540;
 constexpr int kHeight = 960;
 constexpr int kRockerRightPin = 37;
