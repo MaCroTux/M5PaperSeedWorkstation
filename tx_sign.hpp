@@ -305,6 +305,43 @@ inline void serializeSignedTx(const psbt::ParsedTx& tx, const std::vector<InputS
   for (int b = 0; b < 4; ++b) out.push_back((tx.locktime >> (8 * b)) & 0xff);
 }
 
+// Busca la clave privada cuya direccion coincide con pubkeyHash20 recorriendo el
+// espacio de derivacion de la wallet (change 0/1, indices hasta kGapLimit).
+inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpose,
+                             const uint8_t* pubkeyHash20, const char* passphrase,
+                             uint8_t outKey[32], uint8_t outPub[33]) {
+  bitcoin_hd::Node account = {};
+  if (!bitcoin_hd::account_node(words, count, purpose, account, passphrase)) return false;
+  constexpr uint32_t kGapLimit = 100;
+  for (uint8_t ch = 0; ch <= 1; ++ch) {
+    bitcoin_hd::Node branch = {};
+    if (!bitcoin_hd::derive_normal(account, ch, branch)) continue;
+    for (uint32_t idx = 0; idx < kGapLimit; ++idx) {
+      bitcoin_hd::Node child = {};
+      if (!bitcoin_hd::derive_normal(branch, idx, child)) {
+        bitcoin_hd::wipe(&child, sizeof(child)); continue;
+      }
+      uint8_t pub[33] = {}, kh[20] = {};
+      bool match = false;
+      if (bitcoin_hd::public_key(child, pub)) {
+        bitcoin_address::hash160(pub, 33, kh);
+        match = !memcmp(kh, pubkeyHash20, 20);
+      }
+      if (match) {
+        memcpy(outKey, child.key, 32); memcpy(outPub, pub, 33);
+        bitcoin_hd::wipe(&child, sizeof(child)); bitcoin_hd::wipe(&branch, sizeof(branch));
+        bitcoin_hd::wipe(&account, sizeof(account));
+        bitcoin_hd::wipe(pub, 33); bitcoin_hd::wipe(kh, 20);
+        return true;
+      }
+      bitcoin_hd::wipe(&child, sizeof(child)); bitcoin_hd::wipe(pub, 33); bitcoin_hd::wipe(kh, 20);
+    }
+    bitcoin_hd::wipe(&branch, sizeof(branch));
+  }
+  bitcoin_hd::wipe(&account, sizeof(account));
+  return false;
+}
+
 // Firma todos los inputs (solo P2WPKH / purpose 84, SIGHASH_ALL) y serializa la
 // transaccion segwit final en signedTx.
 inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t count,
@@ -314,11 +351,16 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
     const auto& in = tx.inputs[i];
     if (in.utxoScriptLen != 22 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x14)
       return false;
-    if (!in.hasDerivation || !in.amountKnown) return false;
+    if (!in.amountKnown) return false;
     uint8_t key[32] = {}, pub[33] = {};
-    if (!deriveKey(words, count, 84, in.derivFpr, in.derivPath, passphrase, key, pub)) {
-      bitcoin_hd::wipe(key, 32); return false;
+    bool haveKey = false;
+    if (in.hasDerivation) {
+      haveKey = deriveKey(words, count, 84, in.derivFpr, in.derivPath, passphrase, key, pub);
+    } else {
+      // Sin ruta BIP32: buscar la direccion en el espacio de derivacion.
+      haveKey = findKeyByAddress(words, count, 84, in.utxoScript + 2, passphrase, key, pub);
     }
+    if (!haveKey) { bitcoin_hd::wipe(key, 32); return false; }
     uint8_t scriptCode[26] = {};
     scriptCode[0] = 0x19; scriptCode[1] = 0x76; scriptCode[2] = 0xa9; scriptCode[3] = 0x14;
     memcpy(scriptCode + 4, in.utxoScript + 2, 20);
