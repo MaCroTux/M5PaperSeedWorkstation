@@ -112,6 +112,24 @@ The M5Paper replies `READY` and verifies the SHA256 before processing.
 
 It also accepts `incommit-transaction: <base64>` as a text command.
 
+### Console protocol (line-based)
+
+The desktop console (`m5paper_console.py`) can drive the device over serial with
+ASCII line commands (each ends in `\n`):
+
+| Command | Response |
+|---|---|
+| `M5PING` | `M5OK version=<ver>` |
+| `M5TIME <unix>` | `M5OK time=<unix>` (sets RTC) |
+| `M5VAULT LIST` | `M5VAULTS N` + `VLT/SVM\t<file>\t<label>` … `M5END` |
+| `M5VAULT SEEDS <name>` | `M5SEEDS N` + `<fpr>\t<label>` … `M5END` |
+| `M5VAULT OPEN <name>` | `READY` (then wait for `M5PASS`) |
+| `M5PASS <password>` | `M5OK vault=… [fingerprint=… words=… | seeds=…]` |
+| `M5SEED <words>` | `M5OK fingerprint=<fpr> words=<n>` |
+
+Errors are reported as `M5ERR <code>` (`no_sd`, `io_error`, `wrong_password`,
+`locked`, `invalid_seed`, `invalid`, `not_found`, `bad_cmd`).
+
 ---
 
 ## 5. File layout

@@ -1,5 +1,6 @@
 #include <M5EPD.h>
 #include <bootloader_random.h>
+#include <sys/time.h>
 #include "platform/platform.hpp"
 
 #include "bip39_support.hpp"
@@ -3228,6 +3229,9 @@ std::vector<uint8_t> serialBuf;
 bool serialWaitingPayload = false;
 uint32_t serialExpectedLen = 0;
 String serialShaHex;
+String serialOpenVaultPath = "";  // vault pendiente de M5PASS
+
+bool loadSeedText(const std::vector<uint8_t>& data);
 
 bool isBase64Char(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -3307,6 +3311,229 @@ void processSerialBinary(const std::vector<uint8_t>& payload, const String& shaH
   }
 }
 
+// ===== Protocolo serial de consola (lineas ASCII) =====
+// Nuevos comandos: M5PING, M5TIME, M5VAULT LIST/SEEDS/OPEN, M5PASS, M5SEED.
+// Los comandos binario (M5PSBT) y de texto (psbt:/incommit-transaction:) se
+// mantienen intactos en checkSerialCommand().
+
+const char* resultToErr(encrypted_seed_store::Result r) {
+  switch (r) {
+    case encrypted_seed_store::Result::ok: return "ok";
+    case encrypted_seed_store::Result::no_sd: return "no_sd";
+    case encrypted_seed_store::Result::io_error: return "io_error";
+    case encrypted_seed_store::Result::wrong_password_or_tampered: return "wrong_password";
+    default: return "invalid";
+  }
+}
+
+String readSvmLabel(const char* path) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) return "";
+  uint8_t h[64] = {};
+  if (f.read(h, 64) != 64 || memcmp(h, "M5SM", 4) != 0) { f.close(); return ""; }
+  f.close();
+  uint8_t len = h[5]; if (len > 16) len = 16;
+  char label[17] = {};
+  memcpy(label, h + 42, len);
+  label[len] = 0;
+  return String(label);
+}
+
+void handleSerialTime(const String& arg) {
+  const long t = arg.toInt();
+  if (t <= 0) { Serial.println("M5ERR bad_cmd"); Serial.flush(); return; }
+  timeval tv = {t, 0};
+  settimeofday(&tv, nullptr);
+  Serial.printf("M5OK time=%ld\n", t);
+  Serial.flush();
+}
+
+void handleVaultList() {
+  if (SD.cardType() == CARD_NONE) { Serial.println("M5ERR no_sd"); Serial.flush(); return; }
+  scanVaultFiles();
+  scanSessionMeta();
+  Serial.printf("M5VAULTS %u\n", vaultFileCount + sessionMetaCount);
+  for (uint8_t i = 0; i < vaultFileCount; ++i) {
+    String name = vaultFiles[i];
+    if (name.startsWith("/")) name.remove(0, 1);
+    String label = name;
+    const int dash = label.indexOf('-');
+    if (dash >= 0) label.remove(0, dash + 1);
+    const int dot = label.indexOf(".vlt");
+    if (dot >= 0) label.remove(dot);
+    Serial.printf("VLT\t%s\t%s\n", name.c_str(), label.c_str());
+  }
+  for (uint8_t i = 0; i < sessionMetaCount; ++i) {
+    String name = sessionMetaFiles[i];
+    if (name.startsWith("/")) name.remove(0, 1);
+    Serial.printf("SVM\t%s\t%s\n", name.c_str(), readSvmLabel(sessionMetaFiles[i]).c_str());
+  }
+  Serial.println("M5END");
+  Serial.flush();
+}
+
+void handleVaultSeeds(const String& name) {
+  if (SD.cardType() == CARD_NONE) { Serial.println("M5ERR no_sd"); Serial.flush(); return; }
+  String path = name.startsWith("/") ? name : "/" + name;
+  if (!path.endsWith(".svm")) { Serial.println("M5ERR invalid"); Serial.flush(); return; }
+  File f = SD.open(path, FILE_READ);
+  if (!f) { Serial.println("M5ERR not_found"); Serial.flush(); return; }
+  uint8_t h[64] = {};
+  if (f.read(h, 64) != 64 || memcmp(h, "M5SM", 4) != 0) { f.close(); Serial.println("M5ERR invalid"); Serial.flush(); return; }
+  uint8_t vaultId[4] = {};
+  memcpy(vaultId, h + 38, 4);
+  f.close();
+
+  char prefix[16];
+  snprintf(prefix, sizeof(prefix), "S-%02X%02X%02X%02X-",
+           vaultId[0], vaultId[1], vaultId[2], vaultId[3]);
+
+  struct SeedEntry { char fpr[9]; char label[17]; };
+  SeedEntry entries[8] = {};
+  uint8_t count = 0;
+
+  File root = SD.open("/");
+  if (root && root.isDirectory()) {
+    File e = root.openNextFile();
+    while (e && count < 8) {
+      String fn = e.name();
+      if (fn.startsWith("/")) fn.remove(0, 1);
+      if (!e.isDirectory() && fn.startsWith(prefix) && fn.endsWith(".svs")) {
+        String full = "/" + fn;
+        File s = SD.open(full, FILE_READ);
+        if (s) {
+          uint8_t sh[64] = {};
+          if (s.read(sh, 64) == 64 && memcmp(sh, "M5SR", 4) == 0) {
+            snprintf(entries[count].fpr, 9, "%02X%02X%02X%02X",
+                     sh[22], sh[23], sh[24], sh[25]);
+            uint8_t llen = sh[26]; if (llen > 16) llen = 16;
+            memcpy(entries[count].label, sh + 27, llen);
+            entries[count].label[llen] = 0;
+            ++count;
+          }
+          s.close();
+        }
+      }
+      e.close();
+      e = root.openNextFile();
+    }
+    if (e) e.close();
+    root.close();
+  }
+
+  Serial.printf("M5SEEDS %u\n", count);
+  for (uint8_t i = 0; i < count; ++i)
+    Serial.printf("%s\t%s\n", entries[i].fpr, entries[i].label);
+  Serial.println("M5END");
+  Serial.flush();
+}
+
+void handleVaultOpen(const String& name) {
+  String path = name.startsWith("/") ? name : "/" + name;
+  if (SD.cardType() == CARD_NONE) { Serial.println("M5ERR no_sd"); Serial.flush(); return; }
+  File f = SD.open(path, FILE_READ);
+  if (!f) { Serial.println("M5ERR not_found"); Serial.flush(); return; }
+  f.close();
+  serialOpenVaultPath = path;
+  Serial.println("READY");
+  Serial.flush();
+}
+
+void handleVaultPass(const String& password) {
+  if (serialOpenVaultPath.length() == 0) { Serial.println("M5ERR bad_cmd"); Serial.flush(); return; }
+  if (vaultUnlockBlocked()) { serialOpenVaultPath = ""; Serial.println("M5ERR locked"); Serial.flush(); return; }
+
+  String path = serialOpenVaultPath;
+  serialOpenVaultPath = "";
+  String shortName = path;
+  if (shortName.startsWith("/")) shortName.remove(0, 1);
+
+  strncpy(vaultPassword, password.c_str(), sizeof(vaultPassword) - 1);
+  vaultPassword[sizeof(vaultPassword) - 1] = 0;
+
+  if (path.endsWith(".vlt")) {
+    uint16_t recovered[24] = {};
+    uint8_t recoveredCount = 0;
+    const auto result = encrypted_seed_store::load(path.c_str(), vaultPassword,
+        recovered, recoveredCount, nullptr);
+    bool valid = result == encrypted_seed_store::Result::ok &&
+        bip39::checksum_valid(recovered, recoveredCount);
+    if (valid) {
+      memset(words, 0, sizeof(words));
+      memcpy(words, recovered, recoveredCount * sizeof(uint16_t));
+      targetWords = recoveredCount; wordCount = recoveredCount; prefix = ""; editingWord = -1;
+      valid = updateFingerprint();
+    }
+    encrypted_seed_store::wipe(recovered, sizeof(recovered));
+    encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
+    if (!valid) {
+      vaultUnlockFailed();
+      Serial.printf("M5ERR %s\n", resultToErr(result));
+    } else {
+      vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
+      lastUserActivity = millis();
+      Serial.printf("M5OK vault=%s fingerprint=%s words=%u\n",
+                    shortName.c_str(), activeFingerprint + 4, wordCount);
+    }
+  } else if (path.endsWith(".svm")) {
+    uint8_t master[32] = {}, vaultId[4] = {};
+    char label[17] = {};
+    const auto result = session_vault_store::unlock(path.c_str(), vaultPassword,
+        master, vaultId, label, nullptr);
+    encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
+    if (result != encrypted_seed_store::Result::ok) {
+      vaultUnlockFailed();
+      Serial.printf("M5ERR %s\n", resultToErr(result));
+    } else {
+      memcpy(sessionMasterKey, master, 32);
+      memcpy(sessionVaultId, vaultId, 4);
+      strncpy(sessionLabel, label, sizeof(sessionLabel) - 1);
+      strncpy(sessionMetaPath, path.c_str(), sizeof(sessionMetaPath) - 1);
+      sessionUnlocked = true;
+      vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
+      lastUserActivity = millis();
+      const uint8_t loaded = loadAllSessionSeeds();
+      Serial.printf("M5OK vault=%s seeds=%u\n", shortName.c_str(), loaded);
+    }
+    encrypted_seed_store::wipe(master, sizeof(master));
+  } else {
+    encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
+    Serial.println("M5ERR invalid");
+  }
+  Serial.flush();
+}
+
+void handleSeed(const String& wordsStr) {
+  std::vector<uint8_t> data(wordsStr.length());
+  memcpy(data.data(), wordsStr.c_str(), wordsStr.length());
+  if (loadSeedText(data)) {
+    lastUserActivity = millis();
+    Serial.printf("M5OK fingerprint=%s words=%u\n", activeFingerprint + 4, wordCount);
+  } else {
+    Serial.println("M5ERR invalid_seed");
+  }
+  Serial.flush();
+}
+
+void handleSerialLine(const String& line) {
+  if (line.startsWith("M5PING")) {
+    Serial.printf("M5OK version=%s\n", kVersion);
+    Serial.flush();
+  } else if (line.startsWith("M5TIME ")) {
+    handleSerialTime(line.substring(7));
+  } else if (line == "M5VAULT LIST") {
+    handleVaultList();
+  } else if (line.startsWith("M5VAULT SEEDS ")) {
+    handleVaultSeeds(line.substring(14));
+  } else if (line.startsWith("M5VAULT OPEN ")) {
+    handleVaultOpen(line.substring(13));
+  } else if (line.startsWith("M5PASS ")) {
+    handleVaultPass(line.substring(7));
+  } else if (line.startsWith("M5SEED ")) {
+    handleSeed(line.substring(7));
+  }
+}
+
 void checkSerialCommand() {
   while (Serial.available()) serialBuf.push_back(static_cast<uint8_t>(Serial.read()));
   if (serialBuf.size() > 20000) serialBuf.erase(serialBuf.begin(), serialBuf.begin() + 10000);
@@ -3321,6 +3548,24 @@ void checkSerialCommand() {
     } else {
       return;
     }
+  }
+
+  // Comandos de consola (lineas ASCII). Se procesan antes que el resto; si la
+  // linea no es un comando nuevo se deja en el buffer para el protocolo binario.
+  while (true) {
+    size_t nl = serialBuf.size();
+    for (size_t i = 0; i < serialBuf.size(); ++i)
+      if (serialBuf[i] == '\n') { nl = i; break; }
+    if (nl == serialBuf.size()) break;
+    String line;
+    for (size_t i = 0; i < nl; ++i) line += static_cast<char>(serialBuf[i]);
+    while (line.length() && line[line.length() - 1] == '\r') line.remove(line.length() - 1);
+    const bool isNewCmd = line.startsWith("M5PING") || line.startsWith("M5TIME ") ||
+        line.startsWith("M5VAULT ") || line.startsWith("M5PASS ") ||
+        line.startsWith("M5SEED ");
+    if (!isNewCmd) break;
+    serialBuf.erase(serialBuf.begin(), serialBuf.begin() + nl + 1);
+    handleSerialLine(line);
   }
 
   // Protocolo binario del script: "M5PSBT <len> <sha256>\n" + payload binario.
