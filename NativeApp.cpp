@@ -2626,31 +2626,6 @@ uint8_t drawGroupedAddress(M5EPD_Canvas& canvas, const String& addr, int cx, int
 void drawTxInfo() {
   Serial.printf("[TX] fingerprintValid=%d txIsPsbt=%d words=%u/%u\n",
                 fingerprintValid, txIsPsbt, wordCount, targetWords);
-  const bool haveSeed = fingerprintValid;
-
-  // Clasificar cada salida: nuestra (cambio) o externa (pago), buscando la
-  // direccion en la rama de cambio de la wallet.
-  bool outputOurs[8] = {false};
-  uint64_t payTotal = 0, changeTotal = 0;
-  if (haveSeed) {
-    title("TRANSACCION", "Verificando direccion de cambio...");
-    textStyle(page, 2);
-    page.setCursor(20, 240); page.println("Buscando tu direccion de cambio");
-    page.setCursor(20, 285); page.println("en las primeras 20 direcciones...");
-    fullRefresh();
-
-    for (size_t i = 0; i < parsedTx.outputs.size() && i < 8; ++i) {
-      bool ours = false;
-      tx_sign::outputMatchesWallet(parsedTx.outputs[i], words, targetWords,
-                                   passphraseActive ? activePassphrase : "", ours);
-      outputOurs[i] = ours;
-      if (ours) changeTotal += parsedTx.outputs[i].value;
-      else payTotal += parsedTx.outputs[i].value;
-    }
-  } else {
-    payTotal = parsedTx.totalOut;
-  }
-
   title("TRANSACCION", "PSBT sin firmar - verifica con calma");
   textStyle(page, 2);
   int y = 158;
@@ -2665,16 +2640,23 @@ void drawTxInfo() {
     y += 40;
   }
   page.setCursor(20, y);
-  page.printf("Pago: %s BTC", psbt::formatSats(payTotal).c_str());
+  page.printf("Pago: %s BTC", psbt::formatSats(parsedTx.totalPay).c_str());
   y += 40;
   page.setCursor(20, y);
-  if (haveSeed) page.printf("Cambio: %s BTC", psbt::formatSats(changeTotal).c_str());
-  else page.print("Cambio: carga la semilla");
+  if (parsedTx.hasChangeInfo)
+    page.printf("Cambio: %s BTC", psbt::formatSats(parsedTx.totalChange).c_str());
+  else
+    page.print("Cambio: no marcado");
   y += 40;
   if (parsedTx.inputsComplete) {
     page.setCursor(20, y);
     page.printf("Comision: %s BTC", psbt::formatSats(parsedTx.fee).c_str());
     y += 40;
+  }
+  if (parsedTx.hasChangeInfo) {
+    page.setCursor(20, y);
+    page.print("Comprueba tu direccion de cambio");
+    y += 36;
   }
   y += 12;
 
@@ -2685,27 +2667,13 @@ void drawTxInfo() {
     const String addr = o.address.length() ? o.address : "direccion no estandar";
     const uint8_t addrLines = addr.length() > 64 ? 4 : (addr.length() + 15) / 16;
 
-    const bool ours = outputOurs[i];
-    String label;
-    if (!haveSeed) label = "SALIDA";
-    else if (ours) label = "CAMBIO (tuya)";
-    else label = "PAGO";
-    String notice;
-    if (haveSeed && !ours && !o.hasDerivation)
-      notice = "cambio no en tus 20 primeras";
-
-    const int boxH = 40 + addrLines * 46 + (notice.length() ? 34 : 0) + 16;
+    const String label = o.isChange ? "CAMBIO" : "PAGO";
+    const int boxH = 40 + addrLines * 46 + 16;
     page.drawRoundRect(20, y, 500, boxH, 8, kBlack);
     textStyle(page, 2);
     page.setCursor(34, y + 8);
     page.printf("%s: %s BTC", label.c_str(), psbt::formatSats(o.value).c_str());
     drawGroupedAddress(page, addr, 270, y + 42, 3, 46);
-    if (notice.length()) {
-      textStyle(page, 2);
-      page.setTextDatum(MC_DATUM);
-      page.drawString(notice, 270, y + boxH - 22);
-      page.setTextDatum(TL_DATUM);
-    }
     y += boxH + 14;
   }
   if (parsedTx.outputs.size() > maxShow) {
