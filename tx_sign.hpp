@@ -117,6 +117,9 @@ inline bool deriveKey(const uint16_t* words, size_t count, uint32_t purpose,
   if (!bitcoin_hd::account_node(words, count, purpose, account, passphrase)) return false;
   bitcoin_hd::fingerprint(account, accountFpr);
   if (memcmp(accountFpr, fpr, 4) != 0) {
+    Serial.printf("[SIGN] FPR mismatch: PSBT=%02X%02X%02X%02X semilla=%02X%02X%02X%02X (purpose %lu)\n",
+                  fpr[0], fpr[1], fpr[2], fpr[3], accountFpr[0], accountFpr[1],
+                  accountFpr[2], accountFpr[3], static_cast<unsigned long>(purpose));
     bitcoin_hd::wipe(&account, sizeof(account)); bitcoin_hd::wipe(accountFpr, 4);
     return false;
   }
@@ -312,6 +315,11 @@ inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpo
                              uint8_t outKey[32], uint8_t outPub[33]) {
   bitcoin_hd::Node account = {};
   if (!bitcoin_hd::account_node(words, count, purpose, account, passphrase)) return false;
+  uint8_t fpr[4] = {};
+  bitcoin_hd::fingerprint(account, fpr);
+  Serial.printf("[SIGN] account FPR(purpose %lu)=%02X%02X%02X%02X buscando %02X%02X%02X%02X...\n",
+                static_cast<unsigned long>(purpose), fpr[0], fpr[1], fpr[2], fpr[3],
+                pubkeyHash20[0], pubkeyHash20[1], pubkeyHash20[2], pubkeyHash20[3]);
   constexpr uint32_t kGapLimit = 100;
   for (uint8_t ch = 0; ch <= 1; ++ch) {
     bitcoin_hd::Node branch = {};
@@ -329,6 +337,7 @@ inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpo
       }
       if (match) {
         memcpy(outKey, child.key, 32); memcpy(outPub, pub, 33);
+        Serial.printf("[SIGN] encontrada change=%u index=%u\n", ch, static_cast<unsigned>(idx));
         bitcoin_hd::wipe(&child, sizeof(child)); bitcoin_hd::wipe(&branch, sizeof(branch));
         bitcoin_hd::wipe(&account, sizeof(account));
         bitcoin_hd::wipe(pub, 33); bitcoin_hd::wipe(kh, 20);
@@ -338,6 +347,7 @@ inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpo
     }
     bitcoin_hd::wipe(&branch, sizeof(branch));
   }
+  Serial.println("[SIGN] NO encontrada (gap limit 100)");
   bitcoin_hd::wipe(&account, sizeof(account));
   return false;
 }

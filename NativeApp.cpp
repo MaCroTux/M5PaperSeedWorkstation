@@ -33,7 +33,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
-                     signed_tx };
+                     signed_tx, locked };
 
 struct Rect {
   int x, y, w, h;
@@ -47,7 +47,7 @@ constexpr Rect kMenu[] = {{40, 165, 460, 80}, {40, 260, 460, 80},
                           {40, 545, 460, 80}, {40, 640, 460, 80}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
-                                       "AYUDA", "RECIBIR POR WIFI"};
+                                       "AYUDA", "RECIBIR POR WIFI", "BLOQUEAR"};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
@@ -629,7 +629,9 @@ const char* menuLabel(uint8_t index) {
 }
 
 bool menuEnabled(uint8_t index) {
-  return !(index == 1 && fingerprintValid);
+  if (index == 1) return !fingerprintValid;  // GENERAR ENTROPIA
+  if (index == 4) return fingerprintValid;   // RECIBIR POR WIFI (necesita semilla)
+  return true;
 }
 
 const char* menuHint(uint8_t index) {
@@ -640,7 +642,9 @@ const char* menuHint(uint8_t index) {
                                     : "Genera una semilla aleatoria con entropia propia";
     case 2: return "Cifra y guarda varias semillas bajo una contrasena maestra";
     case 3: return "Conceptos basicos y glosario";
-    default: return "Recibe un archivo o QR por WiFi desde tu movil";
+    case 4: return fingerprintValid ? "Recibe un archivo o QR por WiFi desde tu movil"
+                                    : "Carga una semilla para poder recibir y firmar";
+    default: return "Bloquea el dispositivo y muestra la portada";
   }
 }
 
@@ -662,8 +666,8 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Interfaz nativa M5Paper");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::none, Icon::wifi};
-  for (uint8_t i = 0; i < 5; ++i) {
+                                    Icon::none, Icon::wifi, Icon::lock};
+  for (uint8_t i = 0; i < 6; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
@@ -2700,6 +2704,18 @@ void saveSignedTxToSd(const String& hex) {
   }
 }
 
+void saveReceivedPsbt(const std::vector<uint8_t>& data) {
+  if (SD.cardType() == CARD_NONE || data.empty()) return;
+  String path = "/PSBT-" + String(millis()) + ".psbt";
+  File f = SD.open(path, FILE_WRITE);
+  if (f) {
+    f.write(data.data(), data.size());
+    f.close();
+    Serial.printf("[PSBT] guardado en %s (%u bytes)\n", path.c_str(),
+                  static_cast<unsigned>(data.size()));
+  }
+}
+
 bool buildSignedTxQr() {
   memset(signedTxQrBuffer, 0, sizeof(signedTxQrBuffer));
   return qrcode_initText(&signedTxQr, signedTxQrBuffer, 10, ECC_LOW,
@@ -2749,6 +2765,32 @@ void beginSignTx() {
   screen = Screen::signed_tx;
   focusIndex = 0;
   drawSignedTx();
+}
+
+void drawLocked() {
+  blankPage();
+  const int cx = kWidth / 2;
+  const int cy = 300;
+  page.fillCircle(cx, cy, 130, kBlack);
+  textStyle(page, 7, kWhite, kBlack);
+  page.setTextDatum(MC_DATUM);
+  page.drawString("B", cx, cy);
+  textStyle(page, 2, kBlack, kWhite);
+  page.drawString("M5Paper Seed Workstation", cx, 470);
+  textStyle(page, 3);
+  page.drawString("BLOQUEADO", cx, 545);
+  textStyle(page, 2);
+  page.drawString("Pulsa o toca para desbloquear", cx, 620);
+  page.setTextDatum(TL_DATUM);
+  fullRefresh();
+}
+
+void lockDevice() {
+  if (sessionUnlocked) lockSessionVault();
+  else if (fingerprintValid) discardActiveSeed();
+  screen = Screen::locked;
+  focusIndex = 0;
+  drawLocked();
 }
 
 void drawWifiReceive() {
@@ -2842,6 +2884,7 @@ void drawScreen() {
     case Screen::scan_qr: drawScanQr(); break;
     case Screen::wifi_receive: drawWifiReceive(); break;
     case Screen::signed_tx: drawSignedTx(); break;
+    case Screen::locked: drawLocked(); break;
   }
 }
 
@@ -2849,7 +2892,7 @@ void updateFocusButton(uint8_t index) {
   switch (screen) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                        Icon::none, Icon::wifi};
+                                        Icon::none, Icon::wifi, Icon::lock};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -3089,7 +3132,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 5;
+  else if (screen == Screen::menu) count = 6;
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive) {
@@ -3116,8 +3159,10 @@ void moveFocus(int direction) {
            screen == Screen::unlock_confirm) count = 2;
   else if (screen == Screen::address_explorer) count = 7;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
-  if (screen == Screen::menu && fingerprintValid && focusIndex == 1) {
-    focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
+  if (screen == Screen::menu) {
+    const bool skip = (fingerprintValid && focusIndex == 1) ||
+                      (!fingerprintValid && focusIndex == 4);
+    if (skip) focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
   }
   updateFocusButton(previous);
   if (previous != focusIndex) updateFocusButton(focusIndex);
@@ -3177,7 +3222,8 @@ void click(int x, int y) {
       if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
     }     else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
-    else if (kMenu[4].contains(x, y)) { beginWifiReceive(); }
+    else if (kMenu[4].contains(x, y) && fingerprintValid) { beginWifiReceive(); }
+    else if (kMenu[5].contains(x, y)) { lockDevice(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(2); }
     else if (kActiveMenu[1].contains(x, y)) {
@@ -3781,6 +3827,7 @@ void loop() {
     } else if (wp == qr_wifi::Phase::Received && !wifiResultShown) {
       wifiResultShown = true;
       txIsPsbt = psbt::tryParsePsbt(wifiServer.data(), parsedTx);
+      if (txIsPsbt) saveReceivedPsbt(wifiServer.data());
       drawWifiReceive();
     }
   }
@@ -3819,7 +3866,12 @@ void loop() {
   const int left = digitalRead(kRockerLeftPin);
   const int press = digitalRead(kRockerPressPin);
   const int right = digitalRead(kRockerRightPin);
-  if (screen == Screen::session_lock_warning &&
+  if (screen == Screen::locked && (left == LOW || right == LOW || press == LOW)) {
+    if (millis() - lastRocker >= 120) {
+      lastRocker = millis(); lastUserActivity = millis();
+      screen = Screen::menu; focusIndex = 0; drawScreen();
+    }
+  } else if (screen == Screen::session_lock_warning &&
       (left == LOW || right == LOW || press == LOW)) {
     if (millis() - lastRocker >= 120) {
       lastRocker = millis(); lastUserActivity = millis();
@@ -3846,7 +3898,9 @@ void loop() {
       }
     } else if (wasDown) {
       lastUserActivity = millis();
-      if (screen == Screen::session_lock_warning) {
+      if (screen == Screen::locked) {
+        screen = Screen::menu; focusIndex = 0; drawScreen();
+      } else if (screen == Screen::session_lock_warning) {
         screen = sessionLockReturn; focusIndex = 0; drawScreen();
       } else {
         click(tx, ty);
