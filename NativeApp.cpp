@@ -2828,7 +2828,7 @@ void drawSignedMode() {
 void drawAnimatedQr() {
   String frame;
   if (bbqrSingle) {
-    frame = bbqr::bytesToUpperHex(signedFinalizedPsbt.data(), signedFinalizedPsbt.size());
+    frame = signedPsbtBase64;  // PSBT en Base64 (cHNidP8...), lo que espera BlueWallet
   } else {
     frame = bbqr::makeFrame(signedFinalizedPsbt.data(), signedFinalizedPsbt.size(),
                             bbqr::kTypePsbt, static_cast<uint16_t>(bbqrTotalParts),
