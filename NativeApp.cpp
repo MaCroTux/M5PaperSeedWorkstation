@@ -2831,14 +2831,14 @@ void drawTxReview() {
   fullRefresh();
 }
 
-String serialBuffer;
+std::vector<uint8_t> serialBuf;
 
 bool isBase64Char(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
          (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
 }
 
-void processSerialTransaction(const String& payload) {
+void processSerialText(const String& payload) {
   std::vector<uint8_t> data(payload.length());
   memcpy(data.data(), payload.c_str(), payload.length());
   if (psbt::tryParsePsbt(data, parsedTx)) {
@@ -2855,40 +2855,96 @@ void processSerialTransaction(const String& payload) {
   }
 }
 
+void processSerialBinary(const std::vector<uint8_t>& payload, const String& shaHex) {
+  uint8_t digest[32] = {};
+  mbedtls_sha256_ret(payload.data(), payload.size(), digest, 0);
+  static const char hexc[] = "0123456789abcdef";
+  String computed;
+  computed.reserve(64);
+  for (int i = 0; i < 32; ++i) {
+    computed += hexc[digest[i] >> 4];
+    computed += hexc[digest[i] & 0xF];
+  }
+  if (!computed.equalsIgnoreCase(shaHex)) {
+    Serial.printf("[SERIAL] SHA256 NO coincide (esperado %s, calculado %s)\n",
+                  shaHex.c_str(), computed.c_str());
+    showToast("Serial: SHA256 no coincide");
+    return;
+  }
+  Serial.printf("[SERIAL] PSBT binario (%u bytes) SHA256 OK\n",
+                static_cast<unsigned>(payload.size()));
+  if (psbt::tryParsePsbt(payload, parsedTx)) {
+    txIsPsbt = true;
+    saveReceivedPsbt(payload);
+    screen = Screen::tx_review;
+    focusIndex = 0;
+    drawTxReview();
+    showToast("PSBT recibido por serial");
+  } else {
+    Serial.println("[SERIAL] no es un PSBT valido");
+    showToast("Serial: no es un PSBT valido");
+  }
+}
+
 void checkSerialCommand() {
-  while (Serial.available()) {
-    const char c = static_cast<char>(Serial.read());
-    if (serialBuffer.length() >= 16384) serialBuffer = "";
-    serialBuffer += c;
+  while (Serial.available()) serialBuf.push_back(static_cast<uint8_t>(Serial.read()));
+  if (serialBuf.size() > 20000) serialBuf.erase(serialBuf.begin(), serialBuf.begin() + 10000);
 
-    // Buscar el comando en cualquier punto del flujo (ignora basura previa).
-    int idx = serialBuffer.indexOf("incommit-transaction:");
-    if (idx < 0) idx = serialBuffer.indexOf("psbt:");
-    if (idx < 0) idx = serialBuffer.indexOf("firmar:");
-    if (idx < 0) continue;
+  // Protocolo binario del script: "M5PSBT <len> <sha256>\n" + payload binario.
+  static const char kHdr[] = "M5PSBT ";
+  const size_t hlen = 7;
+  for (size_t i = 0; i + hlen <= serialBuf.size(); ++i) {
+    if (memcmp(&serialBuf[i], kHdr, hlen) != 0) continue;
+    size_t j = i + hlen;
+    String lenStr;
+    while (j < serialBuf.size() && serialBuf[j] >= '0' && serialBuf[j] <= '9') {
+      lenStr += static_cast<char>(serialBuf[j]); ++j;
+    }
+    if (j < serialBuf.size() && serialBuf[j] == ' ') ++j;
+    String sha;
+    while (j < serialBuf.size() && serialBuf[j] != '\n' && serialBuf[j] != '\r') {
+      sha += static_cast<char>(serialBuf[j]); ++j;
+    }
+    if (j < serialBuf.size() && (serialBuf[j] == '\n' || serialBuf[j] == '\r')) ++j;
+    const uint32_t len = lenStr.toInt();
+    if (len == 0) { serialBuf.erase(serialBuf.begin(), serialBuf.begin() + j); break; }
+    if (j + len > serialBuf.size()) break;  // aun no llego el payload completo
+    std::vector<uint8_t> payload(serialBuf.begin() + j, serialBuf.begin() + j + len);
+    serialBuf.erase(serialBuf.begin(), serialBuf.begin() + j + len);
+    processSerialBinary(payload, sha);
+    break;
+  }
 
-    const int colon = serialBuffer.indexOf(':', idx);
-    if (colon < 0) { serialBuffer = ""; continue; }
-
-    // Extraer el payload: saltar espacios y capturar caracteres base64/hex.
+  // Comando de texto: incommit-transaction:/psbt:/firmar: <base64/hex>.
+  static const char* kCmds[] = {"incommit-transaction:", "psbt:", "firmar:"};
+  for (size_t i = 0; i < serialBuf.size(); ++i) {
+    int cmdLen = -1;
+    for (int c = 0; c < 3; ++c) {
+      const size_t l = strlen(kCmds[c]);
+      if (i + l <= serialBuf.size() && memcmp(&serialBuf[i], kCmds[c], l) == 0) {
+        cmdLen = static_cast<int>(l); break;
+      }
+    }
+    if (cmdLen < 0) continue;
     String payload;
-    size_t i = colon + 1;
-    while (i < serialBuffer.length()) {
-      const char ch = serialBuffer[i];
+    size_t k = i + cmdLen;
+    while (k < serialBuf.size()) {
+      const char ch = static_cast<char>(serialBuf[k]);
       if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '"') {
-        if (payload.length() == 0) { ++i; continue; }
+        if (payload.length() == 0) { ++k; continue; }
         break;
       }
-      if (isBase64Char(ch)) { payload += ch; ++i; }
+      if (isBase64Char(ch)) { payload += ch; ++k; }
       else break;
     }
-    serialBuffer = "";
+    serialBuf.erase(serialBuf.begin(), serialBuf.begin() + k);
     if (payload.length() >= 20) {
-      Serial.printf("[SERIAL] comando detectado (%u chars)\n", static_cast<unsigned>(payload.length()));
-      processSerialTransaction(payload);
+      Serial.printf("[SERIAL] comando texto (%u chars)\n", static_cast<unsigned>(payload.length()));
+      processSerialText(payload);
     } else {
       Serial.println("[SERIAL] payload vacio o demasiado corto");
     }
+    break;
   }
 }
 
