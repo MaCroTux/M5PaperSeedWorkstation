@@ -236,7 +236,8 @@ inline String pubkeyToAddress(const uint8_t pub[33], uint32_t purpose) {
 // se busca la direccion en el espacio de derivacion de la wallet.
 inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpose,
                              const uint8_t* pubkeyHash20, const char* passphrase,
-                             uint8_t outKey[32], uint8_t outPub[33]);
+                             uint8_t outKey[32], uint8_t outPub[33],
+                             bool changeOnly = false, uint32_t gapLimit = 100);
 
 inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words,
                                 size_t count, const char* passphrase, bool& isOurs) {
@@ -249,10 +250,10 @@ inline bool outputMatchesWallet(const psbt::TxOutput& out, const uint16_t* words
     ok = deriveKey(words, count, out.derivFpr, out.derivPath, passphrase, key, pub);
   } else if (purpose == 84 && out.scriptLen == 22 &&
              out.script[0] == 0x00 && out.script[1] == 0x14) {
-    ok = findKeyByAddress(words, count, 84, out.script + 2, passphrase, key, pub);
+    ok = findKeyByAddress(words, count, 84, out.script + 2, passphrase, key, pub, true, 50);
   } else if (purpose == 44 && out.scriptLen == 25 &&
              out.script[0] == 0x76 && out.script[1] == 0xa9 && out.script[2] == 0x14) {
-    ok = findKeyByAddress(words, count, 44, out.script + 3, passphrase, key, pub);
+    ok = findKeyByAddress(words, count, 44, out.script + 3, passphrase, key, pub, true, 50);
   }
   if (!ok) { bitcoin_hd::wipe(key, 32); return false; }
   const String derived = pubkeyToAddress(pub, purpose);
@@ -376,22 +377,19 @@ inline void buildFinalizedPsbt(const psbt::ParsedTx& tx, const std::vector<Input
 }
 
 // Busca la clave privada cuya direccion coincide con pubkeyHash20 recorriendo el
-// espacio de derivacion de la wallet (change 0/1, indices hasta kGapLimit).
+// espacio de derivacion de la wallet. Si changeOnly es true, solo recorre la rama
+// de cambio (m/.../1/*), que es donde vive el cambio.
 inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpose,
                              const uint8_t* pubkeyHash20, const char* passphrase,
-                             uint8_t outKey[32], uint8_t outPub[33]) {
+                             uint8_t outKey[32], uint8_t outPub[33],
+                             bool changeOnly, uint32_t gapLimit) {
   bitcoin_hd::Node account = {};
   if (!bitcoin_hd::account_node(words, count, purpose, account, passphrase)) return false;
-  uint8_t fpr[4] = {};
-  bitcoin_hd::fingerprint(account, fpr);
-  Serial.printf("[SIGN] account FPR(purpose %lu)=%02X%02X%02X%02X buscando %02X%02X%02X%02X...\n",
-                static_cast<unsigned long>(purpose), fpr[0], fpr[1], fpr[2], fpr[3],
-                pubkeyHash20[0], pubkeyHash20[1], pubkeyHash20[2], pubkeyHash20[3]);
-  constexpr uint32_t kGapLimit = 100;
-  for (uint8_t ch = 0; ch <= 1; ++ch) {
+  const uint8_t chStart = changeOnly ? 1 : 0;
+  for (uint8_t ch = chStart; ch <= 1; ++ch) {
     bitcoin_hd::Node branch = {};
     if (!bitcoin_hd::derive_normal(account, ch, branch)) continue;
-    for (uint32_t idx = 0; idx < kGapLimit; ++idx) {
+    for (uint32_t idx = 0; idx < gapLimit; ++idx) {
       bitcoin_hd::Node child = {};
       if (!bitcoin_hd::derive_normal(branch, idx, child)) {
         bitcoin_hd::wipe(&child, sizeof(child)); continue;
@@ -414,7 +412,8 @@ inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpo
     }
     bitcoin_hd::wipe(&branch, sizeof(branch));
   }
-  Serial.println("[SIGN] NO encontrada (gap limit 100)");
+  Serial.printf("[SIGN] NO encontrada (changeOnly=%d gap=%u)\n", changeOnly,
+                static_cast<unsigned>(gapLimit));
   bitcoin_hd::wipe(&account, sizeof(account));
   return false;
 }
