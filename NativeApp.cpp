@@ -2591,6 +2591,7 @@ size_t bbqrTotalParts = 1;
 size_t bbqrBlockSize = 0;
 uint16_t bbqrIndex = 0;
 uint32_t bbqrLastFrameMs = 0;
+bool bbqrSingle = true;
 
 void drawWifiResult() {
   const std::vector<uint8_t>& d = wifiServer.data();
@@ -2825,15 +2826,20 @@ void drawSignedMode() {
 }
 
 void drawAnimatedQr() {
-  const String frame = bbqr::makeFrame(signedFinalizedPsbt.data(), signedFinalizedPsbt.size(),
-                                       bbqr::kTypePsbt, static_cast<uint16_t>(bbqrTotalParts),
-                                       bbqrIndex, bbqrBlockSize);
+  String frame;
+  if (bbqrSingle) {
+    frame = bbqr::bytesToUpperHex(signedFinalizedPsbt.data(), signedFinalizedPsbt.size());
+  } else {
+    frame = bbqr::makeFrame(signedFinalizedPsbt.data(), signedFinalizedPsbt.size(),
+                            bbqr::kTypePsbt, static_cast<uint16_t>(bbqrTotalParts),
+                            bbqrIndex, bbqrBlockSize);
+  }
   Serial.println("[BBQR] frame:");
   Serial.println(frame.c_str());
-  Serial.printf("[BBQR] length=%u parts=%u index=%u\n",
+  Serial.printf("[BBQR] length=%u parts=%u index=%u single=%d\n",
                 static_cast<unsigned>(frame.length()),
                 static_cast<unsigned>(bbqrTotalParts),
-                static_cast<unsigned>(bbqrIndex));
+                static_cast<unsigned>(bbqrIndex), bbqrSingle);
   memset(bbqrQrBuffer, 0, sizeof(bbqrQrBuffer));
   static const uint16_t kAlphaCapL[] = {
       25, 47, 77, 114, 154, 195, 224, 279, 335, 395,
@@ -2881,6 +2887,7 @@ void beginAnimatedQr() {
                                                      bbqr::kPreferredBlockSize);
   bbqrTotalParts = layout.totalParts;
   bbqrBlockSize = layout.blockSize;
+  bbqrSingle = (bbqrTotalParts == 1);
   bbqrIndex = 0;
   bbqrLastFrameMs = millis();
   screen = Screen::animated_qr;
