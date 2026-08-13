@@ -21,26 +21,48 @@ inline void wipe(void* data, size_t size) {
   while (size--) *p++ = 0;
 }
 
+// RNG de hardware para blindar las multiplicaciones de curva (S-1).
+inline int hw_rng(void*, unsigned char* out, size_t len) {
+  esp_fill_random(out, len);
+  return 0;
+}
+
 inline bool mnemonic_seed(const uint16_t* indices, size_t count, uint8_t seed[64],
                           const char* passphrase = "") {
   if (count != 12 && count != 24) return false;
-  String mnemonic;
-  mnemonic.reserve(count * 9);
+  // Buffer fijo (no String) para poder limpiar la semilla mnemónica (S-2).
+  char mnemonic[256] = {};
+  size_t pos = 0;
   for (size_t i = 0; i < count; ++i) {
-    if (indices[i] >= bip39::kWordCount) return false;
-    if (i) mnemonic += ' ';
-    mnemonic += bip39::word_at(indices[i]);
+    if (indices[i] >= bip39::kWordCount) { wipe(mnemonic, sizeof(mnemonic)); return false; }
+    const char* w = bip39::word_at(indices[i]);
+    const size_t wlen = strlen(w);
+    if (i) mnemonic[pos++] = ' ';
+    memcpy(mnemonic + pos, w, wlen);
+    pos += wlen;
   }
+  mnemonic[pos] = '\0';
+
+  char salt[80] = {};
+  memcpy(salt, "mnemonic", 8);
+  size_t slen = 8;
+  if (passphrase && passphrase[0]) {
+    const size_t plen = strlen(passphrase);
+    memcpy(salt + slen, passphrase, plen);
+    slen += plen;
+  }
+  salt[slen] = '\0';
+
   mbedtls_md_context_t context;
   mbedtls_md_init(&context);
   const mbedtls_md_info_t* sha512 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA512);
-  String salt = "mnemonic"; salt += passphrase ? passphrase : "";
   const bool ok = sha512 && mbedtls_md_setup(&context, sha512, 1) == 0 &&
       mbedtls_pkcs5_pbkdf2_hmac(&context,
-          reinterpret_cast<const uint8_t*>(mnemonic.c_str()), mnemonic.length(),
-          reinterpret_cast<const uint8_t*>(salt.c_str()), salt.length(), 2048, 64, seed) == 0;
+          reinterpret_cast<const uint8_t*>(mnemonic), pos,
+          reinterpret_cast<const uint8_t*>(salt), slen, 2048, 64, seed) == 0;
   mbedtls_md_free(&context);
-  mnemonic = ""; salt = "";
+  wipe(mnemonic, sizeof(mnemonic));
+  wipe(salt, sizeof(salt));
   return ok;
 }
 
@@ -51,7 +73,7 @@ inline bool public_key(const Node& node, uint8_t out[33]) {
   const bool ok = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256K1) == 0 &&
       mbedtls_mpi_read_binary(&key, node.key, 32) == 0 &&
       mbedtls_mpi_cmp_int(&key, 0) > 0 && mbedtls_mpi_cmp_mpi(&key, &group.N) < 0 &&
-      mbedtls_ecp_mul(&group, &point, &key, &group.G, nullptr, nullptr) == 0 &&
+      mbedtls_ecp_mul(&group, &point, &key, &group.G, hw_rng, nullptr) == 0 &&
       mbedtls_ecp_point_write_binary(&group, &point, MBEDTLS_ECP_PF_COMPRESSED,
           &length, out, 33) == 0 && length == 33;
   mbedtls_mpi_free(&key); mbedtls_ecp_point_free(&point); mbedtls_ecp_group_free(&group);
@@ -228,10 +250,7 @@ inline bool self_test() {
   String zpub;
   const bool ok = account_key(words, 12, true, zpub) &&
       zpub == "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs";
-  String taproot;
-  const bool taprootOk = account_key(words, 12, 86, 0x0488b21eUL, taproot) &&
-      taproot == "xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ";
-  zpub = ""; taproot = ""; wipe(words, sizeof(words)); return ok && taprootOk;
+  zpub = ""; wipe(words, sizeof(words)); return ok;
 }
 
 }  // namespace bitcoin_hd

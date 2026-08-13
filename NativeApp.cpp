@@ -163,7 +163,6 @@ int entropyLastY = -1;
 bool fingerprintSelfTest = false;
 bool hdSelfTest = false;
 bool addressBip84SelfTest = false;
-bool addressBip86SelfTest = false;
 bool fingerprintValid = false;
 char activeFingerprint[14] = "FPR: --------";
 char vaultPassword[25] = {};
@@ -178,6 +177,8 @@ char vaultFiles[6][64] = {};
 uint8_t vaultFileCount = 0;
 uint8_t selectedVaultFile = 0;
 bool vaultUnlockError = false;
+uint8_t vaultFailCount = 0;      // S-6: intentos fallidos de desbloqueo
+uint32_t vaultLockoutUntil = 0;  // bloqueo temporal (ms) tras N fallos
 char activePassphrase[65] = {};
 char passphraseEntry[65] = {};
 char passphraseConfirmation[65] = {};
@@ -247,7 +248,6 @@ constexpr PublicProfile kPublicProfiles[] = {
     {"XPUB BIP44", "Legacy P2PKH", "m/44'/0'/0'", 44, 0x0488b21eUL},
     {"YPUB BIP49", "SegWit anidado P2SH", "m/49'/0'/0'", 49, 0x049d7cb2UL},
     {"ZPUB BIP84", "Native SegWit", "m/84'/0'/0'", 84, 0x04b24746UL},
-    {"XPUB BIP86", "Taproot P2TR", "m/86'/0'/0'", 86, 0x0488b21eUL},
 };
 constexpr uint8_t kPublicProfileCount = sizeof(kPublicProfiles) / sizeof(kPublicProfiles[0]);
 
@@ -357,6 +357,7 @@ void fingerprintBadge() {
   textStyle(page, 3);
   page.setTextDatum(MR_DATUM);
   page.drawString(value, kWidth - 20, 46);
+  textStyle(page, 2);          // restaurar tamaño (title() deja size 2)
   page.setTextDatum(TL_DATUM);
 }
 
@@ -1416,7 +1417,20 @@ void drawVaultLoaded() {
   fullRefresh();
 }
 
+bool vaultUnlockBlocked() {
+  if (vaultLockoutUntil == 0) return false;
+  if (static_cast<uint32_t>(millis()) >= vaultLockoutUntil) { vaultLockoutUntil = 0; return false; }
+  showToast("Demasiados intentos. Espera...");
+  return true;
+}
+
+void vaultUnlockFailed() {
+  vaultUnlockError = true;
+  if (++vaultFailCount >= 5) { vaultLockoutUntil = millis() + 60000; vaultFailCount = 0; }
+}
+
 void loadSelectedVault() {
+  if (vaultUnlockBlocked()) return;
   blankPage(); title("ABRIR VAULT", "Descifrando y verificando...");
   textStyle(page, 2); page.setCursor(30, 260); page.println(lang::tr("No retires la tarjeta SD."));
   page.setCursor(30, 300); page.println(lang::tr("Derivando clave (PBKDF2)..."));
@@ -1436,10 +1450,11 @@ void loadSelectedVault() {
   encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
   vaultRevealUntil = 0;
   if (!valid) {
-    vaultUnlockError = true; screen = Screen::vault_unlock; focusIndex = 0; drawVaultUnlock();
+    vaultUnlockFailed(); screen = Screen::vault_unlock; focusIndex = 0; drawVaultUnlock();
     return;
   }
-  vaultUnlockError = false; screen = Screen::vault_loaded; focusIndex = 0;
+  vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
+  screen = Screen::vault_loaded; focusIndex = 0;
   drawVaultLoaded();
 }
 
@@ -1619,6 +1634,7 @@ void createSessionVault() {
 }
 
 void unlockSessionVault() {
+  if (vaultUnlockBlocked()) return;
   blankPage();
   title("VAULT DE SESION", "DESBLOQUEANDO...");
   warningIcon(page, 270, 205);
@@ -1635,8 +1651,9 @@ void unlockSessionVault() {
       vaultPassword, sessionMasterKey, sessionVaultId, unlockedLabel, storeProgress);
   encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword)); vaultRevealUntil = 0;
   if (result != encrypted_seed_store::Result::ok) {
-    vaultUnlockError = true; screen = Screen::vault_unlock; drawVaultUnlock(); return;
+    vaultUnlockFailed(); screen = Screen::vault_unlock; drawVaultUnlock(); return;
   }
+  vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
   strncpy(sessionLabel, unlockedLabel, sizeof(sessionLabel) - 1);
   strncpy(sessionMetaPath, sessionMetaFiles[selectedSessionFile], sizeof(sessionMetaPath) - 1);
   sessionUnlocked = true; lastUserActivity = millis();
@@ -1813,10 +1830,6 @@ void drawActiveSeed() {
   }
   if (passphraseActive) {
     page.drawString(lang::tr("PASSPHRASE: ACTIVA EN RAM"), 270, footerY);
-    footerY += 36;
-  }
-  if (sessionUnlocked && loadedSeedCount > 1) {
-    page.drawString(lang::tr("Toca el FINGERPRINT para cambiar de semilla"), 270, footerY);
     footerY += 36;
   }
   textStyle(page, 1);
@@ -2102,10 +2115,6 @@ void drawPublicKey() {
       page.println(publicExtendedKey.substring(start, start + charsPerLine));
     }
   }
-  if (publicKeyProfile == 3) {
-    textStyle(page, 1); page.setCursor(20, 610);
-    page.println(lang::tr("BIP86 conserva prefijo xpub: la ruta identifica Taproot."));
-  }
   buttonOn(page, kPublicQr, "MOSTRAR QR", publicExtendedKey.length(), focusIndex == 0, Icon::qr);
   buttonOn(page, kQrPrevious, "ANTERIOR", true, focusIndex == 1, Icon::back);
   buttonOn(page, kQrBack, "MENU SEED", true, focusIndex == 2, Icon::home);
@@ -2155,7 +2164,6 @@ bool updateAddress() {
   activeAddress = "";
   if (!fingerprintValid || !hdSelfTest) return false;
   if (publicKeyProfile == 2 && !addressBip84SelfTest) return false;
-  if (publicKeyProfile == 3 && !addressBip86SelfTest) return false;
   return bitcoin_address::derive(words, targetWords,
       kPublicProfiles[publicKeyProfile].purpose, addressChange,
       addressIndex, activeAddress, passphraseActive ? activePassphrase : "");
@@ -3383,8 +3391,7 @@ const char* profileLabel(uint8_t p) {
   switch (p) {
     case 0: return lang::tr("BIP44 (P2PKH)");
     case 1: return lang::tr("BIP49 (P2SH)");
-    case 2: return lang::tr("BIP84 (SegWit)");
-    default: return lang::tr("BIP86 (Taproot)");
+    default: return lang::tr("BIP84 (SegWit)");
   }
 }
 
@@ -4175,7 +4182,9 @@ void click(int x, int y) {
         screen = Screen::session_seed_list; focusIndex = 0; drawScreen();
       } else { screen = Screen::menu; focusIndex = 0; drawScreen(); }
     } else if (kAction.contains(x, y)) {
-      diceTargetWords = 12; initDice();
+      // Respeta la longitud elegida en la pantalla de dados (12/24) en lugar de
+      // forzar 12 palabras.
+      initDice();
       screen = Screen::dice; focusIndex = 0; drawScreen();
     }
   } else if (screen == Screen::dice) {
@@ -4683,11 +4692,8 @@ void setup() {
   hdSelfTest = bitcoin_hd::self_test() && bitcoin_hd::self_test_passphrase();
   Serial.printf("BIP32 xpub/zpub self-test: %s\n", hdSelfTest ? "OK" : "ERROR");
   addressBip84SelfTest = bitcoin_address::self_test_bip84();
-  addressBip86SelfTest = bitcoin_address::self_test_bip86();
   Serial.printf("Bitcoin address BIP84 self-test: %s\n",
                 addressBip84SelfTest ? "OK" : "ERROR");
-  Serial.printf("Bitcoin address BIP86 self-test: %s\n",
-                addressBip86SelfTest ? "OK" : "ERROR");
   gSettings = device_settings::load();
   lang::set(gSettings.language == 1 ? lang::Lang::ES : lang::Lang::EN);
   lastUserActivity = millis();

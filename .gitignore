@@ -1,1 +1,4 @@
 .pio
+
+# Artefactos temporales del preprocesador de Arduino IDE
+*.ino 2.cpp

@@ -70,35 +70,12 @@ inline String segwit_address(uint8_t version, const uint8_t* program, size_t len
   return result;
 }
 
-inline bool taproot_program(const uint8_t compressed[33], uint8_t out[32]) {
-  uint8_t evenPub[33] = {}, tag[32] = {}, message[96] = {}, tweakBytes[32] = {};
-  evenPub[0] = 2; memcpy(evenPub + 1, compressed + 1, 32);
-  mbedtls_sha256_ret(reinterpret_cast<const uint8_t*>("TapTweak"), 8, tag, 0);
-  memcpy(message, tag, 32); memcpy(message + 32, tag, 32); memcpy(message + 64, evenPub + 1, 32);
-  if (mbedtls_sha256_ret(message, sizeof(message), tweakBytes, 0) != 0) return false;
-  bool ok = false; mbedtls_ecp_group group; mbedtls_ecp_point point, output;
-  mbedtls_mpi tweak, one; mbedtls_ecp_group_init(&group);
-  mbedtls_ecp_point_init(&point); mbedtls_ecp_point_init(&output);
-  mbedtls_mpi_init(&tweak); mbedtls_mpi_init(&one);
-  if (mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256K1) == 0 &&
-      mbedtls_ecp_point_read_binary(&group, &point, evenPub, sizeof(evenPub)) == 0 &&
-      mbedtls_mpi_read_binary(&tweak, tweakBytes, 32) == 0 &&
-      mbedtls_mpi_cmp_mpi(&tweak, &group.N) < 0 && mbedtls_mpi_lset(&one, 1) == 0 &&
-      mbedtls_ecp_muladd(&group, &output, &one, &point, &tweak, &group.G) == 0 &&
-      mbedtls_mpi_write_binary(&output.X, out, 32) == 0) ok = true;
-  mbedtls_mpi_free(&one); mbedtls_mpi_free(&tweak);
-  mbedtls_ecp_point_free(&output); mbedtls_ecp_point_free(&point); mbedtls_ecp_group_free(&group);
-  bitcoin_hd::wipe(evenPub, sizeof(evenPub)); bitcoin_hd::wipe(tag, sizeof(tag));
-  bitcoin_hd::wipe(message, sizeof(message)); bitcoin_hd::wipe(tweakBytes, sizeof(tweakBytes));
-  return ok;
-}
-
 inline bool derive(const uint16_t* words, size_t count, uint32_t purpose,
                    uint8_t change, uint32_t index, String& address,
                    const char* passphrase = "") {
   if (change > 1 || index >= 0x80000000UL) return false;
   bitcoin_hd::Node account = {}, branch = {}, child = {};
-  uint8_t pub[33] = {}, keyHash[20] = {}, program[32] = {};
+  uint8_t pub[33] = {}, keyHash[20] = {};
   bool ok = bitcoin_hd::account_node(words, count, purpose, account, passphrase) &&
       bitcoin_hd::derive_normal(account, change, branch) &&
       bitcoin_hd::derive_normal(branch, index, child) && bitcoin_hd::public_key(child, pub);
@@ -108,12 +85,11 @@ inline bool derive(const uint16_t* words, size_t count, uint32_t purpose,
     hash160(redeem, sizeof(redeem), keyHash); address = base58_address(5, keyHash);
     bitcoin_hd::wipe(redeem, sizeof(redeem));
   } else if (ok && purpose == 84) { hash160(pub, 33, keyHash); address = segwit_address(0, keyHash, 20); }
-  else if (ok && purpose == 86) { ok = taproot_program(pub, program); if (ok) address = segwit_address(1, program, 32); }
   else ok = false;
   ok = ok && address.length(); bitcoin_hd::wipe(&account, sizeof(account));
   bitcoin_hd::wipe(&branch, sizeof(branch)); bitcoin_hd::wipe(&child, sizeof(child));
   bitcoin_hd::wipe(pub, sizeof(pub)); bitcoin_hd::wipe(keyHash, sizeof(keyHash));
-  bitcoin_hd::wipe(program, sizeof(program)); return ok;
+  return ok;
 }
 
 inline bool test_words(uint16_t words[12]) {
@@ -133,16 +109,8 @@ inline bool self_test_bip84() {
   nativeSegwit = ""; bitcoin_hd::wipe(words, sizeof(words)); return ok84;
 }
 
-inline bool self_test_bip86() {
-  uint16_t words[12]; if (!test_words(words)) return false;
-  String taproot;
-  const bool ok86 = derive(words, 12, 86, 0, 0, taproot) &&
-      taproot == "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
-  taproot = ""; bitcoin_hd::wipe(words, sizeof(words)); return ok86;
-}
-
 inline bool self_test() {
-  return self_test_bip84() && self_test_bip86();
+  return self_test_bip84();
 }
 
 }  // namespace bitcoin_address

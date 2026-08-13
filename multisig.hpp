@@ -284,6 +284,12 @@ inline SignResult signMultisig(const psbt::ParsedTx& tx,
         bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
         continue;
       }
+      if (!tx_sign::verify(pub, sighash, rs)) {
+        Serial.println("[MULTISIG] SELF VERIFY FAILED");
+        bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(pub, 33);
+        bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+        continue;
+      }
       psbt::PartialSig ps;
       memcpy(ps.pub, ms.keys[k], 33);
       ps.sigLen = tx_sign::derEncode(rs, rs + 32, ps.sig);

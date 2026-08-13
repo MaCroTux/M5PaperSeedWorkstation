@@ -134,6 +134,7 @@ It also accepts `incommit-transaction: <base64>` as a text command.
 | `device_settings.hpp` | SD-persisted settings (`/m5settings.cfg`): language, lock, derivation. |
 | `AUDITORIA.md` | Security & UX audit (Spanish). |
 | `TECHNICAL.md` | Detailed technical documentation. |
+| `DEBUG_FIRMA.md` | Post-mortem of the P2WPKH signing bug (Spanish). |
 
 ---
 

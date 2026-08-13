@@ -107,6 +107,163 @@ inline bool sign(const uint8_t priv[32], const uint8_t sighash[32], uint8_t sig[
   return ok;
 }
 
+// Log de depuracion (sin secretos): imprime un buffer en hex con etiqueta.
+inline void logHex(const char* label, const uint8_t* data, size_t len) {
+  static const char hexc[] = "0123456789abcdef";
+  Serial.printf("[SIGN] %s=", label);
+  for (size_t i = 0; i < len; ++i) Serial.printf("%c%c", hexc[data[i] >> 4], hexc[data[i] & 0xF]);
+  Serial.println();
+}
+
+// Declaraciones adelantadas (definidas mas abajo) usadas por testECDSARoundtrip.
+inline size_t derEncode(const uint8_t r[32], const uint8_t s[32], uint8_t out[73]);
+inline bool derDecode(const uint8_t* der, size_t derLen, uint8_t rs[64]);
+
+// Descomprime una pubkey secp256k1 comprimida (33 bytes: 02/03 + X) a SEC1 sin
+// comprimir (65 bytes: 04 + X + Y). Necesario porque el mbedtls de esta build
+// devuelve MBEDTLS_ERR_ECP_FEATURE_UNAVAILABLE al leer el formato comprimido.
+// secp256k1: p = 2^256 - 2^32 - 977 ≡ 3 (mod 4), luego sqrt(a) = a^((p+1)/4).
+inline bool decompressPubkey(const uint8_t pub[33], uint8_t out[65]) {
+  const uint8_t prefix = pub[0];
+  if (prefix != 0x02 && prefix != 0x03) return false;
+
+  mbedtls_ecp_group group;
+  mbedtls_ecp_group_init(&group);
+  if (mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256K1) != 0) {
+    mbedtls_ecp_group_free(&group); return false;
+  }
+
+  mbedtls_mpi x, alpha, temp, exp, y, y2, rem;
+  mbedtls_mpi_init(&x); mbedtls_mpi_init(&alpha); mbedtls_mpi_init(&temp);
+  mbedtls_mpi_init(&exp); mbedtls_mpi_init(&y); mbedtls_mpi_init(&y2);
+  mbedtls_mpi_init(&rem);
+  bool ok = false;
+  int parity = 0;
+
+  if (mbedtls_mpi_read_binary(&x, pub + 1, 32) != 0) goto cleanup;
+  // alpha = x^3 + B mod P
+  if (mbedtls_mpi_mul_mpi(&temp, &x, &x) != 0) goto cleanup;          // x^2
+  if (mbedtls_mpi_mod_mpi(&temp, &temp, &group.P) != 0) goto cleanup;
+  if (mbedtls_mpi_mul_mpi(&alpha, &temp, &x) != 0) goto cleanup;      // x^3
+  if (mbedtls_mpi_mod_mpi(&alpha, &alpha, &group.P) != 0) goto cleanup;
+  if (mbedtls_mpi_add_mpi(&alpha, &alpha, &group.B) != 0) goto cleanup;
+  if (mbedtls_mpi_mod_mpi(&alpha, &alpha, &group.P) != 0) goto cleanup;
+  // exp = (P + 1) / 4
+  if (mbedtls_mpi_add_int(&temp, &group.P, 1) != 0) goto cleanup;
+  if (mbedtls_mpi_div_int(&exp, &rem, &temp, 4) != 0) goto cleanup;
+  // y = alpha^exp mod P
+  if (mbedtls_mpi_exp_mod(&y, &alpha, &exp, &group.P, nullptr) != 0) goto cleanup;
+  // verificar y^2 == alpha
+  if (mbedtls_mpi_mul_mpi(&y2, &y, &y) != 0) goto cleanup;
+  if (mbedtls_mpi_mod_mpi(&y2, &y2, &group.P) != 0) goto cleanup;
+  if (mbedtls_mpi_cmp_mpi(&y2, &alpha) != 0) goto cleanup;  // x no esta en la curva
+  // ajustar paridad segun el prefijo (02 = par, 03 = impar)
+  parity = mbedtls_mpi_get_bit(&y, 0);
+  if ((prefix == 0x02 && parity == 1) || (prefix == 0x03 && parity == 0)) {
+    if (mbedtls_mpi_sub_mpi(&y, &group.P, &y) != 0) goto cleanup;
+  }
+  out[0] = 0x04;
+  if (mbedtls_mpi_write_binary(&x, out + 1, 32) != 0) goto cleanup;
+  if (mbedtls_mpi_write_binary(&y, out + 33, 32) != 0) goto cleanup;
+  ok = true;
+
+cleanup:
+  mbedtls_mpi_free(&rem); mbedtls_mpi_free(&y2); mbedtls_mpi_free(&y);
+  mbedtls_mpi_free(&exp); mbedtls_mpi_free(&temp); mbedtls_mpi_free(&alpha);
+  mbedtls_mpi_free(&x); mbedtls_ecp_group_free(&group);
+  if (!ok) { volatile uint8_t* p = out; for (size_t i = 0; i < 65; ++i) p[i] = 0; }
+  return ok;
+}
+
+// Verificacion ECDSA secp256k1 (autoverificacion local tras firmar).
+// Implementacion manual con aritmetica de mbedTLS:
+//   w = s^-1 mod n ; u1 = e*w mod n ; u2 = r*w mod n ; R = u1*G + u2*Q
+//   valida  <=>  R.x mod n == r
+inline bool verify(const uint8_t pub[33], const uint8_t sighash[32],
+                   const uint8_t rs[64]) {
+  mbedtls_ecp_group group; mbedtls_ecp_point Q, R;
+  mbedtls_mpi r, s, e, w, u1, u2, rx;
+  mbedtls_ecp_group_init(&group); mbedtls_ecp_point_init(&Q); mbedtls_ecp_point_init(&R);
+  mbedtls_mpi_init(&r); mbedtls_mpi_init(&s); mbedtls_mpi_init(&e); mbedtls_mpi_init(&w);
+  mbedtls_mpi_init(&u1); mbedtls_mpi_init(&u2); mbedtls_mpi_init(&rx);
+  bool ok = false;
+  const int rcLoad = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256K1);
+  // La pubkey comprimida (33 bytes) no la acepta este mbedtls: descomprimir antes.
+  logHex("pubkey compressed", pub, 33);
+  uint8_t pub65[65] = {};
+  const bool decompressed = decompressPubkey(pub, pub65);
+  logHex("pubkey decompressed", pub65, 65);
+  const int rcQ = decompressed ? mbedtls_ecp_point_read_binary(&group, &Q, pub65, 65) : -1;
+  const int rcR = mbedtls_mpi_read_binary(&r, rs, 32);
+  const int rcS = mbedtls_mpi_read_binary(&s, rs + 32, 32);
+  const int rcE = mbedtls_mpi_read_binary(&e, sighash, 32);
+  const bool rRange = mbedtls_mpi_cmp_int(&r, 1) >= 0 && mbedtls_mpi_cmp_mpi(&r, &group.N) < 0;
+  const bool sRange = mbedtls_mpi_cmp_int(&s, 1) >= 0 && mbedtls_mpi_cmp_mpi(&s, &group.N) < 0;
+  const int rcInv = mbedtls_mpi_inv_mod(&w, &s, &group.N);
+  Serial.printf("[ECDSA] rc: load=%d readQ=%d readR=%d readS=%d readE=%d rRange=%d sRange=%d inv=%d\n",
+                rcLoad, rcQ, rcR, rcS, rcE, rRange ? 1 : 0, sRange ? 1 : 0, rcInv);
+  if (rcLoad == 0 && rcQ == 0 && rcR == 0 && rcS == 0 && rcE == 0 &&
+      rRange && sRange && rcInv == 0) {
+    mbedtls_mpi_mul_mpi(&u1, &e, &w); mbedtls_mpi_mod_mpi(&u1, &u1, &group.N);
+    mbedtls_mpi_mul_mpi(&u2, &r, &w); mbedtls_mpi_mod_mpi(&u2, &u2, &group.N);
+    const int rcMuladd = mbedtls_ecp_muladd(&group, &R, &u1, &group.G, &u2, &Q);
+    Serial.printf("[ECDSA] muladd rc=%d\n", rcMuladd);
+    if (rcMuladd == 0) {
+      mbedtls_mpi_mod_mpi(&rx, &R.X, &group.N);
+      const int cmp = mbedtls_mpi_cmp_mpi(&rx, &r);
+      Serial.printf("[ECDSA] cmp(rx,r)=%d\n", cmp);
+      ok = cmp == 0;
+    }
+  }
+  mbedtls_mpi_free(&rx); mbedtls_mpi_free(&u2); mbedtls_mpi_free(&u1);
+  mbedtls_mpi_free(&w); mbedtls_mpi_free(&e); mbedtls_mpi_free(&s); mbedtls_mpi_free(&r);
+  mbedtls_ecp_point_free(&R); mbedtls_ecp_point_free(&Q); mbedtls_ecp_group_free(&group);
+  return ok;
+}
+
+// Test aislado sign -> verify (sin PSBT ni Bitcoin). Si esto falla, el problema
+// esta en la capa ECDSA (formato de firma/pubkey), no en el pipeline Bitcoin.
+inline bool testECDSARoundtrip() {
+  static const uint8_t priv[32] = {
+      0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+      0xDD, 0xEE, 0xFF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+      0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+  static const uint8_t msg[32] = {
+      0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+      0xCC, 0xDD, 0xEE, 0xFF, 0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+      0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F};
+  uint8_t pub[33] = {};
+  mbedtls_ecp_group group; mbedtls_ecp_point P; mbedtls_mpi d;
+  mbedtls_ecp_group_init(&group); mbedtls_ecp_point_init(&P); mbedtls_mpi_init(&d);
+  size_t olen = 0;
+  bool ok = false;
+  if (mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256K1) == 0 &&
+      mbedtls_mpi_read_binary(&d, priv, 32) == 0 &&
+      mbedtls_ecp_mul(&group, &P, &d, &group.G, nullptr, nullptr) == 0 &&
+      mbedtls_ecp_point_write_binary(&group, &P, MBEDTLS_ECP_PF_COMPRESSED,
+                                     &olen, pub, 33) == 0 && olen == 33) {
+    uint8_t rs[64] = {};
+    if (sign(priv, msg, rs)) {
+      ok = verify(pub, msg, rs);
+      Serial.printf("[ECDSA] native verify=%s\n", ok ? "OK" : "FAILED");
+      // DER encode -> parse -> verify de nuevo (valida el encoder DER).
+      uint8_t der[73] = {};
+      const size_t derLen = derEncode(rs, rs + 32, der);
+      Serial.printf("[ECDSA] DER length=%u\n", static_cast<unsigned>(derLen));
+      logHex("DER", der, derLen);
+      uint8_t rs2[64] = {};
+      const bool derOk = derDecode(der, derLen, rs2) && verify(pub, msg, rs2);
+      Serial.printf("[ECDSA] DER roundtrip verify=%s\n", derOk ? "OK" : "FAILED");
+      ok = ok && derOk;
+      bitcoin_hd::wipe(rs2, 64); bitcoin_hd::wipe(der, 73);
+    }
+    bitcoin_hd::wipe(rs, 64);
+  }
+  mbedtls_mpi_free(&d); mbedtls_ecp_point_free(&P); mbedtls_ecp_group_free(&group);
+  bitcoin_hd::wipe(pub, 33);
+  return ok;
+}
+
 // Deriva la clave privada a partir de la semilla usando la ruta BIP32 completa.
 // El fingerprint del PSBT es el de la clave MAESTRA (m), y la ruta es la completa
 // (p.ej. m/84'/0'/0'/1/0), como hace BlueWallet.
@@ -197,7 +354,12 @@ inline bool sighashSegwit(const psbt::ParsedTx& tx, size_t inputIndex,
   for (int b = 0; b < 4; ++b) buf.push_back((tx.locktime >> (8 * b)) & 0xff);
   buf.push_back(0x01); buf.push_back(0x00); buf.push_back(0x00); buf.push_back(0x00);
 
+  logHex("hashPrevouts", hashPrevouts, 32);
+  logHex("hashSequence", hashSequence, 32);
+  logHex("hashOutputs", hashOutputs, 32);
+  logHex("preimage", buf.data(), buf.size());
   sha256d(buf.data(), buf.size(), out);
+  logHex("sighash", out, 32);
   bitcoin_hd::wipe(hashPrevouts, 32); bitcoin_hd::wipe(hashSequence, 32);
   bitcoin_hd::wipe(hashOutputs, 32); bitcoin_hd::wipe(h, 32);
   return true;
@@ -282,6 +444,35 @@ inline size_t derEncode(const uint8_t r[32], const uint8_t s[32], uint8_t out[73
   out[idx++] = 0x02; out[idx++] = static_cast<uint8_t>(rl); memcpy(out + idx, rb, rl); idx += rl;
   out[idx++] = 0x02; out[idx++] = static_cast<uint8_t>(sl); memcpy(out + idx, sb, sl); idx += sl;
   return idx;
+}
+
+// Parsea una firma DER (sin byte de sighash) de vuelta a r||s compacto (64 bytes).
+inline bool derDecode(const uint8_t* der, size_t derLen, uint8_t rs[64]) {
+  size_t p = 0;
+  if (derLen < 9 || der[p++] != 0x30) return false;
+  size_t seqLen;
+  if (der[p] == 0x81) { seqLen = der[p + 1]; p += 2; }
+  else if (der[p] < 0x80) { seqLen = der[p]; p += 1; }
+  else return false;
+  if (p + seqLen != derLen) return false;
+  if (der[p++] != 0x02) return false;
+  size_t rlen = der[p++];
+  if (rlen == 0 || rlen > 33 || p + rlen > derLen) return false;
+  size_t rstart = (der[p] == 0x00 && rlen > 1) ? 1 : 0;
+  size_t rbytes = rlen - rstart;
+  if (rbytes > 32) return false;
+  memset(rs, 0, 32);
+  memcpy(rs + 32 - rbytes, der + p + rstart, rbytes);
+  p += rlen;
+  if (der[p++] != 0x02) return false;
+  size_t slen = der[p++];
+  if (slen == 0 || slen > 33 || p + slen > derLen) return false;
+  size_t sstart = (der[p] == 0x00 && slen > 1) ? 1 : 0;
+  size_t sbytes = slen - sstart;
+  if (sbytes > 32) return false;
+  memset(rs + 32, 0, 32);
+  memcpy(rs + 32 + 32 - sbytes, der + p + sstart, sbytes);
+  return true;
 }
 
 inline void pushVarint(std::vector<uint8_t>& o, uint64_t v) {
@@ -426,9 +617,24 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
   std::vector<InputSig> sigs(tx.inputs.size());
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
     const auto& in = tx.inputs[i];
-    if (in.utxoScriptLen != 22 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x14)
+    // Identificacion inequivoca del tipo de input (desde el UTXO, no desde los
+    // outputs de la nueva transaccion).
+    if (in.utxoScriptLen != 22 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x14) {
+      Serial.printf("[SIGN] input=%u type=UNKNOWN\n", static_cast<unsigned>(i));
       return false;
+    }
     if (!in.amountKnown) return false;
+    Serial.printf("[SIGN] input=%u\n[SIGN] type=P2WPKH\n", static_cast<unsigned>(i));
+    logHex("prev_txid", in.prevTxid, 32);
+    Serial.printf("[SIGN] prev_vout=%u\n", static_cast<unsigned>(in.prevVout));
+    Serial.printf("[SIGN] amount_sat=%llu\n",
+                  static_cast<unsigned long long>(in.amount));
+    logHex("scriptPubKey", in.utxoScript, in.utxoScriptLen);
+    Serial.printf("[SIGN] sequence=%u\n", static_cast<unsigned>(in.sequence));
+    Serial.printf("[SIGN] version=%u\n", static_cast<unsigned>(tx.version));
+    Serial.printf("[SIGN] locktime=%u\n", static_cast<unsigned>(tx.locktime));
+    Serial.printf("[SIGN] sighash_type=01\n");
+
     uint8_t key[32] = {}, pub[33] = {};
     bool haveKey = false;
     if (in.hasDerivation) {
@@ -438,24 +644,69 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
       haveKey = findKeyByAddress(words, count, 84, in.utxoScript + 2, passphrase, key, pub);
     }
     if (!haveKey) { bitcoin_hd::wipe(key, 32); return false; }
-    uint8_t scriptCode[26] = {};
-    scriptCode[0] = 0x19; scriptCode[1] = 0x76; scriptCode[2] = 0xa9; scriptCode[3] = 0x14;
-    memcpy(scriptCode + 4, in.utxoScript + 2, 20);
-    scriptCode[24] = 0x88; scriptCode[25] = 0xac;
+
+    // Verificar que HASH160(pubkey derivada) == witness program del UTXO.
+    logHex("derived_pubkey", pub, 33);
+    uint8_t pubHash[20] = {};
+    bitcoin_address::hash160(pub, 33, pubHash);
+    logHex("pubkey_hash", pubHash, 20);
+    logHex("witness_hash", in.utxoScript + 2, 20);
+    if (memcmp(pubHash, in.utxoScript + 2, 20) != 0) {
+      Serial.println("[SIGN] PUBKEY HASH MISMATCH");
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(pubHash, 20);
+      return false;
+    }
+    bitcoin_hd::wipe(pubHash, 20);
+
+    // scriptCode P2WPKH: 76a914{20-byte-pubkey-hash}88ac (25 bytes). NO usar el
+    // witness program 0014... directamente como scriptCode.
+    uint8_t scriptCode[25] = {};
+    scriptCode[0] = 0x76; scriptCode[1] = 0xa9; scriptCode[2] = 0x14;
+    memcpy(scriptCode + 3, in.utxoScript + 2, 20);
+    scriptCode[23] = 0x88; scriptCode[24] = 0xac;
+    logHex("scriptCode", scriptCode, 25);
+
     uint8_t sighash[32] = {};
-    if (!sighashSegwit(tx, i, scriptCode, 26, in.amount, sighash)) {
-      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(scriptCode, 26); return false;
+    if (!sighashSegwit(tx, i, scriptCode, 25, in.amount, sighash)) {
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(scriptCode, 25); return false;
     }
     uint8_t rs[64] = {};
     if (!sign(key, sighash, rs)) {
       bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
       return false;
     }
+    // La firma nativa de sign() es r||s compacto (64 bytes), sin sighash byte.
+    Serial.println("[ECDSA] raw_format=COMPACT64");
+    Serial.println("[ECDSA] raw_signature_len=64");
+    logHex("raw_signature", rs, 64);
+
+    // Autoverificacion obligatoria antes de generar la TX final (formato nativo).
+    const bool nativeVerify = verify(pub, sighash, rs);
+    Serial.printf("[ECDSA] native verify=%s\n", nativeVerify ? "OK" : "FAILED");
+
+    // DER encode -> parse -> verify de nuevo (valida el encoder DER).
     sigs[i].derLen = derEncode(rs, rs + 32, sigs[i].der);
-    sigs[i].der[sigs[i].derLen++] = kSighashAll;
+    Serial.printf("[ECDSA] DER length=%u\n", static_cast<unsigned>(sigs[i].derLen));
+    logHex("DER", sigs[i].der, sigs[i].derLen);
+    uint8_t rs2[64] = {};
+    const bool derVerify = derDecode(sigs[i].der, sigs[i].derLen, rs2) &&
+                           verify(pub, sighash, rs2);
+    Serial.printf("[ECDSA] DER roundtrip verify=%s\n", derVerify ? "OK" : "FAILED");
+    bitcoin_hd::wipe(rs2, 64);
+
+    if (!nativeVerify || !derVerify) {
+      Serial.println("[SIGN] SELF VERIFY FAILED");
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+      bitcoin_hd::wipe(scriptCode, 25);
+      return false;
+    }
+    Serial.println("[SIGN] SELF VERIFY OK");
+    logHex("pubkey", pub, 33);
+    sigs[i].der[sigs[i].derLen++] = kSighashAll;  // añadir 0x01 (SIGHASH_ALL)
+    logHex("DER_signature", sigs[i].der, sigs[i].derLen);
     memcpy(sigs[i].pub, pub, 33);
     bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
-    bitcoin_hd::wipe(scriptCode, 26);
+    bitcoin_hd::wipe(scriptCode, 25);
   }
   serializeSignedTx(tx, sigs, signedTx);
   if (finalizedPsbt) buildFinalizedPsbt(tx, sigs, *finalizedPsbt);
@@ -485,8 +736,10 @@ inline bool self_test() {
   uint8_t sig[64] = {};
   const bool ok = sign(key, hash, sig);
   const bool match = memcmp(sig, expectR, 32) == 0 && memcmp(sig + 32, expectS, 32) == 0;
+  Serial.printf("[ECDSA] RFC6979 sign=%s vector_match=%s\n",
+                ok ? "OK" : "FAIL", match ? "OK" : "FAIL");
   bitcoin_hd::wipe(sig, 64);
-  return ok && match;
+  return ok && match && testECDSARoundtrip();
 }
 
 }  // namespace tx_sign

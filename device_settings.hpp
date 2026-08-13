@@ -8,7 +8,7 @@
 //   [0..3]   magia "M5CF"
 //   [4]      version = 2
 //   [5]      idioma (0 = ingles, 1 = espanol)
-//   [6]      derivacion por defecto (0..3 = BIP44/49/84/86)
+//   [6]      derivacion por defecto (0..2 = BIP44/49/84)
 //   [7..10]  tiempo de bloqueo en ms (uint32 LE; 0 = nunca)
 //   [11..14] tiempo de limpieza de seed en ms (uint32 LE; 0 = nunca)
 
@@ -53,7 +53,7 @@ inline Settings defaults() {
 }
 
 inline bool valid(const Settings& s) {
-  if (s.language > 1 || s.defaultProfile > 3) return false;
+  if (s.language > 1 || s.defaultProfile > 2) return false;
   bool lockOk = false;
   if (s.lockTimeoutMs == kTimeoutNone) lockOk = true;
   else for (uint8_t i = 0; i < kTimeoutOptionCount; ++i)

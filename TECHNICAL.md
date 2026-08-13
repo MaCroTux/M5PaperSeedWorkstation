@@ -75,6 +75,8 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `qr_ble_client.hpp/.cpp` | Cliente BLE NimBLE (oculto, no eliminado). |
 | `lang.hpp` | i18n EN/ES (`lang::tr`), tabla castellano→inglés. |
 | `device_settings.hpp` | Ajustes en SD (`/m5settings.cfg`). |
+| `multisig.hpp` | Multisig P2WSH sortedmulti (detección, firma, finalización). |
+| `DEBUG_FIRMA.md` | Post-mortem del bug de firma P2WPKH (scriptCode + pubkey comprimida). |
 
 ---
 

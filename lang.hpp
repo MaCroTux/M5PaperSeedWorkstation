@@ -332,6 +332,7 @@ inline const char* tr(const char* es) {
     {"Manten el movil quieto", "Hold the phone still"},
     {"Iniciando transferencia...", "Starting transfer..."},
     {"Desbloqueando...", "Unlocking..."},
+    {"Demasiados intentos. Espera...", "Too many attempts. Wait..."},
 
     // Radio / ajustes
     {"AJUSTES", "Settings"},

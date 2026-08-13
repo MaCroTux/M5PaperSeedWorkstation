@@ -136,6 +136,7 @@ También acepta `incommit-transaction: <base64>` como comando de texto.
 | `device_settings.hpp` | Ajustes persistentes en SD (`/m5settings.cfg`): idioma, bloqueo, derivación. |
 | `AUDITORIA.md` | Auditoría de seguridad y UX. |
 | `TECHNICAL.md` | Documentación técnica detallada. |
+| `DEBUG_FIRMA.md` | Post-mortem del bug de firma P2WPKH. |
 
 ---
 
