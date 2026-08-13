@@ -33,7 +33,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
-                     signed_tx, locked, tx_review };
+                     signed_tx, locked, tx_review, utxo_detail };
 
 struct Rect {
   int x, y, w, h;
@@ -52,6 +52,8 @@ constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
 constexpr Rect kBack{20, 835, 145, 85};
 constexpr Rect kAction{190, 835, 330, 85};
+constexpr Rect kDetail{175, 835, 170, 85};
+constexpr Rect kFirmar{355, 835, 165, 85};
 constexpr Rect kDelete{20, 510, 145, 70};
 constexpr Rect kAdd{185, 510, 335, 70};
 constexpr Rect kSuggestion[] = {{20, 610, 240, 72}, {280, 610, 240, 72},
@@ -2573,6 +2575,7 @@ qr_wifi::QRWiFiServer wifiServer;
 bool wifiResultShown = false;
 psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
+Screen utxoReturnScreen = Screen::menu;
 std::vector<uint8_t> signedTxBytes;
 String signedTxHex;
 String signedPsbtBase64;
@@ -2682,9 +2685,36 @@ void drawTxInfo() {
     page.printf("... y %u salidas mas",
                 static_cast<unsigned>(parsedTx.outputs.size() - maxShow));
   }
-  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+  buttonOn(page, kDetail, "DETALLE", true, focusIndex == 1, Icon::list);
   if (fingerprintValid)
-    buttonOn(page, kBack, "FIRMAR", true, focusIndex == 1, Icon::key);
+    buttonOn(page, kFirmar, "FIRMAR", true, focusIndex == 2, Icon::key);
+}
+
+void drawUtxoDetail() {
+  blankPage();
+  title("UTXOS (ENTRADAS)", "De donde salen los fondos");
+  textStyle(page, 2);
+  int y = 160;
+  const size_t maxShow = 5;
+  for (size_t i = 0; i < parsedTx.inputs.size() && i < maxShow; ++i) {
+    const auto& in = parsedTx.inputs[i];
+    if (y > 780) break;
+    page.setCursor(20, y);
+    page.printf("#%u  %s BTC", static_cast<unsigned>(i + 1),
+                psbt::formatSats(in.amount).c_str());
+    y += 34;
+    const String addr = in.address.length() ? in.address : "direccion no disponible";
+    const uint8_t lines = drawGroupedAddress(page, addr, 270, y, 2, 30);
+    y += lines * 30 + 12;
+  }
+  if (parsedTx.inputs.size() > maxShow) {
+    page.setCursor(20, y);
+    page.printf("... y %u entradas mas",
+                static_cast<unsigned>(parsedTx.inputs.size() - maxShow));
+  }
+  buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+  fullRefresh();
 }
 
 String hexEncode(const std::vector<uint8_t>& data) {
@@ -3055,6 +3085,7 @@ void drawScreen() {
     case Screen::signed_tx: drawSignedTx(); break;
     case Screen::locked: drawLocked(); break;
     case Screen::tx_review: drawTxReview(); break;
+    case Screen::utxo_detail: drawUtxoDetail(); break;
   }
 }
 
@@ -3281,19 +3312,28 @@ void updateFocusButton(uint8_t index) {
         if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
         else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
       } else if (p == qr_wifi::Phase::Received) {
-        if (index == 0) updateButton(kAction, "VOLVER", true, index == focusIndex);
-        else updateButton(kBack, "FIRMAR", true, index == focusIndex, Icon::key);
+        if (txIsPsbt) {
+          if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+          else if (index == 1) updateButton(kDetail, "DETALLE", true, index == focusIndex, Icon::list);
+          else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
+        } else {
+          updateButton(kAction, "VOLVER", true, index == focusIndex);
+        }
       } else {
         updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
       }
       break;
     }
-    case Screen::signed_tx:
+    case Screen::tx_review:
+      if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+      else if (index == 1) updateButton(kDetail, "DETALLE", true, index == focusIndex, Icon::list);
+      else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
+      break;
+    case Screen::utxo_detail:
       updateButton(kAction, "VOLVER", true, index == focusIndex);
       break;
-    case Screen::tx_review:
-      if (index == 0) updateButton(kAction, "VOLVER", true, index == focusIndex);
-      else updateButton(kBack, "FIRMAR", true, index == focusIndex, Icon::key);
+    case Screen::signed_tx:
+      updateButton(kAction, "VOLVER", true, index == focusIndex);
       break;
   }
 }
@@ -3311,12 +3351,13 @@ void moveFocus(int direction) {
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive) {
     if (wifiServer.phase() == qr_wifi::Phase::Failed) count = 2;
-    else if (wifiServer.phase() == qr_wifi::Phase::Received && txIsPsbt && fingerprintValid)
-      count = 2;
+    else if (wifiServer.phase() == qr_wifi::Phase::Received && txIsPsbt)
+      count = fingerprintValid ? 3 : 2;
     else count = 1;
   }
   else if (screen == Screen::signed_tx) count = 1;
-  else if (screen == Screen::tx_review) count = fingerprintValid ? 2 : 1;
+  else if (screen == Screen::tx_review) count = fingerprintValid ? 3 : 2;
+  else if (screen == Screen::utxo_detail) count = 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 3;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
@@ -3815,8 +3856,13 @@ void click(int x, int y) {
   } else if (screen == Screen::wifi_receive) {
     const auto p = wifiServer.phase();
     if (p == qr_wifi::Phase::Received) {
-      if (kBack.contains(x, y) && txIsPsbt && fingerprintValid) { beginSignTx(); }
-      else if (kAction.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
+      if (txIsPsbt) {
+        if (kFirmar.contains(x, y) && fingerprintValid) { beginSignTx(); }
+        else if (kDetail.contains(x, y)) { utxoReturnScreen = screen; screen = Screen::utxo_detail; focusIndex = 0; drawScreen(); }
+        else if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
+      } else if (kAction.contains(x, y)) {
+        wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen();
+      }
     } else if (p == qr_wifi::Phase::Failed) {
       if (kBack.contains(x, y)) { wifiServer.clear(); screen = Screen::menu; focusIndex = 4; drawScreen(); }
       else if (kAction.contains(x, y)) { beginWifiReceive(); }
@@ -3826,8 +3872,11 @@ void click(int x, int y) {
   } else if (screen == Screen::signed_tx) {
     if (kAction.contains(x, y)) { screen = Screen::wifi_receive; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::tx_review) {
-    if (kBack.contains(x, y) && fingerprintValid) { beginSignTx(); }
-    else if (kAction.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
+    if (kFirmar.contains(x, y) && fingerprintValid) { beginSignTx(); }
+    else if (kDetail.contains(x, y)) { utxoReturnScreen = screen; screen = Screen::utxo_detail; focusIndex = 0; drawScreen(); }
+    else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
+  } else if (screen == Screen::utxo_detail) {
+    if (kAction.contains(x, y)) { screen = utxoReturnScreen; focusIndex = 1; drawScreen(); }
   } else if (screen == Screen::diagnostics && kBack.contains(x, y)) {
     screen = Screen::menu; focusIndex = 0; drawScreen();
   } else if (screen == Screen::help && kBack.contains(x, y)) {
@@ -3942,14 +3991,19 @@ void activateFocus() {
     const auto p = wifiServer.phase();
     const Rect* r = &kAction;
     if (p == qr_wifi::Phase::Failed && focusIndex == 0) r = &kBack;
-    else if (p == qr_wifi::Phase::Received && txIsPsbt && fingerprintValid && focusIndex == 1)
-      r = &kBack;
+    else if (p == qr_wifi::Phase::Received && txIsPsbt) {
+      if (focusIndex == 0) r = &kBack;
+      else if (focusIndex == 1) r = &kDetail;
+      else r = &kFirmar;
+    }
     click(r->x + 5, r->y + 5);
   } else if (screen == Screen::signed_tx) {
     click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::tx_review) {
-    const Rect* r = (fingerprintValid && focusIndex == 1) ? &kBack : &kAction;
+    const Rect* r = focusIndex == 0 ? &kBack : (focusIndex == 1 ? &kDetail : &kFirmar);
     click(r->x + 5, r->y + 5);
+  } else if (screen == Screen::utxo_detail) {
+    click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
