@@ -35,8 +35,9 @@ Documentación en inglés: [`README.md`](README.md).
   - **BlueWallet**: QR animado **BBQr** (PSBT en Base64 para payload pequeño,
     multipart `B$HPxxxx` para payload grande).
 - **Ajustes** guardados en la SD: idioma (inglés por defecto / español),
-  tiempo de bloqueo automático (1/3/5/10 min o nunca), derivación por defecto
-  (BIP44/49/84/86) y estado de la radio (BT/WiFi/energía).
+  tiempo de bloqueo automático (1/3/5/10 min o nunca), tiempo de limpieza de seed
+  (nunca/10/30/60 min), derivación por defecto (BIP44/49/84/86) y estado de la
+  radio (BT/WiFi/energía).
 - **Bloqueo** manual o por inactividad con **portada estática** (sin animaciones,
   para no consumir batería en e-ink) que sirve también como pantalla de apagado.
 

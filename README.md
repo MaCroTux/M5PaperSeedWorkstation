@@ -34,8 +34,8 @@ Documentación en español: [`README_ES.md`](README_ES.md).
   - **BlueWallet**: animated **BBQr** QR (Base64 PSBT for small payloads,
     multipart `B$HPxxxx` for large payloads).
 - **Settings** stored on SD: language (English by default / Spanish), auto-lock
-  timeout (1/3/5/10 min or never), default derivation (BIP44/49/84/86) and radio
-  status (BT/WiFi/power).
+  timeout (1/3/5/10 min or never), seed-wipe timeout (never/10/30/60 min),
+  default derivation (BIP44/49/84/86) and radio status (BT/WiFi/power).
 - **Lock** (manual or on inactivity) with a **static cover screen** (no animations,
   to save e-ink battery) that doubles as an off/screensaver screen.
 

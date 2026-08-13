@@ -38,7 +38,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
                      wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
                      animated_qr, settings, settings_lang, settings_timeout,
-                     settings_derivation, settings_radio };
+                     settings_clean, settings_derivation, settings_radio };
 
 struct Rect {
   int x, y, w, h;
@@ -78,10 +78,11 @@ constexpr Rect kDiceLength24{275, 195, 235, 52};
 constexpr Rect kDiceValue[] = {{30, 330, 150, 80}, {195, 330, 150, 80}, {360, 330, 150, 80},
                                {30, 420, 150, 80}, {195, 420, 150, 80}, {360, 420, 150, 80}};
 constexpr Rect kDiceReset{30, 540, 480, 60};
-constexpr Rect kActiveMenu[] = {{40, 160, 460, 75}, {40, 250, 460, 75},
-                                {40, 340, 460, 75}, {40, 430, 460, 75},
-                                {40, 520, 460, 75}, {40, 610, 460, 75},
-                                {40, 700, 460, 75}};
+constexpr Rect kActiveMenu[] = {{40, 150, 460, 66}, {40, 222, 460, 66},
+                                {40, 294, 460, 66}, {40, 366, 460, 66},
+                                {40, 438, 460, 66}, {40, 510, 460, 66},
+                                {40, 582, 460, 66}, {40, 654, 460, 66},
+                                {40, 726, 460, 66}};
 constexpr const char* kActiveLabels[] = {"VER CLAVE PUBLICA", "BACKUP SEED",
                                          "PASSPHRASE", "EXPLORAR DIRECCIONES",
                                          "DESCARTAR SEED"};
@@ -204,7 +205,6 @@ char sessionSeedFiles[6][64] = {};
 uint8_t sessionSeedCount = 0;
 uint8_t selectedSessionFile = 0;
 uint32_t lastUserActivity = 0;
-constexpr uint32_t kSessionTimeoutMs = 180000;
 constexpr uint32_t kSessionTimeoutWarnMs = 15000;
 uint32_t lastWarnSecond = 0;
 Screen sessionLockReturn = Screen::menu;
@@ -349,30 +349,12 @@ void centeredFit(M5EPD_Canvas& canvas, const char* text, int y,
   canvas.setTextDatum(TL_DATUM);
 }
 
-void fingerprintIcon(M5EPD_Canvas& canvas, int cx, int cy, uint8_t c, uint8_t bg) {
-  // Huella estilizada: arcos concentricos + "delta" inferior.
-  canvas.drawEllipse(cx, cy, 22, 29, c);
-  canvas.drawEllipse(cx, cy, 17, 24, c);
-  canvas.drawEllipse(cx, cy, 12, 19, c);
-  canvas.drawEllipse(cx, cy, 7, 14, c);
-  canvas.drawEllipse(cx, cy, 3, 9, c);
-  canvas.drawLine(cx, cy + 2, cx, cy + 25, bg);
-  canvas.drawLine(cx - 1, cy + 9, cx - 7, cy + 25, c);
-  canvas.drawLine(cx + 1, cy + 9, cx + 7, cy + 25, c);
-}
-
 void fingerprintBadge() {
-  const Rect& badge = kFingerprintBadge;
-  page.fillRoundRect(badge.x, badge.y, badge.w, badge.h, 12, kBlack);
-  fingerprintIcon(page, badge.x + 32, badge.y + 36, kWhite, kBlack);
-  textStyle(page, 1, kWhite, kBlack);
-  page.setCursor(badge.x + 60, badge.y + 12);
-  page.println("FINGERPRINT");
-  textStyle(page, 2, kWhite, kBlack);
-  page.setTextDatum(MR_DATUM);
   const char* value = !fingerprintSelfTest ? "ERROR" :
                       fingerprintValid ? activeFingerprint + 5 : "--------";
-  page.drawString(value, badge.x + badge.w - 10, badge.y + 47);
+  textStyle(page, 3);
+  page.setTextDatum(MR_DATUM);
+  page.drawString(value, kWidth - 20, 46);
   page.setTextDatum(TL_DATUM);
 }
 
@@ -672,10 +654,13 @@ const char* activeHint(uint8_t index) {
     case 1: return "Copia y comprueba la semilla (palabras, QR o SEEDQR)";
     case 2: return "Anade una passphrase BIP39 (cambia todas las direcciones)";
     case 3: return "Deriva direcciones concretas para recibir o para cambio";
-    case 4: return sessionUnlocked ? "Cargar o guardar semillas en el vault de sesion"
-                                   : "Borra la semilla de la memoria RAM";
+    case 4: return sessionUnlocked ? "Gestiona las semillas del vault de sesion"
+                                    : "Borra la semilla de la memoria RAM";
     case 5: return "Recibe un PSBT o archivo por WiFi para firmar";
-    default: return "Cierra el vault y borra la clave maestra de RAM";
+    case 6: return sessionUnlocked ? "Cierra el vault y borra la clave maestra de RAM"
+                                   : "Ajustes del dispositivo";
+    case 7: return sessionUnlocked ? "Ajustes del dispositivo" : "Vuelve al menu general";
+    default: return "Vuelve al menu general";
   }
 }
 
@@ -1808,6 +1793,12 @@ void drawActiveSeed() {
     buttonOn(page, kActiveMenu[6], "CERRAR VAULT", true, focusIndex == 6,
              Icon::lock);
   }
+  const uint8_t settingsIdx = sessionUnlocked ? 7 : 6;
+  const uint8_t menuIdx = sessionUnlocked ? 8 : 7;
+  buttonOn(page, kActiveMenu[settingsIdx], "AJUSTES", true,
+           focusIndex == settingsIdx, Icon::wrench);
+  buttonOn(page, kActiveMenu[menuIdx], "VOLVER AL MENU", true,
+           focusIndex == menuIdx, Icon::home);
   textStyle(page, 2);
   page.setTextDatum(MC_DATUM);
   int footerY = 800;
@@ -1828,7 +1819,7 @@ void drawActiveSeed() {
   }
   textStyle(page, 1);
   page.setTextDatum(MC_DATUM);
-  page.drawString(lang::tr(activeHint(focusIndex)), 270, 895);
+  page.drawString(lang::tr(activeHint(focusIndex)), 270, 940);
   textStyle(page, 2);
   page.setTextDatum(TL_DATUM);
   fullRefresh();
@@ -1917,17 +1908,17 @@ void requestSecurity(Screen target, Screen returnTo) {
 
 void drawSessionLockWarning() {
   blankPage();
-  title("SESION A PUNTO DE BLOQUEARSE", "Por inactividad");
+  title("LIMPIEZA DE SEED", "Por inactividad");
   warningIcon(page, 270, 200);
-  const uint32_t remaining = kSessionTimeoutMs -
+  const uint32_t remaining = gSettings.seedCleanTimeoutMs -
       static_cast<uint32_t>(millis() - lastUserActivity);
   const uint32_t sec = remaining / 1000 + 1;
   textStyle(page, 3); page.setTextDatum(MC_DATUM);
-  page.drawString(String("Se bloqueara en ") + sec + " s", 270, 380);
-  textStyle(page, 2);
-  page.drawString("Toca la pantalla o pulsa", 270, 470);
-  page.drawString("la palanca para continuar.", 270, 515);
-  page.drawString("La semilla activa se conservara.", 270, 560);
+  page.drawString(String(lang::tr("Se limpiara en ")) + sec + " s", 270, 380);
+  textStyle(page, 2); page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr("Toca la pantalla o pulsa"), 270, 470);
+  page.drawString(lang::tr("la palanca para continuar."), 270, 515);
+  page.drawString(lang::tr("La semilla se borrara de RAM."), 270, 560);
   page.setTextDatum(TL_DATUM);
   fullRefresh(UPDATE_MODE_DU4);
 }
@@ -3285,6 +3276,13 @@ const char* profileLabel(uint8_t p) {
   }
 }
 
+const char* cleanLabel(uint32_t ms) {
+  if (ms == device_settings::kCleanNone) return lang::tr("Nunca");
+  if (ms == device_settings::kClean10m) return lang::tr("10 minutos");
+  if (ms == device_settings::kClean30m) return lang::tr("30 minutos");
+  return lang::tr("60 minutos");
+}
+
 void saveSettingsNow() {
   if (device_settings::save(gSettings)) showToast("Guardado en la SD");
   else showToast("No se pudo guardar la configuracion");
@@ -3305,14 +3303,20 @@ String settingsDerivLabel() {
       profileLabel(gSettings.defaultProfile);
 }
 
+String settingsCleanLabel() {
+  return String(lang::tr("Limpieza de seed")) + ": " +
+      cleanLabel(gSettings.seedCleanTimeoutMs);
+}
+
 void drawSettings() {
   blankPage();
   title("AJUSTES", "Configuracion del dispositivo");
   buttonOn(page, kMenu[0], settingsLangLabel().c_str(), true, focusIndex == 0, Icon::none);
   buttonOn(page, kMenu[1], settingsTimeoutLabel().c_str(), true, focusIndex == 1, Icon::lock);
-  buttonOn(page, kMenu[2], settingsDerivLabel().c_str(), true, focusIndex == 2, Icon::key);
-  buttonOn(page, kMenu[3], lang::tr("Estado de la radio"), true, focusIndex == 3, Icon::wifi);
-  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 4);
+  buttonOn(page, kMenu[2], settingsCleanLabel().c_str(), true, focusIndex == 2, Icon::trash);
+  buttonOn(page, kMenu[3], settingsDerivLabel().c_str(), true, focusIndex == 3, Icon::key);
+  buttonOn(page, kMenu[4], lang::tr("Estado de la radio"), true, focusIndex == 4, Icon::wifi);
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 5);
   fullRefresh();
 }
 
@@ -3337,6 +3341,19 @@ void drawSettingsTimeout() {
   }
   buttonOn(page, kBack, lang::tr("VOLVER"), true,
            focusIndex == device_settings::kTimeoutOptionCount);
+  fullRefresh();
+}
+
+void drawSettingsClean() {
+  blankPage();
+  title(lang::tr("Limpieza de seed"), lang::tr("Borra la semilla de RAM por inactividad"));
+  for (uint8_t i = 0; i < device_settings::kCleanOptionCount; ++i) {
+    const uint32_t ms = device_settings::kCleanOptions[i];
+    buttonOn(page, kMenu[i], cleanLabel(ms), true,
+             gSettings.seedCleanTimeoutMs == ms && focusIndex == i, Icon::trash);
+  }
+  buttonOn(page, kBack, lang::tr("VOLVER"), true,
+           focusIndex == device_settings::kCleanOptionCount);
   fullRefresh();
 }
 
@@ -3435,6 +3452,7 @@ void drawScreen() {
     case Screen::settings: drawSettings(); break;
     case Screen::settings_lang: drawSettingsLang(); break;
     case Screen::settings_timeout: drawSettingsTimeout(); break;
+    case Screen::settings_clean: drawSettingsClean(); break;
     case Screen::settings_derivation: drawSettingsDerivation(); break;
     case Screen::settings_radio: drawSettingsRadio(); break;
   }
@@ -3454,9 +3472,15 @@ void updateFocusButton(uint8_t index) {
       if (index == 5) {
         updateButton(kActiveMenu[index], "RECIBIR POR WIFI", true,
                      index == focusIndex, Icon::wifi);
-      } else if (index == 6) {
+      } else if (sessionUnlocked && index == 6) {
         updateButton(kActiveMenu[index], "CERRAR VAULT", true,
                      index == focusIndex, Icon::lock);
+      } else if (index == (sessionUnlocked ? 7 : 6)) {
+        updateButton(kActiveMenu[index], "AJUSTES", true,
+                     index == focusIndex, Icon::wrench);
+      } else if (index == (sessionUnlocked ? 8 : 7)) {
+        updateButton(kActiveMenu[index], "VOLVER AL MENU", true,
+                     index == focusIndex, Icon::home);
       } else {
         const char* label = index == 4 && sessionUnlocked ? "ACCIONES EN VAULT" :
                             kActiveLabels[index];
@@ -3694,8 +3718,9 @@ void updateFocusButton(uint8_t index) {
     case Screen::settings: {
       if (index == 0) updateButton(kMenu[0], settingsLangLabel().c_str(), true, index == focusIndex);
       else if (index == 1) updateButton(kMenu[1], settingsTimeoutLabel().c_str(), true, index == focusIndex, Icon::lock);
-      else if (index == 2) updateButton(kMenu[2], settingsDerivLabel().c_str(), true, index == focusIndex, Icon::key);
-      else if (index == 3) updateButton(kMenu[3], "Estado de la radio", true, index == focusIndex, Icon::wifi);
+      else if (index == 2) updateButton(kMenu[2], settingsCleanLabel().c_str(), true, index == focusIndex, Icon::trash);
+      else if (index == 3) updateButton(kMenu[3], settingsDerivLabel().c_str(), true, index == focusIndex, Icon::key);
+      else if (index == 4) updateButton(kMenu[4], "Estado de la radio", true, index == focusIndex, Icon::wifi);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     }
@@ -3708,6 +3733,12 @@ void updateFocusButton(uint8_t index) {
       if (index < device_settings::kTimeoutOptionCount)
         updateButton(kMenu[index], timeoutLabel(device_settings::kTimeoutOptions[index]), true,
                      index == focusIndex && gSettings.lockTimeoutMs == device_settings::kTimeoutOptions[index], Icon::lock);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::settings_clean:
+      if (index < device_settings::kCleanOptionCount)
+        updateButton(kMenu[index], cleanLabel(device_settings::kCleanOptions[index]), true,
+                     index == focusIndex && gSettings.seedCleanTimeoutMs == device_settings::kCleanOptions[index], Icon::trash);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     case Screen::settings_derivation:
@@ -3744,7 +3775,7 @@ void updateFocusButton(uint8_t index) {
 void moveFocus(int direction) {
   const uint8_t previous = focusIndex;
   uint8_t count = 1;
-  if (screen == Screen::active_seed) count = sessionUnlocked ? 7 : 6;
+  if (screen == Screen::active_seed) count = sessionUnlocked ? 9 : 8;
   else if (screen == Screen::seed_switcher) count = loadedSeedCount + 1;
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
   else if (screen == Screen::vault_actions) count = 4;
@@ -3761,9 +3792,10 @@ void moveFocus(int direction) {
     else count = 1;
   }
   else if (screen == Screen::wifi_mode) count = 4;
-  else if (screen == Screen::settings) count = 5;
+  else if (screen == Screen::settings) count = 6;
   else if (screen == Screen::settings_lang) count = 3;
   else if (screen == Screen::settings_timeout) count = device_settings::kTimeoutOptionCount + 1;
+  else if (screen == Screen::settings_clean) count = device_settings::kCleanOptionCount + 1;
   else if (screen == Screen::settings_derivation) count = kPublicProfileCount + 1;
   else if (screen == Screen::settings_radio) count = 1;
   else if (screen == Screen::signed_tx) count = 1;
@@ -3866,6 +3898,12 @@ void click(int x, int y) {
     }
     else if (kActiveMenu[5].contains(x, y)) { openWifiMode(); }
     else if (sessionUnlocked && kActiveMenu[6].contains(x, y)) lockSessionVault();
+    else if (kActiveMenu[sessionUnlocked ? 7 : 6].contains(x, y)) {
+      screen = Screen::settings; focusIndex = 0; drawScreen();
+    }
+    else if (kActiveMenu[sessionUnlocked ? 8 : 7].contains(x, y)) {
+      screen = Screen::menu; focusIndex = 0; drawScreen();
+    }
   } else if (screen == Screen::seed_switcher) {
     for (uint8_t i = 0; i < loadedSeedCount; ++i) if (kVaultFiles[i].contains(x, y)) {
       if (activateLoadedSeed(i)) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
@@ -4311,8 +4349,9 @@ void click(int x, int y) {
   } else if (screen == Screen::settings) {
     if (kMenu[0].contains(x, y)) { screen = Screen::settings_lang; focusIndex = 0; drawScreen(); }
     else if (kMenu[1].contains(x, y)) { screen = Screen::settings_timeout; focusIndex = 0; drawScreen(); }
-    else if (kMenu[2].contains(x, y)) { screen = Screen::settings_derivation; focusIndex = 0; drawScreen(); }
-    else if (kMenu[3].contains(x, y)) { screen = Screen::settings_radio; focusIndex = 0; drawScreen(); }
+    else if (kMenu[2].contains(x, y)) { screen = Screen::settings_clean; focusIndex = 0; drawScreen(); }
+    else if (kMenu[3].contains(x, y)) { screen = Screen::settings_derivation; focusIndex = 0; drawScreen(); }
+    else if (kMenu[4].contains(x, y)) { screen = Screen::settings_radio; focusIndex = 0; drawScreen(); }
     else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 5; drawScreen(); }
   } else if (screen == Screen::settings_lang) {
     if (kMenu[0].contains(x, y)) { gSettings.language = 0; lang::set(lang::Lang::EN); saveSettingsNow(); drawSettingsLang(); }
@@ -4323,13 +4362,18 @@ void click(int x, int y) {
     else for (uint8_t i = 0; i < device_settings::kTimeoutOptionCount; ++i) {
       if (kMenu[i].contains(x, y)) { gSettings.lockTimeoutMs = device_settings::kTimeoutOptions[i]; saveSettingsNow(); drawSettingsTimeout(); return; }
     }
-  } else if (screen == Screen::settings_derivation) {
+  } else if (screen == Screen::settings_clean) {
     if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 2; drawScreen(); }
+    else for (uint8_t i = 0; i < device_settings::kCleanOptionCount; ++i) {
+      if (kMenu[i].contains(x, y)) { gSettings.seedCleanTimeoutMs = device_settings::kCleanOptions[i]; saveSettingsNow(); drawSettingsClean(); return; }
+    }
+  } else if (screen == Screen::settings_derivation) {
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 3; drawScreen(); }
     else for (uint8_t i = 0; i < kPublicProfileCount; ++i) {
       if (kMenu[i].contains(x, y)) { gSettings.defaultProfile = i; saveSettingsNow(); drawSettingsDerivation(); return; }
     }
   } else if (screen == Screen::settings_radio) {
-    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 3; drawScreen(); }
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 4; drawScreen(); }
   }
 }
 
@@ -4457,13 +4501,17 @@ void activateFocus() {
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings) {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
-                    focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] : kBack;
+                    focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] :
+                    focusIndex == 4 ? kMenu[4] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings_lang) {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings_timeout) {
     const Rect& r = focusIndex < device_settings::kTimeoutOptionCount ? kMenu[focusIndex] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_clean) {
+    const Rect& r = focusIndex < device_settings::kCleanOptionCount ? kMenu[focusIndex] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings_derivation) {
     const Rect& r = focusIndex < kPublicProfileCount ? kMenu[focusIndex] : kBack;
@@ -4576,14 +4624,19 @@ void loop() {
     }
   }
 
-  if (sessionUnlocked && static_cast<uint32_t>(millis() - lastUserActivity) >= kSessionTimeoutMs) {
-    Serial.println("Vault de sesion bloqueado por inactividad");
+  const uint32_t cleanMs = gSettings.seedCleanTimeoutMs;
+  const bool hasSeed = fingerprintValid || sessionUnlocked;
+  if (cleanMs != 0 && hasSeed &&
+      static_cast<uint32_t>(millis() - lastUserActivity) >= cleanMs) {
+    Serial.println("Limpieza de seed por inactividad");
     lastWarnSecond = 0;
-    lockSessionVault();
+    if (sessionUnlocked) lockSessionVault();
+    else discardActiveSeed();
+    screen = Screen::menu; focusIndex = 0; drawScreen();
     return;
   }
-  if (sessionUnlocked) {
-    const uint32_t remaining = kSessionTimeoutMs -
+  if (cleanMs != 0 && hasSeed) {
+    const uint32_t remaining = cleanMs -
         static_cast<uint32_t>(millis() - lastUserActivity);
     if (remaining <= kSessionTimeoutWarnMs) {
       if (screen != Screen::session_lock_warning) {
@@ -4625,6 +4678,8 @@ void loop() {
       screen = sessionLockReturn; focusIndex = 0; drawScreen();
     }
   } else if (millis() - lastRocker >= 120) {
+    // NOTA: la palanca va "invertida" a proposito: IZQUIERDA avanza y DERECHA
+    // retrocede. Es el comportamiento historico del dispositivo; NO "corregir".
     if (left == LOW && oldLeft == HIGH) { lastRocker = millis(); lastUserActivity = millis(); moveFocus(1); }
     else if (right == LOW && oldRight == HIGH) { lastRocker = millis(); lastUserActivity = millis(); moveFocus(-1); }
     else if (press == LOW && oldPress == HIGH) { lastRocker = millis(); lastUserActivity = millis(); activateFocus(); }

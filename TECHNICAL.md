@@ -179,15 +179,18 @@ de Bluedroid en el M5Paper. No está accesible desde el menú.
 
 ```
 [0..3]   magia "M5CF"
-[4]      versión = 1
+[4]      versión = 2
 [5]      idioma (0 = inglés, 1 = español)
 [6]      derivación por defecto (0..3 = BIP44/49/84/86)
 [7..10]  tiempo de bloqueo en ms (uint32 LE; 0 = nunca)
+[11..14] tiempo de limpieza de seed en ms (uint32 LE; 0 = nunca)
 ```
 
-Valores de bloqueo: 1/3/5/10 min o nunca (por defecto 3 min). El idioma por
-defecto es **inglés**; toda la UI pasa por `lang::tr()` con una tabla de
-traducción castellano→inglés.
+Valores de bloqueo: 1/3/5/10 min o nunca (por defecto 3 min). Valores de limpieza
+de seed: nunca/10/30/60 min (por defecto **nunca**); al agotarse borra **todas** las
+semillas de RAM y cierra el vault de sesión, con una cuenta atrás de 15 s reutilizando
+la pantalla de aviso. El idioma por defecto es **inglés**; toda la UI pasa por
+`lang::tr()` con una tabla de traducción castellano→inglés.
 
 ---
 

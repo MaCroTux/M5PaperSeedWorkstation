@@ -8,6 +8,7 @@
 namespace encrypted_seed_store {
 constexpr uint8_t kVersion = 1;
 constexpr uint32_t kIterations = 600000;
+constexpr uint32_t kMaxIterations = 10000000;
 constexpr size_t kHeaderSize = 40;
 constexpr size_t kTagSize = 16;
 constexpr size_t kMaxPlaintext = 49;
@@ -82,7 +83,8 @@ inline bool pbkdf2_sha256(const char* password, const uint8_t salt[16],
 inline bool derive(const char* password, const uint8_t salt[16],
                    uint32_t iterations, uint8_t key[32],
                    ProgressFn progress = nullptr) {
-  if (!password || !password[0] || iterations < 100000) return false;
+  if (!password || !password[0] || iterations < 100000 || iterations > kMaxIterations)
+    return false;
   return pbkdf2_sha256(password, salt, iterations, key, progress);
 }
 
@@ -163,6 +165,7 @@ inline Result load(const char* path, const char* password,
     const uint8_t length = header[38];
     const uint32_t iterations = get32(header + 6);
     if ((length != 25 && length != 49) || iterations < 100000 ||
+        iterations > kMaxIterations ||
         file.size() != kHeaderSize + length + kTagSize ||
         file.read(cipher, length) != length || file.read(tag, kTagSize) != kTagSize)
       goto cleanup;
