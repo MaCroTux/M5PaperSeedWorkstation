@@ -72,6 +72,7 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `vault_key.hpp` | Segundo factor Core2+PIN: envuelve la clave maestra de sesión (`.k2f`). |
 | `ble_provision.hpp` | Protocolo de provisioning M5Paper→M5Stick: payload (`count ‖ word_idx ‖ fingerprint`) + ECIES con tag `m5-stick-provision-v1`. |
 | `ble_provision_client.hpp/.cpp` | Cliente BLE (M5Paper): scan → leer pubkey → ECIES(seed) → escribir → esperar `PROV_STATUS`. |
+| `qr_cam_client.hpp/.cpp` | Cliente BLE para el ESP32-CAM: scan → suscribir TX → `STATUS` por RX → reconstruir `QRBEGIN`/chunks/`QREND`. |
 | `psbt_parser.hpp` | Parser PSBT (BIP174) + deserialización de transacciones; detecta binario/base64/hex/UR. |
 | `ur_psbt.hpp` | Decodificación `UR:CRYPTO-PSBT` (bytewords + CBOR) para QR de Sparrow. |
 | `tx_sign.hpp` | Firma segwit v0: RFC6979, sighash BIP143, finalización PSBT, serialización. |
@@ -83,6 +84,7 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `device_settings.hpp` | Ajustes en SD (`/m5settings.cfg`). |
 | `multisig.hpp` | Multisig P2WSH sortedmulti (detección, firma, finalización). |
 | `PROTOCOLO_M5STICK.md` | Especificación de cable del provisioning BLE M5Paper→M5Stick. |
+| `PROTOCOLO_CAMARA_QR.md` | Especificación de cable del escaneo BLE con la cámara ESP32-CAM. |
 | `DEBUG_FIRMA.md` | Post-mortem del bug de firma P2WPKH (scriptCode + pubkey comprimida). |
 
 ---
@@ -253,6 +255,17 @@ M5Stick. Anuncia como `M5Paper-Provis`, escanea `M5Stick-Signer`, lee
 `PROV_STATUS` y espera la confirmación física del M5Stick. El servicio/plantilla de
 características está definido en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
 
+### 6.5 BLE (cámara QR externa ESP32-CAM)
+
+`qr_cam_client` implementa el cliente GATT (NimBLE) que recibe un QR decodificado
+desde un ESP32-CAM. Escanea `M5Paper-QR-CAM`, se conecta, se suscribe a `TX`
+(NOTIFY) y envía `STATUS` por `RX` (WRITE). Recibe el payload fragmentado
+(`QRBEGIN:<size>:<chunks>`, `<index>:<data>`, `QREND`) como líneas de texto, lo
+reconstruye por índice (validando `size`/`chunks` contra `MAX_QR_PAYLOAD`/`MAX_QR_CHUNKS`
+y un timeout de 5 s) y entrega un payload opaco al QR dispatcher. La cámara es no
+confiable: nunca recibe seed/claves. Detalles en
+[`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
+
 ---
 
 ## 7. Ajustes persistentes
@@ -308,6 +321,9 @@ automáticamente; los textos dibujados directamente con `page.*` usan `lang::tr(
 - Soporte Ethereum (v2.0) — ver [`ETH_v2.0.md`](ETH_v2.0.md), sin implementar.
 - Provisioning M5Stick: el lado **servidor** (firmware del M5Stick) es un proyecto
   aparte; el M5Paper solo implementa el cliente.
+- Cámara QR externa: el lado **servidor** (firmware del ESP32-CAM) es un proyecto
+  aparte; el M5Paper solo implementa el cliente. Protocolo V1 experimental (ver
+  [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md)).
 
 Nota: los hallazgos S-1 (blinding ECC), S-2 (limpieza de `String`) y S-3
 (límite de iteraciones PBKDF2) de [`AUDITORIA.md`](AUDITORIA.md) ya fueron

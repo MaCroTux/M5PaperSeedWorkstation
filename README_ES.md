@@ -35,6 +35,10 @@ Documentación en inglés: [`README.md`](README.md).
   **M5Stick** por BLE, cifrada en tránsito con **ECIES** (ECDH + AES-256-GCM) y con
   confirmación física en ambos dispositivos. El protocolo completo está en
   [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
+- **Escaneo de QR con cámara externa (ESP32-CAM + OV2640)**: el M5Paper se conecta
+  por BLE a un módulo de cámara que lee y decodifica un QR y le devuelve el payload
+  ya decodificado (opaco). El contenido se entrega al mismo pipeline que cualquier
+  QR (PSBT/UR/BBQr/descriptor). Ver [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
 - **Recibir por WiFi** (punto de acceso + portal cautivo) o por **serial USB**:
   PSBT (fichero o texto) o semilla BIP39 en texto (esta última sin necesidad de
   tener una semilla cargada en RAM).
@@ -169,6 +173,7 @@ transacciones firmadas, los resúmenes y la metadata en claro de la SD.
 | `vault_key.hpp` | Segundo factor Core2+PIN: envuelve la clave maestra de sesión (`.k2f`). |
 | `ble_provision.hpp` | Protocolo de provisioning M5Paper→M5Stick: payload + ECIES (tag `m5-stick-provision-v1`). |
 | `ble_provision_client.hpp/.cpp` | Cliente BLE (M5Paper) que cifra y envía la semilla al M5Stick. |
+| `qr_cam_client.hpp/.cpp` | Cliente BLE para el módulo ESP32-CAM (recibe QR decodificado por BLE). |
 | `psbt_parser.hpp` | Parser de PSBT (BIP174) y transacciones, detección binario/base64/hex/UR. |
 | `ur_psbt.hpp` | Decodificación de `UR:CRYPTO-PSBT` (bytewords + CBOR). |
 | `tx_sign.hpp` | Firma segwit: RFC6979, sighash BIP143, finalización y serialización. |
@@ -182,6 +187,7 @@ transacciones firmadas, los resúmenes y la metadata en claro de la SD.
 | `AUDITORIA.md` | Auditoría de seguridad y UX. |
 | `TECHNICAL.md` | Documentación técnica detallada. |
 | `PROTOCOLO_M5STICK.md` | Especificación de cable del provisioning BLE M5Paper→M5Stick. |
+| `PROTOCOLO_CAMARA_QR.md` | Especificación de cable del escaneo BLE con la cámara ESP32-CAM. |
 | `DEBUG_FIRMA.md` | Post-mortem del bug de firma P2WPKH. |
 
 ---
@@ -293,7 +299,30 @@ códigos de estado en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
 
 ---
 
-## 11. Estado / pendientes
+## 11. Escaneo de QR con cámara externa (BLE)
+
+El M5Paper puede usar un **ESP32-CAM + OV2640** como coprocesador de visión. La
+cámara lee un QR, lo decodifica y envía el payload **ya decodificado** (opaco) por
+BLE; el M5Paper no recibe imágenes.
+
+### Flujo
+
+1. `RECIBIR → ESCANEAR QR (CAMARA)`.
+2. El M5Paper escanea el dispositivo `M5Paper-QR-CAM`, se conecta y se suscribe a
+   `TX` (NOTIFY); envía `STATUS` por `RX` (WRITE).
+3. Muestras el QR a la cámara. Llega `QRBEGIN:<size>:<chunks>`, después los
+   fragmentos `<index>:<data>` y `QREND`.
+4. El M5Paper reconstruye (por índice), verifica el tamaño y entrega el payload al
+   mismo pipeline que cualquier QR: si es un **PSBT**, se guarda y abre la revisión
+   de la transacción; si no, muestra el contenido decodificado.
+
+Límites (`MAX_QR_PAYLOAD` 32 KB, `MAX_QR_CHUNKS` 1024) y timeout de 5 s. La cámara
+es **no confiable**: nunca recibe seed ni claves y todo lo recibido se valida como
+cualquier QR. Detalles en [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
+
+---
+
+## 12. Estado / pendientes
 
 - [x] Recepción por WiFi AP (portal cautivo + QR de conexión) con 3 modos.
 - [x] Recepción por serial USB (protocolo `M5PSBT` + SHA256).
@@ -304,12 +333,14 @@ códigos de estado en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
 - [x] Traducción completa EN/ES.
 - [x] Llave BLE (M5Core2) + PIN como segundo método de desbloqueo del vault de sesión.
 - [x] Provisioning BLE de la semilla al M5Stick (cliente con cifrado ECIES en tránsito).
+- [x] Escaneo de QR con cámara externa ESP32-CAM (cliente BLE + reconstrucción fragmentada).
 - [ ] Base32 y zlib en BBQr (optimización futura).
 - [ ] Lado servidor del provisioning en el M5Stick (firmware del M5Stick, proyecto aparte).
+- [ ] Firmware del ESP32-CAM (lado servidor del protocolo de cámara, proyecto aparte).
 
 ---
 
-## 12. Advertencia de uso
+## 13. Advertencia de uso
 
 Este firmware gestiona claves privadas. No usar con fondos reales hasta completar
 una revisión de seguridad formal y pruebas físicas exhaustivas.

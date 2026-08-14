@@ -35,6 +35,10 @@ Documentación en español: [`README_ES.md`](README_ES.md).
   **M5Stick** over BLE, encrypted in transit with **ECIES** (ECDH + AES-256-GCM)
   and with physical confirmation on both devices. Full wire protocol in
   [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
+- **External camera QR scan (ESP32-CAM + OV2640)**: the M5Paper connects over BLE
+  to a camera module that reads and decodes a QR and returns the already-decoded
+  (opaque) payload. The content is delivered to the same pipeline as any QR
+  (PSBT/UR/BBQr/descriptor). See [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
 - **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
 - **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
@@ -167,6 +171,7 @@ summaries and clear SD metadata leave the device.
 | `vault_key.hpp` | Core2+PIN second unlock factor: wraps the session master key (`.k2f`). |
 | `ble_provision.hpp` | M5Paper→M5Stick provisioning protocol: payload + ECIES (tag `m5-stick-provision-v1`). |
 | `ble_provision_client.hpp/.cpp` | BLE client (M5Paper) that encrypts and sends the seed to the M5Stick. |
+| `qr_cam_client.hpp/.cpp` | BLE client for the ESP32-CAM module (receives decoded QR over BLE). |
 | `psbt_parser.hpp` | PSBT parser (BIP174) + transactions, binary/base64/hex/UR detection. |
 | `ur_psbt.hpp` | `UR:CRYPTO-PSBT` decoding (bytewords + CBOR). |
 | `tx_sign.hpp` | Segwit signing: RFC6979, BIP143 sighash, finalization & serialization. |
@@ -180,6 +185,7 @@ summaries and clear SD metadata leave the device.
 | `AUDITORIA.md` | Security & UX audit (Spanish). |
 | `TECHNICAL.md` | Detailed technical documentation. |
 | `PROTOCOLO_M5STICK.md` | Wire specification for M5Paper→M5Stick BLE provisioning (Spanish). |
+| `PROTOCOLO_CAMARA_QR.md` | Wire specification for ESP32-CAM BLE QR scanning (Spanish). |
 | `DEBUG_FIRMA.md` | Post-mortem of the P2WPKH signing bug (Spanish). |
 
 ---
@@ -290,7 +296,30 @@ Confirmation is physical on **both** devices. UUIDs, payload and status codes in
 
 ---
 
-## 11. Status / backlog
+## 11. External camera QR scan (BLE)
+
+The M5Paper can use an **ESP32-CAM + OV2640** as a vision coprocessor. The camera
+reads a QR, decodes it and sends the **already-decoded** (opaque) payload over BLE;
+the M5Paper receives no images.
+
+### Flow
+
+1. `RECEIVE → SCAN QR (CAMERA)`.
+2. The M5Paper scans for `M5Paper-QR-CAM`, connects and subscribes to `TX`
+   (NOTIFY); it sends `STATUS` over `RX` (WRITE).
+3. Show the QR to the camera. `QRBEGIN:<size>:<chunks>` arrives, then
+   `<index>:<data>` fragments and `QREND`.
+4. The M5Paper reassembles (by index), verifies the size and delivers the payload
+   to the same pipeline as any QR: if it is a **PSBT**, it is saved and the
+   transaction review opens; otherwise the decoded content is shown.
+
+Limits (`MAX_QR_PAYLOAD` 32 KB, `MAX_QR_CHUNKS` 1024) and a 5 s timeout. The camera
+is **untrusted**: it never receives a seed or keys, and everything received is
+validated like any QR. Details in [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
+
+---
+
+## 12. Status / backlog
 
 - [x] WiFi AP reception (captive portal + connection QR) with 3 modes.
 - [x] USB serial reception (`M5PSBT` protocol + SHA256).
@@ -301,12 +330,14 @@ Confirmation is physical on **both** devices. UUIDs, payload and status codes in
 - [x] Full EN/ES translation.
 - [x] BLE key (M5Core2) + PIN as a second unlock method for the session vault.
 - [x] BLE provisioning of the seed to the M5Stick (client with ECIES in transit).
+- [x] External ESP32-CAM QR scan (BLE client + fragmented reassembly).
 - [ ] Base32 and zlib in BBQr (future optimization).
 - [ ] Server side of provisioning on the M5Stick (M5Stick firmware, separate project).
+- [ ] ESP32-CAM firmware (server side of the camera protocol, separate project).
 
 ---
 
-## 12. Usage warning
+## 13. Usage warning
 
 This firmware handles private keys. Do not use with real funds until a formal
 security review and exhaustive physical testing are completed.

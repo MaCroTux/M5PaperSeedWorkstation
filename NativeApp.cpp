@@ -22,6 +22,7 @@
 #include "vault_key.hpp"
 #include "ble_provision.hpp"
 #include "ble_provision_client.hpp"
+#include "qr_cam_client.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -47,7 +48,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      settings_clean, settings_derivation, settings_radio,
                      multisig_confirm, tx_history, ble_key_menu, ble_key_test,
                      twofa_list, twofa_migrate_list, settings_screen,
-                     provision_test };
+                     provision_test, scan_cam_qr };
 
 struct Rect {
   int x, y, w, h;
@@ -242,6 +243,10 @@ ble_provision::BleProvisionClient provisionClient;
 ble_provision::BleProvisionClient::Phase lastProvisionPhase =
     ble_provision::BleProvisionClient::Phase::Idle;
 bool provisionAfterSecurity = false;
+qr_cam::QRCamClient camClient;
+qr_cam::Phase lastCamPhase = qr_cam::Phase::Off;
+bool camResultShown = false;
+uint8_t lastCamProgress = 255;
 constexpr uint8_t kMaxLoadedSeeds = 6;
 struct LoadedSeed {
   uint16_t indices[24];
@@ -2685,6 +2690,102 @@ void renderScanQrDynamic() {
   }
 }
 
+// ---- Camara QR externa (ESP32-CAM + OV2640) ----
+
+const char* camSubtitle() {
+  switch (camClient.phase()) {
+    case qr_cam::Phase::Scanning: return "Buscando camara...";
+    case qr_cam::Phase::Connecting: return "Camara encontrada. Conectando...";
+    case qr_cam::Phase::Connected:
+    case qr_cam::Phase::WaitingQr: return "Camara lista. Muestra el QR.";
+    case qr_cam::Phase::Receiving: return "Recibiendo QR...";
+    case qr_cam::Phase::Complete: return "QR recibido";
+    case qr_cam::Phase::Error: return "Error";
+    default: return "";
+  }
+}
+
+const char* camErrorText(qr_cam::Error e) {
+  switch (e) {
+    case qr_cam::Error::ScanTimeout: return "No se encontro la camara";
+    case qr_cam::Error::ConnectFailed: return "No se pudo conectar";
+    case qr_cam::Error::ServiceNotFound: return "Servicio BLE no encontrado";
+    case qr_cam::Error::SubscribeFailed: return "No se pudo suscribir";
+    case qr_cam::Error::Disconnected: return "Camara desconectada";
+    case qr_cam::Error::PayloadTooLarge: return "PAYLOAD DEMASIADO GRANDE";
+    case qr_cam::Error::InvalidTransfer: return "QR_TRANSFER_ERROR";
+    case qr_cam::Error::TransferTimeout: return "Transferencia agotada";
+    case qr_cam::Error::WriteFailed: return "No se pudo enviar el comando";
+    default: return "ERROR";
+  }
+}
+
+void drawScanCamQr() {
+  blankPage();
+  const auto p = camClient.phase();
+  if (p == qr_cam::Phase::Complete) {
+    title("QR RECIBIDO", "Contenido decodificado por la camara");
+    const std::vector<uint8_t>& d = camClient.payload();
+    textStyle(page, 2);
+    page.setCursor(30, 175);
+    page.printf("Size: %u bytes", static_cast<unsigned>(d.size()));
+    page.setCursor(30, 220);
+    page.println("Contenido:");
+    page.drawRoundRect(20, 255, 500, 470, 8, kBlack);
+    if (!d.empty() && isValidUtf8(d)) {
+      drawWrappedText(page, scanPayloadText(d), 32, 268, 470, 22, 16);
+    } else {
+      textStyle(page, 2);
+      page.setTextDatum(MC_DATUM);
+      page.drawString("Datos binarios / " + String(d.size()) + " bytes", 270, 470);
+      page.setTextDatum(TL_DATUM);
+    }
+    buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
+    fullRefresh();
+  } else if (p == qr_cam::Phase::Error) {
+    title("SCAN QR CAMARA", "Error");
+    warningIcon(page, 270, 200);
+    centeredFit(page, "ERROR", 320, 500, 3);
+    centeredFit(page, camErrorText(camClient.error()), 400);
+    buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+    buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
+    fullRefresh();
+  } else {
+    title("SCAN QR CAMARA", camSubtitle());
+    centeredFit(page, camSubtitle(), 420, 500, 3);
+    buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
+    fullRefresh();
+    if (p == qr_cam::Phase::Receiving) {
+      const uint16_t total = camClient.totalChunks();
+      const uint8_t pct = total ? static_cast<uint8_t>((camClient.receivedChunks() * 100) / total) : 0;
+      drawProgressBar(500, pct);
+      lastCamProgress = pct;
+    }
+  }
+}
+
+void beginCamScan() {
+  lastCamPhase = qr_cam::Phase::Off;
+  lastCamProgress = 255;
+  camResultShown = false;
+  camClient.clear();
+  camClient.start();
+  screen = Screen::scan_cam_qr;
+  focusIndex = 0;
+  drawScanCamQr();
+}
+
+void exitCamScan() {
+  camClient.clear();
+  screen = Screen::wifi_mode;
+  focusIndex = 3;
+  drawScreen();
+}
+
+void retryCamScan() {
+  beginCamScan();
+}
+
 qr_wifi::QRWiFiServer wifiServer;
 bool wifiResultShown = false;
 Screen wifiModeReturnScreen = Screen::menu;
@@ -3917,11 +4018,12 @@ void returnFromWifiReceive() {
 
 void drawWifiMode() {
   blankPage();
-  title("RECIBIR POR WIFI", "Elige que vas a enviar");
+  title("RECIBIR", "Elige la fuente de datos");
   buttonOn(page, kMenu[0], "SUBIR FICHERO (PSBT)", fingerprintValid, focusIndex == 0, Icon::wifi);
   buttonOn(page, kMenu[1], "PEGAR TRANSACCION (PSBT)", fingerprintValid, focusIndex == 1, Icon::wifi);
   buttonOn(page, kMenu[2], "PEGAR SEMILLA BIP39", true, focusIndex == 2, Icon::key);
-  buttonOn(page, kBack, "VOLVER", true, focusIndex == 3);
+  buttonOn(page, kMenu[3], "ESCANEAR QR (CAMARA)", true, focusIndex == 3, Icon::qr);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 4);
   fullRefresh();
 }
 
@@ -4473,6 +4575,7 @@ void drawScreen() {
     case Screen::ble_key_menu: drawBleKeyMenu(); break;
     case Screen::ble_key_test: drawBleKeyTest(); break;
     case Screen::provision_test: drawProvisionTest(); break;
+    case Screen::scan_cam_qr: drawScanCamQr(); break;
     case Screen::twofa_list: drawTwoFaList(); break;
     case Screen::twofa_migrate_list: drawTwoFaMigrateList(); break;
   }
@@ -4730,16 +4833,17 @@ void updateFocusButton(uint8_t index) {
       break;
     }
     case Screen::wifi_mode: {
-      static const Icon kWifiModeIcons[] = {Icon::wifi, Icon::wifi, Icon::key, Icon::none};
+      static const Icon kWifiModeIcons[] = {Icon::wifi, Icon::wifi, Icon::key, Icon::qr, Icon::none};
       static const char* kWifiModeLabels[] = {"SUBIR FICHERO (PSBT)",
                                               "PEGAR TRANSACCION (PSBT)",
-                                              "PEGAR SEMILLA BIP39", "VOLVER"};
+                                              "PEGAR SEMILLA BIP39",
+                                              "ESCANEAR QR (CAMARA)", "VOLVER"};
       const bool psbtOk = fingerprintValid;
       if (index == 0 || index == 1) updateButton(kMenu[index], kWifiModeLabels[index], psbtOk,
                                                  index == focusIndex, kWifiModeIcons[index]);
-      else if (index == 2) updateButton(kMenu[index], kWifiModeLabels[index], true,
-                                        index == focusIndex, kWifiModeIcons[index]);
-      else updateButton(kBack, kWifiModeLabels[3], true, index == focusIndex);
+      else if (index == 2 || index == 3) updateButton(kMenu[index], kWifiModeLabels[index], true,
+                                                      index == focusIndex, kWifiModeIcons[index]);
+      else updateButton(kBack, kWifiModeLabels[4], true, index == focusIndex);
       break;
     }
     case Screen::settings: {
@@ -4855,6 +4959,18 @@ void updateFocusButton(uint8_t index) {
       }
       break;
     }
+    case Screen::scan_cam_qr: {
+      const auto p = camClient.phase();
+      if (p == qr_cam::Phase::Complete) {
+        updateButton(kAction, "VOLVER", true, index == focusIndex);
+      } else if (p == qr_cam::Phase::Error) {
+        if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+        else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
+      } else {
+        updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
+      }
+      break;
+    }
     case Screen::twofa_list:
       if (index < twoFaCount) {
         char label[17] = {};
@@ -4898,7 +5014,7 @@ void moveFocus(int direction) {
       count = fingerprintValid ? 3 : 2;
     else count = 1;
   }
-  else if (screen == Screen::wifi_mode) count = 4;
+  else if (screen == Screen::wifi_mode) count = 5;
   else if (screen == Screen::settings) count = 8;
   else if (screen == Screen::settings_screen) count = device_settings::kScreenCleanOptionCount + 2;
   else if (screen == Screen::settings_lang) count = 3;
@@ -4918,6 +5034,10 @@ void moveFocus(int direction) {
     const auto p = provisionClient.phase();
     count = (p == ble_provision::BleProvisionClient::Phase::Denied ||
              p == ble_provision::BleProvisionClient::Phase::Failed) ? 2 : 1;
+  }
+  else if (screen == Screen::scan_cam_qr) {
+    const auto p = camClient.phase();
+    count = (p == qr_cam::Phase::Error) ? 2 : 1;
   }
   else if (screen == Screen::twofa_list) count = twoFaCount + 1;
   else if (screen == Screen::twofa_migrate_list) count = sessionMetaCount + 1;
@@ -5496,6 +5616,7 @@ void click(int x, int y) {
     if (kMenu[0].contains(x, y) && fingerprintValid) { beginWifiReceive(qr_wifi::Mode::kFile); }
     else if (kMenu[1].contains(x, y) && fingerprintValid) { beginWifiReceive(qr_wifi::Mode::kTxText); }
     else if (kMenu[2].contains(x, y)) { beginWifiReceive(qr_wifi::Mode::kSeedText); }
+    else if (kMenu[3].contains(x, y)) { beginCamScan(); }
     else if (kBack.contains(x, y)) { returnFromWifiReceive(); }
   } else if (screen == Screen::signed_tx) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 0; drawScreen(); }
@@ -5621,6 +5742,16 @@ void click(int x, int y) {
     } else {
       if (kAction.contains(x, y)) exitProvisionTest();
     }
+  } else if (screen == Screen::scan_cam_qr) {
+    const auto p = camClient.phase();
+    if (p == qr_cam::Phase::Complete) {
+      if (kAction.contains(x, y)) exitCamScan();
+    } else if (p == qr_cam::Phase::Error) {
+      if (kBack.contains(x, y)) exitCamScan();
+      else if (kAction.contains(x, y)) retryCamScan();
+    } else {
+      if (kAction.contains(x, y)) exitCamScan();
+    }
   }
 }
 
@@ -5744,7 +5875,8 @@ void activateFocus() {
   } else if (screen == Screen::wifi_mode) {
     const Rect& r = focusIndex == 0 ? kMenu[0] :
                     focusIndex == 1 ? kMenu[1] :
-                    focusIndex == 2 ? kMenu[2] : kBack;
+                    focusIndex == 2 ? kMenu[2] :
+                    focusIndex == 3 ? kMenu[3] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings) {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
@@ -5805,6 +5937,10 @@ void activateFocus() {
     const Rect& r = (p == ble_provision::BleProvisionClient::Phase::Denied ||
                      p == ble_provision::BleProvisionClient::Phase::Failed)
                         ? (focusIndex == 0 ? kBack : kAction) : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::scan_cam_qr) {
+    const auto p = camClient.phase();
+    const Rect& r = (p == qr_cam::Phase::Error) ? (focusIndex == 0 ? kBack : kAction) : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::twofa_list) {
     const Rect& r = focusIndex < twoFaCount ? kVaultFiles[focusIndex] : kBack;
@@ -5909,6 +6045,47 @@ void loop() {
   } else if (provisionClient.phase() != ble_provision::BleProvisionClient::Phase::Idle &&
              provisionClient.phase() != ble_provision::BleProvisionClient::Phase::Cancelled) {
     provisionClient.cancel();
+  }
+
+  camClient.update();
+  if (camClient.phase() != qr_cam::Phase::Off &&
+      camClient.phase() != qr_cam::Phase::Cancelled) {
+    lastUserActivity = millis();  // no auto-lock durante el escaneo
+  }
+  if (screen == Screen::scan_cam_qr) {
+    const auto cp = camClient.phase();
+    if (cp == qr_cam::Phase::Cancelled || cp == qr_cam::Phase::Off) {
+      screen = Screen::wifi_mode; focusIndex = 3; drawScreen();
+    } else if (cp == qr_cam::Phase::Complete) {
+      if (!camResultShown) {
+        camResultShown = true;
+        lastCamPhase = cp;
+        if (psbt::tryParsePsbt(camClient.payload(), parsedTx)) {
+          txIsPsbt = true;
+          saveReceivedPsbt(camClient.payload());
+          camClient.clear();
+          showToast("PSBT recibido por camara");
+          afterPsbtParsed(true);
+        } else {
+          drawScanCamQr();
+        }
+      }
+    } else if (cp == qr_cam::Phase::Receiving) {
+      if (cp != lastCamPhase) {
+        lastCamPhase = cp;
+        drawScanCamQr();
+      } else {
+        const uint16_t total = camClient.totalChunks();
+        const uint8_t pct = total ? static_cast<uint8_t>((camClient.receivedChunks() * 100) / total) : 0;
+        if (pct != lastCamProgress) { lastCamProgress = pct; drawProgressBar(500, pct); }
+      }
+    } else if (cp != lastCamPhase) {
+      lastCamPhase = cp;
+      drawScanCamQr();
+    }
+  } else if (camClient.phase() != qr_cam::Phase::Off &&
+             camClient.phase() != qr_cam::Phase::Cancelled) {
+    camClient.cancel();
   }
 
   wifiServer.update();
