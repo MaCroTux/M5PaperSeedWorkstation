@@ -256,3 +256,70 @@ El mayor riesgo observable hoy es de **UX/navegación**: la palanca invertida, l
 muerta en "GUARDAR EN SESION" y las redirecciones sorpresivas pueden llevar al usuario
 a interpretar mal el estado de su semilla, lo que en un dispositivo de este tipo es
 también un riesgo de seguridad.
+
+---
+
+## 7. Addendum 2026-08-14 — Llave BLE (M5Core2) y Core2+PIN
+
+Alcance: revisión estática de la nueva funcionalidad de llave criptográfica BLE
+(`ble_key.hpp`, `ble_key_client.*`, `ble_key_server.*`, `vault_key.hpp`) y su
+integración en `NativeApp.cpp` / `NativeApp_Core2.cpp`.
+
+### 7.1 Hallazgos
+
+**BL-1 (MEDIA). `K_pair` y `P_core2` en NVS en claro.**
+`K_pair` (M5Paper) y `P_core2` (Core2) se guardan en NVS (`blekey/kpair`, `blekey/kpriv`)
+sin cifrar. Con acceso físico al flash se extraen. `K_pair` por sí solo no abre el vault
+(exige el PIN), pero junto al archivo `.k2f` de la SD permite fuerza bruta offline del PIN
+de 6 dígitos. Aceptable solo para prototipo; antes de fondos reales debe cifrarse en reposo.
+
+**BL-2 (MEDIA). ECDH sin *blinding* (recurrencia de S-1).**
+`derivePublicKey`/`deriveSharedKpair` llaman a `mbedtls_ecp_mul(..., NULL, NULL)` sin
+aleatorización. El ECDH maneja la privada de largo plazo `P_core2` en el Core2; un
+atacante físico (timing/power) podría extraerla. Misma clase que S-1.
+
+**BL-3 (MEDIA). Emparejamiento ECDH sin confirmación *out-of-band* (MITM).**
+El emparejamiento no autentica al dispositivo: un adversario activo que anuncie
+`M5Core2-Key` puede interponerse y retransmitir el ECDH. La confirmación física
+`AUTHORIZE` mitiga pero no elimina el ataque. Recomendación: mostrar una huella visual
+corta (p. ej. primeros bytes de `SHA256(K_pair)` o de las claves públicas) en **ambos**
+dispositivos durante el emparejamiento para que el usuario las compare.
+
+**BL-4 (BAJA). PIN de 6 dígitos sin *rate-limit* (recurrencia de S-6).**
+~20 bits de entropía; la pantalla de PIN no tiene bloqueo por reintentos (cada intento
+cuesta ~1 s por el PBKDF2 de 150.000). Recomendación: límite de intentos y re-auth BLE
+tras N fallos.
+
+**BL-5 (BAJA). La presencia del Core2 es una comprobación de *firmware*, no criptográfica.**
+`K_pair` reside en el M5Paper; con NVS + SD + PIN derivable, el vault se abre sin el Core2.
+La puerta BLE (no preguntar el PIN hasta verificar el Core2) es solo de firmware. Inherente
+al diseño (el M5Paper guarda `K_pair`); documentar.
+
+**BL-6 (INFO). La etiqueta del vault va en claro en el `.k2f`** (igual que en `.svm`).
+Privacidad, no secreto.
+
+**BL-7 (INFO). `enable()` borra el `.k2f` previo antes de escribir.**
+Si la escritura falla tras el `SD.remove`, se pierde la llave anterior (re-emparejar la
+regenera). Impacto menor.
+
+### 7.2 Verificado correcto
+
+- `K_2f = HMAC-SHA256(K_pair, PBKDF2(PIN, salt, 150k))` une ambos secretos: la fuerza
+  bruta del PIN exige `K_pair` (256 bits) y viceversa.
+- `K_pair = SHA256(x(ECDH) ‖ tag)` con separación de dominio.
+- Challenge aleatorio de 32 bytes **nuevo por intento** + comparación en tiempo constante
+  (`ctEqual`) → protección anti-replay.
+- `kPinIterations` es una **constante** (no se lee del archivo) → evita el DoS de S-3.
+- La clave maestra `M` se **envuelve** (no se deriva de la contraseña): contraseña y
+  Core2+PIN son independientes y la contraseña queda siempre como recuperación.
+- `wipe()` sobre buffers sensibles (`K_pin`, `kpair`, `pinBuffer`, `master` tras usarlo).
+- Tras migrar, se limpia el estado de sesión (`wipeSessionState()`, `sessionUnlocked=false`).
+- El Core2 nunca recibe la clave maestra, el PIN ni las semillas; solo participa en el
+  challenge/response.
+
+### 7.3 Conclusión
+
+No se encontró vulnerabilidad que rompa la criptografía. Los hallazgos son de
+endurecimiento: blinding ECC (BL-2), cifrado en reposo del NVS (BL-1), confirmación
+visual anti-MITM (BL-3) y rate-limit del PIN (BL-4). Ninguno es bloqueante para un
+prototipo "sin fondos reales".

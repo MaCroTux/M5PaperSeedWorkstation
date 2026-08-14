@@ -1,4 +1,8 @@
 .pio
 
 # Artefactos temporales del preprocesador de Arduino IDE
-*.ino 2.cpp
+*.ino *.cpp
+* 2.hpp
+
+# Snapshots de heap (debug)
+*.heapsnapshot

@@ -27,6 +27,10 @@ Documentación en español: [`README_ES.md`](README_ES.md).
 - **BIP39 passphrase** (changes every derived address).
 - **Individual vault**: one seed encrypted with its own password (`.vlt` file).
 - **Session vault**: several seeds encrypted under one master password.
+- **BLE key (M5Core2)**: physical cryptographic key that unlocks the session
+  vault via BLE **challenge/response** + a 6-digit **PIN**. The key is paired
+  over Bluetooth with ECDH (no typing); an existing password-only vault can be
+  **migrated** to "password + key".
 - **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
 - **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
@@ -153,6 +157,10 @@ summaries and clear SD metadata leave the device.
 | `ripemd160_min.hpp` | RIPEMD-160. |
 | `encrypted_seed_store.hpp` | Individual vault: AES-256-GCM + PBKDF2. |
 | `session_vault_store.hpp` | Session vault: master key + seeds. |
+| `ble_key.hpp` | Shared BLE-key crypto (HMAC-SHA256, ECDH secp256k1, NVS persistence). |
+| `ble_key_client.hpp/.cpp` | BLE client (M5Paper): scan → challenge → verify HMAC + pairing. |
+| `ble_key_server.hpp/.cpp` | BLE GATT server (M5Core2): challenge/response + pairing (ALLOW/DENY). |
+| `vault_key.hpp` | Core2+PIN second unlock factor: wraps the session master key (`.k2f`). |
 | `psbt_parser.hpp` | PSBT parser (BIP174) + transactions, binary/base64/hex/UR detection. |
 | `ur_psbt.hpp` | `UR:CRYPTO-PSBT` decoding (bytewords + CBOR). |
 | `tx_sign.hpp` | Segwit signing: RFC6979, BIP143 sighash, finalization & serialization. |
@@ -196,6 +204,10 @@ Reliable flashing over marginal USB: `esptool.py --no-stub --baud 115200 write_f
   tampering of salt, nonce and metadata.
 - **Key derivation**: PBKDF2-HMAC-SHA256 with **600,000 iterations** and a random
   16-byte salt per file (hardware RNG `esp_fill_random`).
+- **BLE key (Core2 + PIN)**: the session vault master key is additionally wrapped
+  under `K_2f = HMAC-SHA256(K_pair, PBKDF2(PIN))`, where `K_pair` is a 256-bit
+  secret established by ECDH during pairing. The password path always remains
+  available as recovery.
 - **Signing**: ECDSA secp256k1 with **deterministic nonce RFC6979** + **low-S**;
   **BIP143** sighash (segwit v0). BIP32 path verified via master fingerprint.
 - **Memory wiping**: `wipe()` (volatile) over keys, plaintext, seed buffers, etc.
@@ -213,7 +225,35 @@ BLE client (`qr_ble_client.hpp/.cpp`) to receive a QR from a Raspberry Pi
 
 ---
 
-## 9. Status / backlog
+## 9. BLE key (M5Core2): password + key
+
+A **M5Core2** acts as a physical cryptographic key that unlocks the **session
+vault** (`.svm`), used as a second factor in addition to a 6-digit PIN.
+
+### Pairing (once, no typing)
+
+1. Core2: menu → `LLAVE BLE` (generates its long-term identity the first time).
+2. M5Paper: `AJUSTES → BLE KEY → EMPAREJAR M5CORE2`.
+3. The Core2 shows `PAIR REQUEST` → press `AUTHORIZE`.
+4. Both derive a shared secret `K_pair` via **ECDH over secp256k1**; it never
+   travels over the air.
+
+### Enabling / migrating a vault
+
+- New vault: unlock by password → `ACTIVAR CORE2+PIN` (session menu).
+- Existing password-only vault: `AJUSTES → BLE KEY → MIGRAR A PASS+LLAVE` →
+  select the `.svm` → enter its password → set the PIN. The password path stays
+  available as recovery.
+
+### Unlocking
+
+`VAULT DE SESION → DESBLOQUEAR CON CORE2` → the M5Paper verifies the Core2 via a
+fresh challenge/response → enter the PIN → vault opens. The Core2 never sees the
+master key, the PIN or the seeds.
+
+---
+
+## 10. Status / backlog
 
 - [x] WiFi AP reception (captive portal + connection QR) with 3 modes.
 - [x] USB serial reception (`M5PSBT` protocol + SHA256).
@@ -222,11 +262,12 @@ BLE client (`qr_ble_client.hpp/.cpp`) to receive a QR from a Raspberry Pi
 - [x] SD-persisted settings (language, lock, derivation, radio).
 - [x] Transaction history (save and re-sign received PSBTs).
 - [x] Full EN/ES translation.
+- [x] BLE key (M5Core2) + PIN as a second unlock method for the session vault.
 - [ ] Base32 and zlib in BBQr (future optimization).
 
 ---
 
-## 10. Usage warning
+## 11. Usage warning
 
 This firmware handles private keys. Do not use with real funds until a formal
 security review and exhaustive physical testing are completed.

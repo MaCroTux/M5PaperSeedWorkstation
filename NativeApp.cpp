@@ -17,6 +17,9 @@
 #include "bbqr.hpp"
 #include "lang.hpp"
 #include "device_settings.hpp"
+#include "ble_key.hpp"
+#include "ble_key_client.hpp"
+#include "vault_key.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -40,7 +43,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
                      animated_qr, settings, settings_lang, settings_timeout,
                      settings_clean, settings_derivation, settings_radio,
-                     multisig_confirm, tx_history };
+                     multisig_confirm, tx_history, ble_key_menu, ble_key_test,
+                     twofa_pin_set, twofa_list, twofa_migrate_list, twofa_pin_unlock };
 
 struct Rect {
   int x, y, w, h;
@@ -131,6 +135,8 @@ Screen securityWarningReturn = Screen::review;
 Screen securityWarningTarget = Screen::review;
 void requestSecurity(Screen target, Screen returnTo);
 void drawScreen();
+void beginTwoFaEnable();
+void wipeSessionState();
 uint8_t focusIndex = 0;
 uint8_t targetWords = 12;
 uint8_t wordCount = 0;
@@ -196,7 +202,8 @@ bool deleteFailed = false;
 bool pendingDeleteSession = false;
 bool unlockConfirmIsSession = false;
 char pendingDeletePath[64] = {};
-enum class VaultFlow { individual, session_create, session_unlock, session_save_seed };
+enum class VaultFlow { individual, session_create, session_unlock, session_save_seed,
+                      twofa_migrate };
 VaultFlow vaultFlow = VaultFlow::individual;
 enum class NewSeedIntent { none, to_vault, ram_only };
 NewSeedIntent newSeedIntent = NewSeedIntent::none;
@@ -204,6 +211,15 @@ bool sessionUnlocked = false;
 uint8_t sessionMasterKey[32] = {};
 uint8_t sessionVaultId[4] = {};
 char sessionLabel[17] = {};
+char pinBuffer[7] = {};
+char pinFirst[7] = {};
+bool pinConfirmPhase = false;
+bool pinMismatch = false;
+char twoFaFiles[6][64] = {};
+uint8_t twoFaCount = 0;
+char selectedTwoFaPath[64] = {};
+bool twoFaUnlockFlow = false;
+bool twoFaMigrating = false;
 char sessionMetaPath[64] = {};
 char sessionMetaFiles[6][64] = {};
 uint8_t sessionMetaCount = 0;
@@ -217,6 +233,8 @@ Screen sessionLockReturn = Screen::menu;
 device_settings::Settings gSettings = device_settings::defaults();
 Screen screensaverReturn = Screen::menu;
 bool screensaverHardLock = false;
+ble_key::BleKeyClient keyClient;
+ble_key::BleKeyClient::Phase lastKeyPhase = ble_key::BleKeyClient::Phase::Idle;
 constexpr uint8_t kMaxLoadedSeeds = 6;
 struct LoadedSeed {
   uint16_t indices[24];
@@ -1433,7 +1451,8 @@ void openTxHistory() {
 }
 
 void drawVaultUnlock() {
-  const char* name = vaultFlow == VaultFlow::session_unlock ?
+  const char* name = (vaultFlow == VaultFlow::session_unlock ||
+                      vaultFlow == VaultFlow::twofa_migrate) ?
       sessionMetaFiles[selectedSessionFile] + 1 : vaultDisplayName(selectedVaultFile);
   blankPage(); title("DESBLOQUEAR VAULT", name);
   const size_t length = strlen(vaultPassword);
@@ -1584,13 +1603,17 @@ void drawSessionMenu() {
   if (!sessionUnlocked) {
     buttonOn(page, kMenu[0], "CREAR VAULT", true, focusIndex == 0, Icon::plus);
     buttonOn(page, kMenu[1], "DESBLOQUEAR VAULT", true, focusIndex == 1, Icon::unlock);
-    buttonOn(page, kMenu[2], "VOLVER", true, focusIndex == 2);
+    buttonOn(page, kMenu[2], "DESBLOQUEAR CON CORE2", true, focusIndex == 2, Icon::key);
+    buttonOn(page, kMenu[3], "VOLVER", true, focusIndex == 3);
   } else {
     textStyle(page, 2); page.setCursor(25, 155);
     page.printf(lang::tr("Sesion activa: %s"), sessionLabel);
+    char p[64]; vault_2fa::buildPath(sessionVaultId, p, sizeof(p));
+    const char* twofa = SD.exists(p) ? "QUITAR CORE2+PIN" : "ACTIVAR CORE2+PIN";
     buttonOn(page, kMenu[0], "CARGAR SEMILLA", true, focusIndex == 0, Icon::folder);
     buttonOn(page, kMenu[1], "BLOQUEAR VAULT", true, focusIndex == 1, Icon::lock);
-    buttonOn(page, kMenu[2], "VOLVER", true, focusIndex == 2);
+    buttonOn(page, kMenu[2], twofa, true, focusIndex == 2, Icon::key);
+    buttonOn(page, kMenu[3], "VOLVER", true, focusIndex == 3);
   }
   fullRefresh();
 }
@@ -1650,7 +1673,7 @@ void drawDeleteConfirm() {
   fullRefresh();
 }
 
-void lockSessionVault() {
+void wipeSessionState() {
   if (entropySourceActive) { bootloader_random_disable(); entropySourceActive = false; }
   encrypted_seed_store::wipe(sessionMasterKey, sizeof(sessionMasterKey));
   encrypted_seed_store::wipe(sessionVaultId, sizeof(sessionVaultId));
@@ -1661,6 +1684,10 @@ void lockSessionVault() {
   memset(sessionSeedFiles, 0, sizeof(sessionSeedFiles));
   sessionMetaCount = sessionSeedCount = 0;
   sessionUnlocked = false; clearPassphrase(); discardActiveSeed();
+}
+
+void lockSessionVault() {
+  wipeSessionState();
   M5.EPD.Clear(true); screen = Screen::menu; focusIndex = 0; drawMenu();
 }
 
@@ -1708,6 +1735,10 @@ void unlockSessionVault() {
   strncpy(sessionLabel, unlockedLabel, sizeof(sessionLabel) - 1);
   strncpy(sessionMetaPath, sessionMetaFiles[selectedSessionFile], sizeof(sessionMetaPath) - 1);
   sessionUnlocked = true; lastUserActivity = millis();
+  if (vaultFlow == VaultFlow::twofa_migrate) {
+    beginTwoFaEnable();
+    return;
+  }
   const uint8_t loaded = loadAllSessionSeeds();
   Serial.printf("Semillas cargadas en RAM: %u\n", loaded);
   screen = Screen::active_seed; focusIndex = 0; drawActiveSeed();
@@ -3345,6 +3376,17 @@ String readSvmLabel(const char* path) {
   return String(label);
 }
 
+bool readSvmVaultId(const char* path, uint8_t vaultId[4]) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
+  uint8_t h[64] = {};
+  const bool ok = f.read(h, 64) == 64 && memcmp(h, "M5SM", 4) == 0 && h[4] == 2;
+  f.close();
+  if (!ok) return false;
+  memcpy(vaultId, h + 38, 4);
+  return true;
+}
+
 void handleSerialTime(const String& arg) {
   const long t = arg.toInt();
   if (t <= 0) { Serial.println("M5ERR bad_cmd"); Serial.flush(); return; }
@@ -3974,7 +4016,8 @@ void drawSettings() {
   buttonOn(page, kMenu[2], settingsCleanLabel().c_str(), true, focusIndex == 2, Icon::trash);
   buttonOn(page, kMenu[3], settingsDerivLabel().c_str(), true, focusIndex == 3, Icon::key);
   buttonOn(page, kMenu[4], lang::tr("Estado de la radio"), true, focusIndex == 4, Icon::wifi);
-  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 5);
+  buttonOn(page, kMenu[5], "BLE KEY", true, focusIndex == 5, Icon::shield);
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 6);
   fullRefresh();
 }
 
@@ -4060,6 +4103,257 @@ void drawSettingsRadio() {
   fullRefresh();
 }
 
+// ---- BLE key (llave criptografica) ----
+
+void drawBleKeyMenu() {
+  blankPage();
+  title("BLE KEY", "Llave fisica M5Core2");
+  const bool has = ble_key::hasStoredKey();
+  buttonOn(page, kMenu[0], "EMPAREJAR M5CORE2", true, focusIndex == 0, Icon::key);
+  buttonOn(page, kMenu[1], "PROBAR LLAVE", has, focusIndex == 1, Icon::wifi);
+  buttonOn(page, kMenu[2], "MIGRAR A PASS+LLAVE", has, focusIndex == 2, Icon::folder);
+  buttonOn(page, kMenu[3], "ELIMINAR LLAVE", has, focusIndex == 3, Icon::trash);
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 4);
+  fullRefresh();
+}
+
+void drawBleKeyTest() {
+  blankPage();
+  title(keyClient.pairing() ? "EMPAREJAR" : "PROBAR LLAVE", keyClient.statusText());
+  const auto p = keyClient.phase();
+  if (p == ble_key::BleKeyClient::Phase::Verified ||
+      p == ble_key::BleKeyClient::Phase::Paired) {
+    buttonOn(page, kAction, lang::tr("CONTINUAR"), true, focusIndex == 0, Icon::check);
+  } else if (p == ble_key::BleKeyClient::Phase::Denied ||
+             p == ble_key::BleKeyClient::Phase::Failed) {
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 0);
+    buttonOn(page, kAction, lang::tr("REINTENTAR"), true, focusIndex == 1, Icon::reset);
+  } else {
+    buttonOn(page, kAction, lang::tr("CANCELAR"), true, focusIndex == 0, Icon::x);
+  }
+  fullRefresh();
+}
+
+void exitBleKeyTest() {
+  keyClient.clear();
+  twoFaUnlockFlow = false;
+  screen = Screen::ble_key_menu; focusIndex = 0; drawScreen();
+}
+
+void startBleKeyTest() {
+  keyClient.start();
+  lastKeyPhase = ble_key::BleKeyClient::Phase::Idle;
+  screen = Screen::ble_key_test; focusIndex = 0; drawScreen();
+}
+
+void startBleKeyPairing() {
+  keyClient.startPairing();
+  lastKeyPhase = ble_key::BleKeyClient::Phase::Idle;
+  screen = Screen::ble_key_test; focusIndex = 0; drawScreen();
+}
+
+void retryBleKeyTest() {
+  keyClient.clear();
+  if (keyClient.pairing()) startBleKeyPairing();
+  else startBleKeyTest();
+}
+
+// ---- Core2 + PIN (segundo metodo de desbloqueo del Vault) ----
+
+void scanTwoFaFiles() {
+  twoFaCount = 0; memset(twoFaFiles, 0, sizeof(twoFaFiles));
+  if (SD.cardType() == CARD_NONE) return;
+  File root = SD.open("/");
+  if (!root || !root.isDirectory()) { if (root) root.close(); return; }
+  File entry = root.openNextFile();
+  while (entry && twoFaCount < 6) {
+    String name = entry.name();
+    if (!entry.isDirectory() && name.endsWith(".k2f")) {
+      if (!name.startsWith("/")) name = "/" + name;
+      name.toCharArray(twoFaFiles[twoFaCount], sizeof(twoFaFiles[0]));
+      ++twoFaCount;
+    }
+    entry.close(); entry = root.openNextFile();
+  }
+  if (entry) entry.close(); root.close();
+}
+
+void drawTwoFaPinSet() {
+  blankPage();
+  title("CORE2 + PIN", pinConfirmPhase ? "Repite el PIN" : "Crea un PIN de 6 digitos");
+  textStyle(page, 2); page.setCursor(20, 155);
+  page.println(pinMismatch ? lang::tr("NO COINCIDEN") :
+               lang::tr("Este PIN se usa junto a la llave Core2."));
+  page.drawRoundRect(20, 205, 500, 52, 8, kBlack);
+  page.setCursor(35, 214);
+  for (size_t i = 0; i < strlen(pinBuffer); ++i) page.print('*');
+  for (uint8_t i = 0; i < 10; ++i)
+    buttonOn(page, kDigitKey[i], String(i == 9 ? 0 : i + 1).c_str());
+  buttonOn(page, kDigitDelete, "BORRAR", pinBuffer[0], false, Icon::back);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, pinConfirmPhase ? "ACTIVAR" : "CONTINUAR",
+           strlen(pinBuffer) == 6, focusIndex == 1, Icon::key);
+  fullRefresh();
+}
+
+void drawTwoFaPinUnlock() {
+  blankPage();
+  title("CORE2 + PIN", "Introduce el PIN del Vault");
+  textStyle(page, 2); page.setCursor(20, 155);
+  page.println(pinMismatch ? lang::tr("PIN INCORRECTO") : lang::tr("PIN de 6 digitos"));
+  page.drawRoundRect(20, 205, 500, 52, 8, kBlack);
+  page.setCursor(35, 214);
+  for (size_t i = 0; i < strlen(pinBuffer); ++i) page.print('*');
+  for (uint8_t i = 0; i < 10; ++i)
+    buttonOn(page, kDigitKey[i], String(i == 9 ? 0 : i + 1).c_str());
+  buttonOn(page, kDigitDelete, "BORRAR", pinBuffer[0], false, Icon::back);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+  buttonOn(page, kAction, "DESBLOQUEAR", strlen(pinBuffer) == 6, focusIndex == 1, Icon::unlock);
+  fullRefresh();
+}
+
+void drawTwoFaPin() {
+  if (screen == Screen::twofa_pin_unlock) drawTwoFaPinUnlock();
+  else drawTwoFaPinSet();
+}
+
+void drawTwoFaList() {
+  blankPage();
+  title("CORE2 + PIN", "Selecciona el Vault que quieres abrir");
+  if (SD.cardType() == CARD_NONE) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
+  } else if (!twoFaCount) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString("NO HAY VAULTS CON LLAVE", 270, 350); page.setTextDatum(TL_DATUM);
+  } else {
+    for (uint8_t i = 0; i < twoFaCount; ++i) {
+      char label[17] = {};
+      vault_2fa::readLabel(twoFaFiles[i], label);
+      buttonOn(page, kVaultFiles[i], label[0] ? label : twoFaFiles[i] + 1,
+               true, focusIndex == i);
+    }
+  }
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == twoFaCount);
+  fullRefresh();
+}
+
+void openTwoFaList() {
+  scanTwoFaFiles();
+  screen = Screen::twofa_list; focusIndex = 0; drawTwoFaList();
+}
+
+void drawTwoFaMigrateList() {
+  scanSessionMeta();
+  blankPage();
+  title("MIGRAR A PASS+LLAVE", "Selecciona el Vault que quieres migrar");
+  if (SD.cardType() == CARD_NONE) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
+  } else if (!sessionMetaCount) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString("NO HAY VAULTS DE SESION", 270, 350); page.setTextDatum(TL_DATUM);
+  } else {
+    for (uint8_t i = 0; i < sessionMetaCount; ++i) {
+      bool hasKey = false;
+      uint8_t vaultId[4] = {};
+      if (readSvmVaultId(sessionMetaFiles[i], vaultId)) {
+        char p[64]; vault_2fa::buildPath(vaultId, p, sizeof(p));
+        hasKey = SD.exists(p);
+      }
+      String label = readSvmLabel(sessionMetaFiles[i]);
+      if (hasKey) label += "  (llave)";
+      buttonOn(page, kVaultFiles[i], label.c_str(), true, focusIndex == i);
+    }
+  }
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == sessionMetaCount);
+  fullRefresh();
+}
+
+void openTwoFaMigrateList() {
+  twoFaMigrating = false;
+  screen = Screen::twofa_migrate_list; focusIndex = 0; drawTwoFaMigrateList();
+}
+
+void beginTwoFaEnable() {
+  memset(pinBuffer, 0, sizeof(pinBuffer));
+  memset(pinFirst, 0, sizeof(pinFirst));
+  pinConfirmPhase = false; pinMismatch = false;
+  screen = Screen::twofa_pin_set; focusIndex = 0; drawScreen();
+}
+
+void enableTwoFa() {
+  uint8_t kpair[ble_key::kKeySize];
+  if (!ble_key::loadStoredKey(kpair)) {
+    showToast("Sin llave emparejada");
+    if (twoFaMigrating) { twoFaMigrating = false; wipeSessionState(); screen = Screen::ble_key_menu; focusIndex = 2; drawScreen(); }
+    else { screen = Screen::session_menu; focusIndex = 2; drawScreen(); }
+    return;
+  }
+  char path[64]; vault_2fa::buildPath(sessionVaultId, path, sizeof(path));
+  blankPage(); title("CORE2 + PIN", "Guardando llave...");
+  fullRefresh(UPDATE_MODE_DU4);
+  const auto result = vault_2fa::enable(path, sessionMasterKey, sessionVaultId,
+      sessionLabel, kpair, pinBuffer);
+  ble_key::wipe(kpair, sizeof(kpair));
+  memset(pinBuffer, 0, sizeof(pinBuffer)); memset(pinFirst, 0, sizeof(pinFirst));
+  pinConfirmPhase = false; pinMismatch = false;
+  if (result == encrypted_seed_store::Result::ok) showToast("Llave activada");
+  else showToast("ERROR AL GUARDAR");
+  if (twoFaMigrating) {
+    twoFaMigrating = false;
+    wipeSessionState();
+    screen = Screen::ble_key_menu; focusIndex = 2; drawScreen();
+  } else {
+    screen = Screen::session_menu; focusIndex = 2; drawScreen();
+  }
+}
+
+void beginTwoFaUnlock(uint8_t selected) {
+  strncpy(selectedTwoFaPath, twoFaFiles[selected], sizeof(selectedTwoFaPath) - 1);
+  twoFaUnlockFlow = true;
+  startBleKeyTest();
+}
+
+void unlockWithTwoFa() {
+  uint8_t kpair[ble_key::kKeySize];
+  if (!ble_key::loadStoredKey(kpair)) {
+    showToast("Sin llave emparejada");
+    twoFaUnlockFlow = false;
+    screen = Screen::session_menu; focusIndex = 2; drawScreen();
+    return;
+  }
+  uint8_t master[32] = {}, vaultId[4] = {}; char label[17] = {};
+  blankPage(); title("CORE2 + PIN", "Desbloqueando...");
+  warningIcon(page, 270, 205);
+  textStyle(page, 2); page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr("Derivando la clave (PIN + llave)"), 270, 365);
+  page.setTextDatum(TL_DATUM);
+  fullRefresh(UPDATE_MODE_DU4);
+  drawProgressBar(340, 0); progressPercent = 0;
+  const auto result = vault_2fa::unlock(selectedTwoFaPath, kpair, pinBuffer,
+      master, vaultId, label, storeProgress);
+  ble_key::wipe(kpair, sizeof(kpair));
+  memset(pinBuffer, 0, sizeof(pinBuffer)); pinMismatch = false;
+  if (result != encrypted_seed_store::Result::ok) {
+    twoFaUnlockFlow = false;
+    pinMismatch = true;
+    screen = Screen::twofa_pin_unlock; focusIndex = 0; drawScreen();
+    return;
+  }
+  twoFaUnlockFlow = false;
+  vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
+  memcpy(sessionMasterKey, master, 32);
+  memcpy(sessionVaultId, vaultId, 4);
+  strncpy(sessionLabel, label, sizeof(sessionLabel) - 1);
+  strncpy(sessionMetaPath, selectedTwoFaPath, sizeof(sessionMetaPath) - 1);
+  encrypted_seed_store::wipe(master, sizeof(master));
+  sessionUnlocked = true; lastUserActivity = millis();
+  const uint8_t loaded = loadAllSessionSeeds();
+  Serial.printf("Semillas cargadas en RAM: %u\n", loaded);
+  screen = Screen::active_seed; focusIndex = 0; drawActiveSeed();
+}
+
 void drawScreen() {
   switch (screen) {
     case Screen::menu: drawMenu(); break;
@@ -4115,6 +4409,12 @@ void drawScreen() {
     case Screen::settings_radio: drawSettingsRadio(); break;
     case Screen::multisig_confirm: drawMultisigConfirm(); break;
     case Screen::tx_history: drawTxHistory(); break;
+    case Screen::ble_key_menu: drawBleKeyMenu(); break;
+    case Screen::ble_key_test: drawBleKeyTest(); break;
+    case Screen::twofa_pin_set: drawTwoFaPinSet(); break;
+    case Screen::twofa_pin_unlock: drawTwoFaPinUnlock(); break;
+    case Screen::twofa_list: drawTwoFaList(); break;
+    case Screen::twofa_migrate_list: drawTwoFaMigrateList(); break;
   }
 }
 
@@ -4267,10 +4567,14 @@ void updateFocusButton(uint8_t index) {
     case Screen::vault_loaded:
       updateButton(kAction, "ABRIR SEMILLA", true, true, Icon::folder); break;
     case Screen::session_menu: {
-      const char* labelsLocked[] = {"CREAR VAULT", "DESBLOQUEAR VAULT", "VOLVER"};
-      const char* labelsOpen[] = {"CARGAR SEMILLA", "BLOQUEAR VAULT", "VOLVER"};
-      const Icon iconsLocked[] = {Icon::plus, Icon::unlock, Icon::none};
-      const Icon iconsOpen[] = {Icon::folder, Icon::lock, Icon::none};
+      const char* labelsLocked[] = {"CREAR VAULT", "DESBLOQUEAR VAULT",
+                                    "DESBLOQUEAR CON CORE2", "VOLVER"};
+      const char* labelsOpen[] = {"CARGAR SEMILLA", "BLOQUEAR VAULT", "CORE2+PIN", "VOLVER"};
+      const Icon iconsLocked[] = {Icon::plus, Icon::unlock, Icon::key, Icon::none};
+      const Icon iconsOpen[] = {Icon::folder, Icon::lock, Icon::key, Icon::none};
+      char p[64]; vault_2fa::buildPath(sessionVaultId, p, sizeof(p));
+      const char* twofa = SD.exists(p) ? "QUITAR CORE2+PIN" : "ACTIVAR CORE2+PIN";
+      if (sessionUnlocked && index == 2) labelsOpen[2] = twofa;
       updateButton(kMenu[index], sessionUnlocked ? labelsOpen[index] : labelsLocked[index],
           true, index == focusIndex,
           sessionUnlocked ? iconsOpen[index] : iconsLocked[index]); break;
@@ -4382,6 +4686,7 @@ void updateFocusButton(uint8_t index) {
       else if (index == 2) updateButton(kMenu[2], settingsCleanLabel().c_str(), true, index == focusIndex, Icon::trash);
       else if (index == 3) updateButton(kMenu[3], settingsDerivLabel().c_str(), true, index == focusIndex, Icon::key);
       else if (index == 4) updateButton(kMenu[4], "Estado de la radio", true, index == focusIndex, Icon::wifi);
+      else if (index == 5) updateButton(kMenu[5], "BLE KEY", true, index == focusIndex, Icon::shield);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     }
@@ -4438,6 +4743,64 @@ void updateFocusButton(uint8_t index) {
     case Screen::animated_qr:
       updateButton(kAction, "VOLVER", true, index == focusIndex);
       break;
+    case Screen::ble_key_menu: {
+      const bool has = ble_key::hasStoredKey();
+      if (index == 0) updateButton(kMenu[0], "EMPAREJAR M5CORE2", true,
+                                   index == focusIndex, Icon::key);
+      else if (index == 1) updateButton(kMenu[1], "PROBAR LLAVE", has,
+                                        index == focusIndex, Icon::wifi);
+      else if (index == 2) updateButton(kMenu[2], "MIGRAR A PASS+LLAVE", has,
+                                        index == focusIndex, Icon::folder);
+      else if (index == 3) updateButton(kMenu[3], "ELIMINAR LLAVE", has,
+                                        index == focusIndex, Icon::trash);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    }
+    case Screen::ble_key_test: {
+      const auto p = keyClient.phase();
+      if (p == ble_key::BleKeyClient::Phase::Verified ||
+          p == ble_key::BleKeyClient::Phase::Paired) {
+        updateButton(kAction, "CONTINUAR", true, index == focusIndex, Icon::check);
+      } else if (p == ble_key::BleKeyClient::Phase::Denied ||
+                 p == ble_key::BleKeyClient::Phase::Failed) {
+        if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+        else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
+      } else {
+        updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
+      }
+      break;
+    }
+    case Screen::twofa_pin_set:
+      updateButton(index == 0 ? kBack : kAction,
+          index == 0 ? "CANCELAR" : (pinConfirmPhase ? "ACTIVAR" : "CONTINUAR"),
+          index == 0 || strlen(pinBuffer) == 6, index == focusIndex,
+          index == 0 ? Icon::none : Icon::key); break;
+    case Screen::twofa_pin_unlock:
+      updateButton(index == 0 ? kBack : kAction,
+          index == 0 ? "VOLVER" : "DESBLOQUEAR",
+          index == 0 || strlen(pinBuffer) == 6, index == focusIndex,
+          index == 0 ? Icon::none : Icon::unlock); break;
+    case Screen::twofa_list:
+      if (index < twoFaCount) {
+        char label[17] = {};
+        vault_2fa::readLabel(twoFaFiles[index], label);
+        updateButton(kVaultFiles[index], label[0] ? label : twoFaFiles[index] + 1,
+                     true, index == focusIndex);
+      } else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::twofa_migrate_list:
+      if (index < sessionMetaCount) {
+        bool hasKey = false;
+        uint8_t vaultId[4] = {};
+        if (readSvmVaultId(sessionMetaFiles[index], vaultId)) {
+          char p[64]; vault_2fa::buildPath(vaultId, p, sizeof(p));
+          hasKey = SD.exists(p);
+        }
+        String label = readSvmLabel(sessionMetaFiles[index]);
+        if (hasKey) label += "  (llave)";
+        updateButton(kVaultFiles[index], label.c_str(), true, index == focusIndex);
+      } else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
   }
 }
 
@@ -4461,7 +4824,7 @@ void moveFocus(int direction) {
     else count = 1;
   }
   else if (screen == Screen::wifi_mode) count = 4;
-  else if (screen == Screen::settings) count = 6;
+  else if (screen == Screen::settings) count = 7;
   else if (screen == Screen::settings_lang) count = 3;
   else if (screen == Screen::settings_timeout) count = device_settings::kTimeoutOptionCount + 1;
   else if (screen == Screen::settings_clean) count = device_settings::kCleanOptionCount + 1;
@@ -4469,13 +4832,22 @@ void moveFocus(int direction) {
   else if (screen == Screen::settings_radio) count = 1;
   else if (screen == Screen::multisig_confirm) count = 2;
   else if (screen == Screen::tx_history) count = txFileCount + 1;
+  else if (screen == Screen::ble_key_menu) count = 5;
+  else if (screen == Screen::ble_key_test) {
+    const auto p = keyClient.phase();
+    count = (p == ble_key::BleKeyClient::Phase::Denied ||
+             p == ble_key::BleKeyClient::Phase::Failed) ? 2 : 1;
+  }
+  else if (screen == Screen::twofa_pin_set || screen == Screen::twofa_pin_unlock) count = 2;
+  else if (screen == Screen::twofa_list) count = twoFaCount + 1;
+  else if (screen == Screen::twofa_migrate_list) count = sessionMetaCount + 1;
   else if (screen == Screen::signed_tx) count = 1;
   else if (screen == Screen::signed_mode) count = 3;
   else if (screen == Screen::animated_qr) count = 1;
   else if (screen == Screen::tx_review) count = fingerprintValid ? 3 : 2;
   else if (screen == Screen::utxo_detail) count = 1;
   else if (screen == Screen::vault_list) count = vaultFileCount + 2;
-  else if (screen == Screen::session_menu) count = 3;
+  else if (screen == Screen::session_menu) count = 4;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
   else if (screen == Screen::session_seed_list) count = sessionDeleteMode ? sessionSeedCount + 2 : sessionSeedCount + 5;
   else if (screen == Screen::length || screen == Screen::seedqr) count = 3;
@@ -4811,9 +5183,11 @@ void click(int x, int y) {
       vaultPassword[length - 1] = '\0'; updateVaultPasswordDynamic(length == 1);
     } else if ((kAdd.contains(x, y) || kAction.contains(x, y)) && length) {
       if (fingerprintValid) {
-        unlockConfirmIsSession = (vaultFlow == VaultFlow::session_unlock);
+        unlockConfirmIsSession = (vaultFlow == VaultFlow::session_unlock ||
+                                  vaultFlow == VaultFlow::twofa_migrate);
         screen = Screen::unlock_confirm; focusIndex = 0; drawScreen();
-      } else if (vaultFlow == VaultFlow::session_unlock) unlockSessionVault();
+      } else if (vaultFlow == VaultFlow::session_unlock ||
+                 vaultFlow == VaultFlow::twofa_migrate) unlockSessionVault();
       else loadSelectedVault();
     } else if (kVaultReveal.contains(x, y) && length) {
       vaultRevealUntil = millis() + 3000; updateVaultPasswordDynamic();
@@ -4822,6 +5196,9 @@ void click(int x, int y) {
       encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
       if (vaultFlow == VaultFlow::session_unlock) {
         screen = Screen::session_meta_list; focusIndex = selectedSessionFile;
+      } else if (vaultFlow == VaultFlow::twofa_migrate) {
+        twoFaMigrating = false;
+        screen = Screen::twofa_migrate_list; focusIndex = selectedSessionFile;
       } else { screen = Screen::vault_list; focusIndex = selectedVaultFile; }
       drawScreen();
     }
@@ -4865,11 +5242,71 @@ void click(int x, int y) {
     if (!sessionUnlocked) {
       if (kMenu[0].contains(x, y)) beginSessionCreate();
       else if (kMenu[1].contains(x, y)) { scanSessionMeta(); screen = Screen::session_meta_list; focusIndex = 0; drawScreen(); }
-      else if (kMenu[2].contains(x, y)) { screen = Screen::menu; focusIndex = 2; drawScreen(); }
+      else if (kMenu[2].contains(x, y)) openTwoFaList();
+      else if (kMenu[3].contains(x, y)) { screen = Screen::menu; focusIndex = 2; drawScreen(); }
     } else {
       if (kMenu[0].contains(x, y)) { sessionDeleteMode = false; scanSessionSeeds(); screen = Screen::session_seed_list; focusIndex = 0; drawScreen(); }
       else if (kMenu[1].contains(x, y)) lockSessionVault();
-      else if (kMenu[2].contains(x, y)) { screen = Screen::menu; focusIndex = 2; drawScreen(); }
+      else if (kMenu[2].contains(x, y)) {
+        char p[64]; vault_2fa::buildPath(sessionVaultId, p, sizeof(p));
+        if (SD.exists(p)) { SD.remove(p); showToast("Llave quitada"); drawSessionMenu(); }
+        else beginTwoFaEnable();
+      }
+      else if (kMenu[3].contains(x, y)) { screen = Screen::menu; focusIndex = 2; drawScreen(); }
+    }
+  } else if (screen == Screen::twofa_list) {
+    for (uint8_t i = 0; i < twoFaCount; ++i) if (kVaultFiles[i].contains(x, y)) {
+      beginTwoFaUnlock(i); return;
+    }
+    if (kBack.contains(x, y)) { twoFaUnlockFlow = false; screen = Screen::session_menu; focusIndex = 2; drawScreen(); }
+  } else if (screen == Screen::twofa_migrate_list) {
+    for (uint8_t i = 0; i < sessionMetaCount; ++i) if (kVaultFiles[i].contains(x, y)) {
+      selectedSessionFile = i;
+      vaultFlow = VaultFlow::twofa_migrate;
+      twoFaMigrating = true;
+      encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
+      vaultUnlockError = false; vaultRevealUntil = 0;
+      screen = Screen::vault_unlock; focusIndex = 0; drawScreen();
+      return;
+    }
+    if (kBack.contains(x, y)) { twoFaMigrating = false; screen = Screen::ble_key_menu; focusIndex = 2; drawScreen(); }
+  } else if (screen == Screen::twofa_pin_set || screen == Screen::twofa_pin_unlock) {
+    for (uint8_t i = 0; i < 10; ++i) if (kDigitKey[i].contains(x, y)) {
+      const char digit = i == 9 ? '0' : static_cast<char>('1' + i);
+      const size_t len = strlen(pinBuffer);
+      if (len < 6) { pinBuffer[len] = digit; pinBuffer[len + 1] = '\0'; drawTwoFaPin(); }
+      return;
+    }
+    if (kDigitDelete.contains(x, y) && pinBuffer[0]) {
+      pinBuffer[strlen(pinBuffer) - 1] = '\0'; drawTwoFaPin(); return;
+    }
+    if (kBack.contains(x, y)) {
+      memset(pinBuffer, 0, sizeof(pinBuffer)); memset(pinFirst, 0, sizeof(pinFirst));
+      pinConfirmPhase = false; pinMismatch = false; twoFaUnlockFlow = false;
+      if (twoFaMigrating) {
+        twoFaMigrating = false; wipeSessionState();
+        screen = Screen::ble_key_menu; focusIndex = 2; drawScreen();
+      } else {
+        screen = Screen::session_menu; focusIndex = 2; drawScreen();
+      }
+      return;
+    }
+    if (kAction.contains(x, y) && strlen(pinBuffer) == 6) {
+      if (screen == Screen::twofa_pin_set) {
+        if (!pinConfirmPhase) {
+          strncpy(pinFirst, pinBuffer, sizeof(pinFirst) - 1);
+          memset(pinBuffer, 0, sizeof(pinBuffer));
+          pinConfirmPhase = true; pinMismatch = false; drawTwoFaPin();
+        } else if (!strcmp(pinBuffer, pinFirst)) {
+          enableTwoFa();
+        } else {
+          pinMismatch = true; memset(pinFirst, 0, sizeof(pinFirst));
+          pinConfirmPhase = false; drawTwoFaPin();
+        }
+      } else {
+        unlockWithTwoFa();
+      }
+      return;
     }
   } else if (screen == Screen::session_meta_list) {
     for (uint8_t i = 0; i < sessionMetaCount; ++i) if (kVaultFiles[i].contains(x, y)) {
@@ -5026,6 +5463,7 @@ void click(int x, int y) {
     else if (kMenu[2].contains(x, y)) { screen = Screen::settings_clean; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::settings_derivation; focusIndex = 0; drawScreen(); }
     else if (kMenu[4].contains(x, y)) { screen = Screen::settings_radio; focusIndex = 0; drawScreen(); }
+    else if (kMenu[5].contains(x, y)) { screen = Screen::ble_key_menu; focusIndex = 0; drawScreen(); }
     else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 5; drawScreen(); }
   } else if (screen == Screen::settings_lang) {
     if (kMenu[0].contains(x, y)) { gSettings.language = 0; lang::set(lang::Lang::EN); saveSettingsNow(); drawSettingsLang(); }
@@ -5059,6 +5497,38 @@ void click(int x, int y) {
       }
     }
     if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 4; drawScreen(); }
+  } else if (screen == Screen::ble_key_menu) {
+    if (kMenu[0].contains(x, y)) { startBleKeyPairing(); }
+    else if (kMenu[1].contains(x, y) && ble_key::hasStoredKey()) { startBleKeyTest(); }
+    else if (kMenu[2].contains(x, y) && ble_key::hasStoredKey()) { openTwoFaMigrateList(); }
+    else if (kMenu[3].contains(x, y) && ble_key::hasStoredKey()) {
+      ble_key::eraseStoredKey();
+      showToast("Llave eliminada");
+      drawBleKeyMenu();
+    }
+    else if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 5; drawScreen(); }
+  } else if (screen == Screen::ble_key_test) {
+    const auto p = keyClient.phase();
+    if (p == ble_key::BleKeyClient::Phase::Verified ||
+        p == ble_key::BleKeyClient::Phase::Paired) {
+      if (kAction.contains(x, y)) {
+        if (twoFaUnlockFlow) {
+          keyClient.clear();
+          twoFaUnlockFlow = false;
+          memset(pinBuffer, 0, sizeof(pinBuffer));
+          pinMismatch = false;
+          screen = Screen::twofa_pin_unlock; focusIndex = 0; drawScreen();
+        } else {
+          exitBleKeyTest();
+        }
+      }
+    } else if (p == ble_key::BleKeyClient::Phase::Denied ||
+               p == ble_key::BleKeyClient::Phase::Failed) {
+      if (kBack.contains(x, y)) exitBleKeyTest();
+      else if (kAction.contains(x, y)) retryBleKeyTest();
+    } else {
+      if (kAction.contains(x, y)) exitBleKeyTest();
+    }
   }
 }
 
@@ -5187,7 +5657,7 @@ void activateFocus() {
   } else if (screen == Screen::settings) {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
                     focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] :
-                    focusIndex == 4 ? kMenu[4] : kBack;
+                    focusIndex == 4 ? kMenu[4] : focusIndex == 5 ? kMenu[5] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings_lang) {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] : kBack;
@@ -5221,6 +5691,25 @@ void activateFocus() {
     click(r->x + 5, r->y + 5);
   } else if (screen == Screen::utxo_detail) {
     click(kAction.x + 5, kAction.y + 5);
+  } else if (screen == Screen::ble_key_menu) {
+    const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
+                    focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::ble_key_test) {
+    const auto p = keyClient.phase();
+    const Rect& r = (p == ble_key::BleKeyClient::Phase::Denied ||
+                     p == ble_key::BleKeyClient::Phase::Failed)
+                        ? (focusIndex == 0 ? kBack : kAction) : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::twofa_pin_set || screen == Screen::twofa_pin_unlock) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::twofa_list) {
+    const Rect& r = focusIndex < twoFaCount ? kVaultFiles[focusIndex] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::twofa_migrate_list) {
+    const Rect& r = focusIndex < sessionMetaCount ? kVaultFiles[focusIndex] : kBack;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
@@ -5285,6 +5774,20 @@ void loop() {
     }
   } else if (scanQrActive()) {
     qrClient.cancel();
+  }
+
+  keyClient.update();
+  if (screen == Screen::ble_key_test) {
+    const auto kp = keyClient.phase();
+    if (kp == ble_key::BleKeyClient::Phase::Cancelled || kp == ble_key::BleKeyClient::Phase::Idle) {
+      screen = Screen::ble_key_menu; focusIndex = 0; drawScreen();
+    } else if (kp != lastKeyPhase) {
+      lastKeyPhase = kp;
+      drawBleKeyTest();
+    }
+  } else if (keyClient.phase() != ble_key::BleKeyClient::Phase::Idle &&
+             keyClient.phase() != ble_key::BleKeyClient::Phase::Cancelled) {
+    keyClient.cancel();
   }
 
   wifiServer.update();

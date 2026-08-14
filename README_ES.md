@@ -27,6 +27,10 @@ Documentación en inglés: [`README.md`](README.md).
 - **Passphrase BIP39** (cambia todas las direcciones derivadas).
 - **Vault individual**: una semilla cifrada con su propia contraseña (archivo `.vlt`).
 - **Vault de sesión**: varias semillas cifradas bajo una contraseña maestra.
+- **Llave BLE (M5Core2)**: llave criptográfica física que desbloquea el vault de
+  sesión mediante **challenge/response** BLE + un **PIN** de 6 dígitos. La llave se
+  empareja por Bluetooth con ECDH (sin teclear nada); un vault existente solo con
+  contraseña se puede **migrar** a "contraseña + llave".
 - **Recibir por WiFi** (punto de acceso + portal cautivo) o por **serial USB**:
   PSBT (fichero o texto) o semilla BIP39 en texto (esta última sin necesidad de
   tener una semilla cargada en RAM).
@@ -155,6 +159,10 @@ transacciones firmadas, los resúmenes y la metadata en claro de la SD.
 | `ripemd160_min.hpp` | RIPEMD-160. |
 | `encrypted_seed_store.hpp` | Vault individual: AES-256-GCM + PBKDF2. |
 | `session_vault_store.hpp` | Vault de sesión: clave maestra + semillas. |
+| `ble_key.hpp` | Cripto compartida de la llave BLE (HMAC-SHA256, ECDH secp256k1, NVS). |
+| `ble_key_client.hpp/.cpp` | Cliente BLE (M5Paper): scan → challenge → verificar HMAC + emparejamiento. |
+| `ble_key_server.hpp/.cpp` | Servidor GATT BLE (M5Core2): challenge/response + emparejamiento (ALLOW/DENY). |
+| `vault_key.hpp` | Segundo factor Core2+PIN: envuelve la clave maestra de sesión (`.k2f`). |
 | `psbt_parser.hpp` | Parser de PSBT (BIP174) y transacciones, detección binario/base64/hex/UR. |
 | `ur_psbt.hpp` | Decodificación de `UR:CRYPTO-PSBT` (bytewords + CBOR). |
 | `tx_sign.hpp` | Firma segwit: RFC6979, sighash BIP143, finalización y serialización. |
@@ -198,6 +206,10 @@ Flasheo fiable en USB marginal: `esptool.py --no-stub --baud 115200 write_flash 
   manipulación de sal, nonce y metadatos.
 - **Derivación de clave**: PBKDF2-HMAC-SHA256 con **600.000 iteraciones** y sal de
   16 bytes aleatoria por archivo (RNG de hardware `esp_fill_random`).
+- **Llave BLE (Core2 + PIN)**: la clave maestra del vault de sesión se envuelve
+  además bajo `K_2f = HMAC-SHA256(K_pair, PBKDF2(PIN))`, donde `K_pair` es un
+  secreto de 256 bits establecido por ECDH durante el emparejamiento. La ruta por
+  contraseña sigue siempre disponible como recuperación.
 - **Firma**: ECDSA secp256k1 con **nonce determinista RFC6979** + **low-S**; sighash
   **BIP143** (segwit v0). Verificación de la ruta BIP32 por fingerprint maestra.
 - **Limpieza de memoria**: funciones `wipe()` (volátil) sobre claves, plaintext,
@@ -216,7 +228,35 @@ Cliente BLE (`qr_ble_client.hpp/.cpp`) para recibir QR desde una Raspberry Pi
 
 ---
 
-## 9. Estado / pendientes
+## 9. Llave BLE (M5Core2): contraseña + llave
+
+Un **M5Core2** actúa como llave criptográfica física que desbloquea el **vault de
+sesión** (`.svm`), como segundo factor junto a un PIN de 6 dígitos.
+
+### Emparejamiento (una vez, sin teclear)
+
+1. Core2: menú → `LLAVE BLE` (genera su identidad la primera vez).
+2. M5Paper: `AJUSTES → BLE KEY → EMPAREJAR M5CORE2`.
+3. El Core2 muestra `PAIR REQUEST` → pulsa `AUTHORIZE`.
+4. Ambos derivan el secreto compartido `K_pair` mediante **ECDH sobre secp256k1**;
+   nunca viaja por el aire.
+
+### Activar / migrar un vault
+
+- Vault nuevo: desbloquea por contraseña → `ACTIVAR CORE2+PIN` (menú de sesión).
+- Vault existente solo con contraseña: `AJUSTES → BLE KEY → MIGRAR A PASS+LLAVE` →
+  elige el `.svm` → introduce su contraseña → define el PIN. La contraseña sigue
+  disponible como recuperación.
+
+### Desbloquear
+
+`VAULT DE SESION → DESBLOQUEAR CON CORE2` → el M5Paper verifica el Core2 con un
+challenge/response nuevo → introduce el PIN → el vault se abre. El Core2 nunca ve
+la clave maestra, el PIN ni las semillas.
+
+---
+
+## 10. Estado / pendientes
 
 - [x] Recepción por WiFi AP (portal cautivo + QR de conexión) con 3 modos.
 - [x] Recepción por serial USB (protocolo `M5PSBT` + SHA256).
@@ -225,11 +265,12 @@ Cliente BLE (`qr_ble_client.hpp/.cpp`) para recibir QR desde una Raspberry Pi
 - [x] Ajustes persistentes en SD (idioma, bloqueo, derivación, radio).
 - [x] Historial de transacciones (guardar y volver a firmar PSBT recibidas).
 - [x] Traducción completa EN/ES.
+- [x] Llave BLE (M5Core2) + PIN como segundo método de desbloqueo del vault de sesión.
 - [ ] Base32 y zlib en BBQr (optimización futura).
 
 ---
 
-## 10. Advertencia de uso
+## 11. Advertencia de uso
 
 Este firmware gestiona claves privadas. No usar con fondos reales hasta completar
 una revisión de seguridad formal y pruebas físicas exhaustivas.

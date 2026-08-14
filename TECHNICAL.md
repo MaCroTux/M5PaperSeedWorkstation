@@ -66,6 +66,10 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `ripemd160_min.hpp` | RIPEMD-160 (para HASH160). |
 | `encrypted_seed_store.hpp` | Vault individual (`.vlt`): AES-256-GCM + PBKDF2 (600.000 iter.). |
 | `session_vault_store.hpp` | Vault de sesión: clave maestra + semillas cifradas (`.svm`/`.svs`). |
+| `ble_key.hpp` | Cripto compartida de la llave BLE: HMAC-SHA256, ECDH secp256k1, persistencia NVS. |
+| `ble_key_client.hpp/.cpp` | Cliente BLE (M5Paper): emparejamiento ECDH + challenge/response HMAC. |
+| `ble_key_server.hpp/.cpp` | Servidor GATT BLE (M5Core2): challenge/response + emparejamiento con confirmación física. |
+| `vault_key.hpp` | Segundo factor Core2+PIN: envuelve la clave maestra de sesión (`.k2f`). |
 | `psbt_parser.hpp` | Parser PSBT (BIP174) + deserialización de transacciones; detecta binario/base64/hex/UR. |
 | `ur_psbt.hpp` | Decodificación `UR:CRYPTO-PSBT` (bytewords + CBOR) para QR de Sparrow. |
 | `tx_sign.hpp` | Firma segwit v0: RFC6979, sighash BIP143, finalización PSBT, serialización. |
@@ -126,6 +130,40 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 
 BIP39, BIP32 xpub/zpub (+ passphrase), fingerprint, PBKDF2 (comparado contra
 `mbedtls_pkcs5_pbkdf2_hmac`), ECDSA/RFC6979, parser PSBT y direcciones BIP84.
+
+### 4.6 Llave BLE (M5Core2) + PIN
+
+La llave Core2 añade un **segundo método de desbloqueo** del vault de sesión, sin
+modificar el formato `.svm`/`.svs` existente.
+
+**Emparejamiento (ECDH secp256k1).** El Core2 guarda una privada de largo plazo
+`P_core2` (NVS `kpriv`). Durante el emparejamiento:
+
+- M5Paper genera un par efímero `(p_m, Q_m)` y envía `Q_m` (65 bytes, sin comprimir).
+- Core2 deriva `S = P_core2 · Q_m` y `K_pair = SHA256(x(S) ‖ tag)`; envía `Q_core2`.
+- M5Paper deriva `S = p_m · Q_core2` y el mismo `K_pair`.
+
+`K_pair` nunca viaja por el aire y queda guardado en NVS (`kpair`) en ambos
+dispositivos. El Core2 exige confirmación física (`AUTHORIZE`) antes de revelar
+`Q_core2`.
+
+**Desbloqueo (challenge/response).** El M5Paper genera un challenge aleatorio de
+32 bytes; el Core2, solo tras `ALLOW`, devuelve `HMAC-SHA256(K_pair, challenge)`;
+el M5Paper verifica de forma independiente (comparación en tiempo constante).
+
+**Clave del vault.** La clave maestra `M` (32 bytes) del vault de sesión se envuelve
+en un archivo paralelo `.k2f`:
+
+```
+K_pin = PBKDF2-HMAC-SHA256(PIN, salt, 150.000)   // frena fuerza bruta del PIN
+K_2f  = HMAC-SHA256(K_pair, K_pin)               // une llave + PIN
+.k2f  = AES-256-GCM(M, K_2f)  (ligado al vaultId, cabecera completa como AAD)
+```
+
+El flujo `DESBLOQUEAR CON CORE2` = BLE auth (Core2 presente) → PIN → `K_2f` →
+desencriptar `M` → cargar semillas. La contraseña sigue operativa como
+recuperación, y `MIGRAR A PASS+LLAVE` añade la llave a un vault existente sin
+perder acceso.
 
 ---
 

@@ -16,6 +16,8 @@
 #include "bitcoin_fingerprint.hpp"
 #include "bitcoin_hd.hpp"
 #include "bitcoin_address.hpp"
+#include "ble_key.hpp"
+#include "ble_key_server.hpp"
 
 namespace {
 
@@ -26,7 +28,8 @@ inline bool contains(const Rect& r, int x, int y) {
 inline bool headerBackHit(int x, int y) { return y < 26 && x < 44; }
 
 enum class Screen { menu, length, keyboard, review, active_seed, dice, address,
-                    settings, settings_lang, locked, stub };
+                    settings, settings_lang, locked, stub,
+                    key_idle, key_request, key_result, key_pair_request, key_pair_result };
 
 // Semilla.
 uint16_t words[24] = {};
@@ -52,6 +55,12 @@ uint8_t addressChange = 0;
 String activeAddress = "";
 
 device_settings::Settings gSettings;
+
+// BLE key (llave criptografica).
+ble_key::BleKeyServer keyServer;
+bool keyMode = false;
+bool keyResultAuthorized = false;
+bool keyPairResultOk = false;
 
 Screen screen = Screen::menu;
 int selected = -1;
@@ -134,7 +143,7 @@ constexpr Rect kMenu[8] = {
 };
 constexpr const char* kMenuKeys[8] = {
   "INTRODUCIR SEMILLA", "GENERAR ENTROPIA", "VAULT DE SESION", "RECIBIR POR WIFI",
-  "HISTORIAL", "AJUSTES", "BLOQUEAR", "AYUDA",
+  "HISTORIAL", "AJUSTES", "BLOQUEAR", "LLAVE BLE",
 };
 
 void drawMenu() {
@@ -394,6 +403,148 @@ void drawStub() {
   drawFooter(lang::tr("ATRAS"), "", "");
 }
 
+// ---- BLE key (llave criptografica) ----
+
+void drawKeyHeader(const char* title) {
+  M5.Display.fillRect(0, 0, DEVICE_WIDTH, 26, kBlack);
+  M5.Display.setTextColor(kWhite, kBlack);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.drawString(title, DEVICE_WIDTH / 2, 13);
+}
+
+void drawKeyIdle() {
+  M5.Display.fillScreen(kBlack);
+  M5.Display.setTextColor(kWhite, kBlack);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("M5 VAULT KEY", DEVICE_WIDTH / 2, 70);
+  M5.Display.setTextSize(3);
+  M5.Display.drawString("LOCKED", DEVICE_WIDTH / 2, 120);
+  M5.Display.setTextSize(1);
+  M5.Display.drawString(keyServer.hasPaired() ? "PAIRED - Waiting..." : "NOT PAIRED - Waiting...",
+                        DEVICE_WIDTH / 2, 170);
+  drawFooter("", "", "");
+}
+
+void drawKeyRequest() {
+  M5.Display.fillScreen(kWhite);
+  drawKeyHeader("UNLOCK REQUEST");
+  M5.Display.setTextColor(kBlack, kWhite);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("M5Paper Vault", DEVICE_WIDTH / 2, 60);
+  M5.Display.setTextSize(1);
+  M5.Display.drawString("requests Vault access", DEVICE_WIDTH / 2, 92);
+  drawButton({10, 130, 145, 55}, "DENY", false, 2);
+  drawButton({165, 130, 145, 55}, "ALLOW", false, 2);
+  drawFooter("", "DENY", "ALLOW");
+}
+
+void drawKeyResult() {
+  M5.Display.fillScreen(kWhite);
+  drawKeyHeader("RESULT");
+  M5.Display.setTextColor(kBlack, kWhite);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString(keyResultAuthorized ? "ACCESS AUTHORIZED" : "ACCESS DENIED",
+                        DEVICE_WIDTH / 2, 110);
+}
+
+void drawKeyPairRequest() {
+  M5.Display.fillScreen(kWhite);
+  drawKeyHeader("PAIR REQUEST");
+  M5.Display.setTextColor(kBlack, kWhite);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("M5Paper", DEVICE_WIDTH / 2, 60);
+  M5.Display.setTextSize(1);
+  M5.Display.drawString("quiere registrar esta llave", DEVICE_WIDTH / 2, 92);
+  drawButton({10, 130, 145, 55}, "CANCEL", false, 2);
+  drawButton({165, 130, 145, 55}, "AUTHORIZE", false, 2);
+  drawFooter("", "CANCEL", "AUTHORIZE");
+}
+
+void drawKeyPairResult() {
+  M5.Display.fillScreen(kWhite);
+  drawKeyHeader("RESULT");
+  M5.Display.setTextColor(kBlack, kWhite);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString(keyPairResultOk ? "PAIRED" : "PAIR DENIED",
+                        DEVICE_WIDTH / 2, 110);
+}
+
+void enterKeyMode() {
+  if (!keyServer.begin()) {
+    Serial.println("[BLEKEY] server begin failed");
+    screen = Screen::menu; drawScreen();
+    return;
+  }
+  keyMode = true;
+  screen = Screen::key_idle;
+  drawScreen();
+}
+
+void loopKeyMode() {
+  keyServer.update();
+
+  const auto st = keyServer.state();
+  const auto pst = keyServer.pairState();
+  if (pst == ble_key::BleKeyServer::PairState::Requested &&
+      screen != Screen::key_pair_request) {
+    screen = Screen::key_pair_request; drawScreen();
+  } else if ((pst == ble_key::BleKeyServer::PairState::Authorized ||
+              pst == ble_key::BleKeyServer::PairState::Denied ||
+              pst == ble_key::BleKeyServer::PairState::Timeout) &&
+             screen != Screen::key_pair_result) {
+    keyPairResultOk = (pst == ble_key::BleKeyServer::PairState::Authorized);
+    screen = Screen::key_pair_result; drawScreen();
+  } else if (pst == ble_key::BleKeyServer::PairState::Idle &&
+             screen == Screen::key_pair_result) {
+    screen = Screen::key_idle; drawScreen();
+  } else if (st == ble_key::BleKeyServer::State::Requested &&
+             screen != Screen::key_request) {
+    screen = Screen::key_request; drawScreen();
+  } else if (st == ble_key::BleKeyServer::State::Authorized &&
+             screen != Screen::key_result) {
+    keyResultAuthorized = true; screen = Screen::key_result; drawScreen();
+  } else if (st == ble_key::BleKeyServer::State::Denied &&
+             screen != Screen::key_result) {
+    keyResultAuthorized = false; screen = Screen::key_result; drawScreen();
+  } else if (st == ble_key::BleKeyServer::State::Timeout &&
+             screen != Screen::key_result) {
+    keyResultAuthorized = false; screen = Screen::key_result; drawScreen();
+  } else if (st == ble_key::BleKeyServer::State::Idle &&
+             screen == Screen::key_result) {
+    screen = Screen::key_idle; drawScreen();
+  }
+
+  auto t = M5.Touch.getDetail();
+  if (t.wasPressed()) {
+    if (screen == Screen::key_request) {
+      if (contains({10, 130, 145, 55}, t.x, t.y)) keyServer.deny();
+      else if (contains({165, 130, 145, 55}, t.x, t.y)) keyServer.allow();
+    } else if (screen == Screen::key_pair_request) {
+      if (contains({10, 130, 145, 55}, t.x, t.y)) keyServer.denyPairing();
+      else if (contains({165, 130, 145, 55}, t.x, t.y)) keyServer.allowPairing();
+    }
+  }
+  if (M5.BtnB.wasPressed()) {
+    if (screen == Screen::key_request) keyServer.deny();
+    else if (screen == Screen::key_pair_request) keyServer.denyPairing();
+  }
+  if (M5.BtnC.wasPressed()) {
+    if (screen == Screen::key_request) keyServer.allow();
+    else if (screen == Screen::key_pair_request) keyServer.allowPairing();
+  }
+  // Salir del modo llave manteniendo A pulsado.
+  if (M5.BtnA.pressedFor(600)) {
+    keyMode = false;
+    screen = Screen::menu; drawScreen();
+  }
+}
+
 void drawScreen() {
   switch (screen) {
     case Screen::menu: drawMenu(); break;
@@ -406,6 +557,11 @@ void drawScreen() {
     case Screen::settings: drawSettings(); break;
     case Screen::settings_lang: drawSettingsLang(); break;
     case Screen::locked: drawLocked(); break;
+    case Screen::key_idle: drawKeyIdle(); break;
+    case Screen::key_request: drawKeyRequest(); break;
+    case Screen::key_result: drawKeyResult(); break;
+    case Screen::key_pair_request: drawKeyPairRequest(); break;
+    case Screen::key_pair_result: drawKeyPairResult(); break;
     default: drawStub(); break;
   }
 }
@@ -436,6 +592,7 @@ void tap(int x, int y) {
       else if (contains(kMenu[1], x, y)) { initDice(12); screen = Screen::dice; drawScreen(); }
       else if (contains(kMenu[5], x, y)) { screen = Screen::settings; drawScreen(); }
       else if (contains(kMenu[6], x, y)) { screen = Screen::locked; drawScreen(); }
+      else if (contains(kMenu[7], x, y)) { enterKeyMode(); }
       else {
         for (int i = 0; i < 8; ++i)
           if (contains(kMenu[i], x, y)) { selected = i; screen = Screen::stub; drawScreen(); }
@@ -573,6 +730,7 @@ void setup() {
 
 void loop() {
   M5.update();
+  if (keyMode) { loopKeyMode(); return; }
   auto t = M5.Touch.getDetail();
   if (t.wasPressed()) tap(t.x, t.y);
   if (M5.BtnA.wasPressed()) btnA();

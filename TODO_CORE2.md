@@ -65,6 +65,15 @@ aquí solo falta la **UI** de Core2.
 - [ ] **Auto-bloqueo / screensaver** por inactividad.
 - [ ] Traducciones EN/ES completas de las pantallas nuevas.
 
+## 8. Llave BLE (M5Core2 como llave física)
+
+- [x] Servidor GATT `M5Core2-Key` (NimBLE) con servicio "M5 Vault Key".
+- [x] Pantalla `LOCKED / Waiting...` + `PAIR REQUEST [CANCEL][AUTHORIZE]`.
+- [x] Emparejamiento ECDH secp256k1 (sin teclear), identidad de largo plazo en NVS.
+- [x] Challenge/response HMAC-SHA256 con confirmación física (`UNLOCK REQUEST [DENY][ALLOW]`).
+- [x] En el M5Paper: emparejar / probar / eliminar llave, y **desbloquear el vault de
+      sesión con Core2 + PIN** (incluida la migración de vault solo-contraseña).
+
 ---
 
 ## Orden recomendado
