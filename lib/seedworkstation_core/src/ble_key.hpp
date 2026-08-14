@@ -177,6 +177,18 @@ inline void toHex(const uint8_t* in, size_t len, char* out) {
   out[len * 2] = '\0';
 }
 
+// Huella visual anti-MITM: "XXXX XXXX" (primeros 4 bytes de SHA256(pk)).
+// Se muestra en ambos dispositivos durante el emparejamiento para comparar.
+inline void fingerprintHex(const uint8_t pk[kPubKeySize], char out[10]) {
+  uint8_t h[32] = {};
+  mbedtls_sha256_ret(pk, kPubKeySize, h, 0);
+  char tmp[9];
+  toHex(h, 4, tmp);
+  snprintf(out, 10, "%.4s %.4s", tmp, tmp + 4);
+  wipe(h, sizeof(h));
+  wipe(tmp, sizeof(tmp));
+}
+
 inline size_t fromHex(const char* hex, size_t hexLen, uint8_t* out, size_t outLen) {
   if (hexLen % 2 != 0 || hexLen / 2 > outLen) return 0;
   auto nib = [](char c) -> int {

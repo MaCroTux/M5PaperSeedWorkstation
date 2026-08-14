@@ -31,6 +31,10 @@ Documentación en español: [`README_ES.md`](README_ES.md).
   vault via BLE **challenge/response** + a 6-digit **PIN**. The key is paired
   over Bluetooth with ECDH (no typing); an existing password-only vault can be
   **migrated** to "password + key".
+- **M5Stick provisioning (Pocket Signer)**: sends the active seed to an
+  **M5Stick** over BLE, encrypted in transit with **ECIES** (ECDH + AES-256-GCM)
+  and with physical confirmation on both devices. Full wire protocol in
+  [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
 - **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
 - **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
@@ -161,6 +165,8 @@ summaries and clear SD metadata leave the device.
 | `ble_key_client.hpp/.cpp` | BLE client (M5Paper): scan → challenge → verify HMAC + pairing. |
 | `ble_key_server.hpp/.cpp` | BLE GATT server (M5Core2): challenge/response + pairing (ALLOW/DENY). |
 | `vault_key.hpp` | Core2+PIN second unlock factor: wraps the session master key (`.k2f`). |
+| `ble_provision.hpp` | M5Paper→M5Stick provisioning protocol: payload + ECIES (tag `m5-stick-provision-v1`). |
+| `ble_provision_client.hpp/.cpp` | BLE client (M5Paper) that encrypts and sends the seed to the M5Stick. |
 | `psbt_parser.hpp` | PSBT parser (BIP174) + transactions, binary/base64/hex/UR detection. |
 | `ur_psbt.hpp` | `UR:CRYPTO-PSBT` decoding (bytewords + CBOR). |
 | `tx_sign.hpp` | Segwit signing: RFC6979, BIP143 sighash, finalization & serialization. |
@@ -173,6 +179,7 @@ summaries and clear SD metadata leave the device.
 | `device_settings.hpp` | SD-persisted settings (`/m5settings.cfg`): language, lock, derivation. |
 | `AUDITORIA.md` | Security & UX audit (Spanish). |
 | `TECHNICAL.md` | Detailed technical documentation. |
+| `PROTOCOLO_M5STICK.md` | Wire specification for M5Paper→M5Stick BLE provisioning (Spanish). |
 | `DEBUG_FIRMA.md` | Post-mortem of the P2WPKH signing bug (Spanish). |
 
 ---
@@ -259,7 +266,31 @@ key transiently in RAM, never the seeds.
 
 ---
 
-## 10. Status / backlog
+## 10. M5Stick provisioning (BLE)
+
+The M5Paper can **provision** (send) the active seed to an **M5Stick Pocket
+Signer** over BLE. The M5Stick acts as the server (peripheral) in `IMPORT SEED`
+mode; the M5Paper is the client (central) that scans, connects and sends.
+
+### Flow
+
+1. On the M5Paper, with an active seed: `ACTIVE SEED → BACKUP SEED →
+   PROVISIONAR M5STICK`.
+2. A security warning is shown (`I AM IN A SAFE PLACE`); on confirmation the
+   M5Paper scans for the M5Stick.
+3. The M5Paper reads the M5Stick's **public key** and encrypts the seed
+   (`count ‖ word_idx ‖ fingerprint`) with **ECIES** (ECDH secp256k1 +
+   AES-256-GCM). The seed is **never** sent in clear.
+4. The M5Stick decrypts it, shows `IMPORT SEED? FPR …` and the user confirms
+   physically (`HOLD CENTER`). The M5Stick notifies `accepted`/`denied`/`error`.
+5. The M5Paper shows `PROVISIONADO` (or `RECHAZADO`/failure with retry).
+
+Confirmation is physical on **both** devices. UUIDs, payload and status codes in
+[`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
+
+---
+
+## 11. Status / backlog
 
 - [x] WiFi AP reception (captive portal + connection QR) with 3 modes.
 - [x] USB serial reception (`M5PSBT` protocol + SHA256).
@@ -269,11 +300,13 @@ key transiently in RAM, never the seeds.
 - [x] Transaction history (save and re-sign received PSBTs).
 - [x] Full EN/ES translation.
 - [x] BLE key (M5Core2) + PIN as a second unlock method for the session vault.
+- [x] BLE provisioning of the seed to the M5Stick (client with ECIES in transit).
 - [ ] Base32 and zlib in BBQr (future optimization).
+- [ ] Server side of provisioning on the M5Stick (M5Stick firmware, separate project).
 
 ---
 
-## 11. Usage warning
+## 12. Usage warning
 
 This firmware handles private keys. Do not use with real funds until a formal
 security review and exhaustive physical testing are completed.

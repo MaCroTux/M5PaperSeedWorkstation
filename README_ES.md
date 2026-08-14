@@ -31,6 +31,10 @@ Documentación en inglés: [`README.md`](README.md).
   sesión mediante **challenge/response** BLE + un **PIN** de 6 dígitos. La llave se
   empareja por Bluetooth con ECDH (sin teclear nada); un vault existente solo con
   contraseña se puede **migrar** a "contraseña + llave".
+- **Provisioning al M5Stick (Pocket Signer)**: envía la semilla activa a un
+  **M5Stick** por BLE, cifrada en tránsito con **ECIES** (ECDH + AES-256-GCM) y con
+  confirmación física en ambos dispositivos. El protocolo completo está en
+  [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
 - **Recibir por WiFi** (punto de acceso + portal cautivo) o por **serial USB**:
   PSBT (fichero o texto) o semilla BIP39 en texto (esta última sin necesidad de
   tener una semilla cargada en RAM).
@@ -163,6 +167,8 @@ transacciones firmadas, los resúmenes y la metadata en claro de la SD.
 | `ble_key_client.hpp/.cpp` | Cliente BLE (M5Paper): scan → challenge → verificar HMAC + emparejamiento. |
 | `ble_key_server.hpp/.cpp` | Servidor GATT BLE (M5Core2): challenge/response + emparejamiento (ALLOW/DENY). |
 | `vault_key.hpp` | Segundo factor Core2+PIN: envuelve la clave maestra de sesión (`.k2f`). |
+| `ble_provision.hpp` | Protocolo de provisioning M5Paper→M5Stick: payload + ECIES (tag `m5-stick-provision-v1`). |
+| `ble_provision_client.hpp/.cpp` | Cliente BLE (M5Paper) que cifra y envía la semilla al M5Stick. |
 | `psbt_parser.hpp` | Parser de PSBT (BIP174) y transacciones, detección binario/base64/hex/UR. |
 | `ur_psbt.hpp` | Decodificación de `UR:CRYPTO-PSBT` (bytewords + CBOR). |
 | `tx_sign.hpp` | Firma segwit: RFC6979, sighash BIP143, finalización y serialización. |
@@ -175,6 +181,7 @@ transacciones firmadas, los resúmenes y la metadata en claro de la SD.
 | `device_settings.hpp` | Ajustes persistentes en SD (`/m5settings.cfg`): idioma, bloqueo, derivación. |
 | `AUDITORIA.md` | Auditoría de seguridad y UX. |
 | `TECHNICAL.md` | Documentación técnica detallada. |
+| `PROTOCOLO_M5STICK.md` | Especificación de cable del provisioning BLE M5Paper→M5Stick. |
 | `DEBUG_FIRMA.md` | Post-mortem del bug de firma P2WPKH. |
 
 ---
@@ -262,7 +269,31 @@ semillas.
 
 ---
 
-## 10. Estado / pendientes
+## 10. Provisioning al M5Stick (BLE)
+
+El M5Paper puede **provisionar** (enviar) la semilla activa a un **M5Stick Pocket
+Signer** por BLE. El M5Stick actúa como servidor (peripheral) en modo
+`IMPORT SEED`; el M5Paper es el cliente (central) que escanea, se conecta y envía.
+
+### Flujo
+
+1. En el M5Paper, con una semilla activa: `SEMILLA ACTIVA → BACKUP SEED →
+   PROVISIONAR M5STICK`.
+2. Se muestra la advertencia de seguridad (`ESTOY EN UN LUGAR SEGURO`); al confirmar,
+   el M5Paper escanea el M5Stick.
+3. El M5Paper lee la **clave pública** del M5Stick y cifra la semilla
+   (`count ‖ word_idx ‖ fingerprint`) con **ECIES** (ECDH secp256k1 + AES-256-GCM).
+   La semilla **nunca** viaja en claro.
+4. El M5Stick la descifra, muestra `IMPORT SEED? FPR …` y el usuario confirma
+   físicamente (`HOLD CENTER`). El M5Stick notifica `accepted`/`denied`/`error`.
+5. El M5Paper muestra `PROVISIONADO` (o `RECHAZADO`/fallo con opción de reintentar).
+
+La confirmación es física en **ambos** dispositivos. Detalles de UUIDs, payload y
+códigos de estado en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
+
+---
+
+## 11. Estado / pendientes
 
 - [x] Recepción por WiFi AP (portal cautivo + QR de conexión) con 3 modos.
 - [x] Recepción por serial USB (protocolo `M5PSBT` + SHA256).
@@ -272,11 +303,13 @@ semillas.
 - [x] Historial de transacciones (guardar y volver a firmar PSBT recibidas).
 - [x] Traducción completa EN/ES.
 - [x] Llave BLE (M5Core2) + PIN como segundo método de desbloqueo del vault de sesión.
+- [x] Provisioning BLE de la semilla al M5Stick (cliente con cifrado ECIES en tránsito).
 - [ ] Base32 y zlib en BBQr (optimización futura).
+- [ ] Lado servidor del provisioning en el M5Stick (firmware del M5Stick, proyecto aparte).
 
 ---
 
-## 11. Advertencia de uso
+## 12. Advertencia de uso
 
 Este firmware gestiona claves privadas. No usar con fondos reales hasta completar
 una revisión de seguridad formal y pruebas físicas exhaustivas.

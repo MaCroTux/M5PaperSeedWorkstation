@@ -20,6 +20,8 @@
 #include "ble_key.hpp"
 #include "ble_key_client.hpp"
 #include "vault_key.hpp"
+#include "ble_provision.hpp"
+#include "ble_provision_client.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -44,7 +46,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      animated_qr, settings, settings_lang, settings_timeout,
                      settings_clean, settings_derivation, settings_radio,
                      multisig_confirm, tx_history, ble_key_menu, ble_key_test,
-                     twofa_list, twofa_migrate_list, settings_screen };
+                     twofa_list, twofa_migrate_list, settings_screen,
+                     provision_test };
 
 struct Rect {
   int x, y, w, h;
@@ -94,8 +97,8 @@ constexpr const char* kActiveLabels[] = {"VER CLAVE PUBLICA", "BACKUP SEED",
                                          "PASSPHRASE", "EXPLORAR DIRECCIONES",
                                          "DESCARTAR SEED"};
 constexpr const char* kBackupLabels[] = {"VER PALABRAS", "VER QR",
-                                          "BACKUP SEEDQR", "ABRIR VAULT DE SESION",
-                                          "VOLVER"};
+                                          "BACKUP SEEDQR", "PROVISIONAR M5STICK",
+                                          "ABRIR VAULT DE SESION", "VOLVER"};
 constexpr Rect kAddressValue{20, 245, 500, 190};
 constexpr Rect kAddressReceive{20, 455, 240, 70};
 constexpr Rect kAddressChange{280, 455, 240, 70};
@@ -235,6 +238,10 @@ Screen screensaverReturn = Screen::menu;
 bool screensaverHardLock = false;
 ble_key::BleKeyClient keyClient;
 ble_key::BleKeyClient::Phase lastKeyPhase = ble_key::BleKeyClient::Phase::Idle;
+ble_provision::BleProvisionClient provisionClient;
+ble_provision::BleProvisionClient::Phase lastProvisionPhase =
+    ble_provision::BleProvisionClient::Phase::Idle;
+bool provisionAfterSecurity = false;
 constexpr uint8_t kMaxLoadedSeeds = 6;
 struct LoadedSeed {
   uint16_t indices[24];
@@ -1947,17 +1954,17 @@ void drawSeedSwitcher() {
 void drawBackupSeed() {
   blankPage();
   title("BACKUP SEED", "Copias y comprobacion de la semilla");
-  static const Icon kBackupIcons[] = {Icon::list, Icon::qr, Icon::qr,
-                                      Icon::lock, Icon::none};
+  buttonOn(page, kActiveMenu[0], "VER PALABRAS", true, focusIndex == 0, Icon::list);
+  buttonOn(page, kActiveMenu[1], "VER QR", true, focusIndex == 1, Icon::qr);
+  buttonOn(page, kActiveMenu[2], "BACKUP SEEDQR", true, focusIndex == 2, Icon::qr);
+  buttonOn(page, kActiveMenu[3], "PROVISIONAR M5STICK", true, focusIndex == 3,
+           Icon::memory);
   if (sessionUnlocked) {
-    buttonOn(page, kActiveMenu[0], "VER PALABRAS", true, focusIndex == 0, Icon::list);
-    buttonOn(page, kActiveMenu[1], "VER QR", true, focusIndex == 1, Icon::qr);
-    buttonOn(page, kActiveMenu[2], "BACKUP SEEDQR", true, focusIndex == 2, Icon::qr);
-    buttonOn(page, kActiveMenu[3], "VOLVER", true, focusIndex == 3);
+    buttonOn(page, kActiveMenu[4], "VOLVER", true, focusIndex == 4);
   } else {
-    for (uint8_t i = 0; i < 5; ++i)
-      buttonOn(page, kActiveMenu[i], kBackupLabels[i], true, focusIndex == i,
-               kBackupIcons[i]);
+    buttonOn(page, kActiveMenu[4], "ABRIR VAULT DE SESION", true,
+             focusIndex == 4, Icon::lock);
+    buttonOn(page, kActiveMenu[5], "VOLVER", true, focusIndex == 5);
   }
   fullRefresh();
 }
@@ -4212,6 +4219,47 @@ void retryBleKeyTest() {
   }
 }
 
+// ---- Provisioning de seed al M5Stick (BLE) ----
+
+void drawProvisionTest() {
+  blankPage();
+  title("M5STICK", provisionClient.statusText());
+  const auto p = provisionClient.phase();
+  if (p == ble_provision::BleProvisionClient::Phase::Provisioned) {
+    buttonOn(page, kAction, "CONTINUAR", true, focusIndex == 0, Icon::check);
+  } else if (p == ble_provision::BleProvisionClient::Phase::Denied ||
+             p == ble_provision::BleProvisionClient::Phase::Failed) {
+    buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+    buttonOn(page, kAction, "REINTENTAR", true, focusIndex == 1, Icon::reset);
+  } else {
+    buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
+  }
+  fullRefresh();
+}
+
+void startProvision() {
+  if (!fingerprintValid) {
+    screen = Screen::backup_seed; focusIndex = 3; drawScreen();
+    return;
+  }
+  uint8_t fpr[4] = {};
+  bitcoin_fingerprint::calculate(words, targetWords, fpr);
+  provisionClient.clear();
+  provisionClient.start(words, targetWords, fpr);
+  encrypted_seed_store::wipe(fpr, sizeof(fpr));
+  lastProvisionPhase = ble_provision::BleProvisionClient::Phase::Idle;
+  screen = Screen::provision_test; focusIndex = 0; drawScreen();
+}
+
+void exitProvisionTest() {
+  provisionClient.clear();
+  screen = Screen::active_seed; focusIndex = 1; drawScreen();
+}
+
+void retryProvisionTest() {
+  startProvision();
+}
+
 // ---- Core2 + PIN (segundo metodo de desbloqueo del Vault) ----
 
 void scanTwoFaFiles() {
@@ -4424,6 +4472,7 @@ void drawScreen() {
     case Screen::tx_history: drawTxHistory(); break;
     case Screen::ble_key_menu: drawBleKeyMenu(); break;
     case Screen::ble_key_test: drawBleKeyTest(); break;
+    case Screen::provision_test: drawProvisionTest(); break;
     case Screen::twofa_list: drawTwoFaList(); break;
     case Screen::twofa_migrate_list: drawTwoFaMigrateList(); break;
   }
@@ -4464,13 +4513,15 @@ void updateFocusButton(uint8_t index) {
     }
     case Screen::backup_seed:
       if (sessionUnlocked) {
-        static const char* kVaultLabels[] = {"VER PALABRAS", "VER QR", "BACKUP SEEDQR", "VOLVER"};
-        static const Icon kVaultIcons[] = {Icon::list, Icon::qr, Icon::qr, Icon::none};
+        static const char* kVaultLabels[] = {"VER PALABRAS", "VER QR", "BACKUP SEEDQR",
+                                             "PROVISIONAR M5STICK", "VOLVER"};
+        static const Icon kVaultIcons[] = {Icon::list, Icon::qr, Icon::qr,
+                                           Icon::memory, Icon::none};
         updateButton(kActiveMenu[index], kVaultLabels[index], true,
                      index == focusIndex, kVaultIcons[index]);
       } else {
         static const Icon kBackupIcons[] = {Icon::list, Icon::qr, Icon::qr,
-                                            Icon::save, Icon::none};
+                                            Icon::memory, Icon::lock, Icon::none};
         updateButton(kActiveMenu[index], kBackupLabels[index], true,
                      index == focusIndex, kBackupIcons[index]);
       }
@@ -4791,6 +4842,19 @@ void updateFocusButton(uint8_t index) {
       }
       break;
     }
+    case Screen::provision_test: {
+      const auto p = provisionClient.phase();
+      if (p == ble_provision::BleProvisionClient::Phase::Provisioned) {
+        updateButton(kAction, "CONTINUAR", true, index == focusIndex, Icon::check);
+      } else if (p == ble_provision::BleProvisionClient::Phase::Denied ||
+                 p == ble_provision::BleProvisionClient::Phase::Failed) {
+        if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+        else updateButton(kAction, "REINTENTAR", true, index == focusIndex, Icon::reset);
+      } else {
+        updateButton(kAction, "CANCELAR", true, index == focusIndex, Icon::x);
+      }
+      break;
+    }
     case Screen::twofa_list:
       if (index < twoFaCount) {
         char label[17] = {};
@@ -4820,7 +4884,7 @@ void moveFocus(int direction) {
   uint8_t count = 1;
   if (screen == Screen::active_seed) count = sessionUnlocked ? 9 : 8;
   else if (screen == Screen::seed_switcher) count = loadedSeedCount + 1;
-  else if (screen == Screen::backup_seed) count = sessionUnlocked ? 4 : 5;
+  else if (screen == Screen::backup_seed) count = sessionUnlocked ? 5 : 6;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
   else if (screen == Screen::menu) count = 7;
@@ -4849,6 +4913,11 @@ void moveFocus(int direction) {
     const auto p = keyClient.phase();
     count = (p == ble_key::BleKeyClient::Phase::Denied ||
              p == ble_key::BleKeyClient::Phase::Failed) ? 2 : 1;
+  }
+  else if (screen == Screen::provision_test) {
+    const auto p = provisionClient.phase();
+    count = (p == ble_provision::BleProvisionClient::Phase::Denied ||
+             p == ble_provision::BleProvisionClient::Phase::Failed) ? 2 : 1;
   }
   else if (screen == Screen::twofa_list) count = twoFaCount + 1;
   else if (screen == Screen::twofa_migrate_list) count = sessionMetaCount + 1;
@@ -5017,13 +5086,19 @@ void click(int x, int y) {
       seedqrRow = 0; seedqrRun = 0;
       requestSecurity(Screen::seedqr, Screen::active_seed);
     }
-    else if (sessionUnlocked && kActiveMenu[3].contains(x, y)) {
+    else if (kActiveMenu[3].contains(x, y)) {
+      provisionAfterSecurity = true;
+      requestSecurity(Screen::provision_test, Screen::backup_seed);
+    }
+    else if (sessionUnlocked && kActiveMenu[4].contains(x, y)) {
       screen = Screen::active_seed; focusIndex = 1; drawScreen();
     }
-    else if (!sessionUnlocked && kActiveMenu[3].contains(x, y)) {
+    else if (!sessionUnlocked && kActiveMenu[4].contains(x, y)) {
       screen = Screen::session_menu; focusIndex = 0; drawScreen();
     }
-    else if (kActiveMenu[4].contains(x, y)) { screen = Screen::active_seed; focusIndex = 1; drawScreen(); }
+    else if (!sessionUnlocked && kActiveMenu[5].contains(x, y)) {
+      screen = Screen::active_seed; focusIndex = 1; drawScreen();
+    }
   } else if (screen == Screen::vault_actions) {
     if (kActiveMenu[0].contains(x, y)) { sessionDeleteMode = false; screen = Screen::session_seed_list; focusIndex = 0; drawScreen(); }
     else if (kActiveMenu[1].contains(x, y) && fingerprintValid) beginSessionSave();
@@ -5147,9 +5222,15 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::security_warning) {
     if (kBack.contains(x, y)) {
+      provisionAfterSecurity = false;
       screen = securityWarningReturn; focusIndex = 0; drawScreen();
     } else if (kAction.contains(x, y)) {
-      screen = securityWarningTarget; focusIndex = 0; drawScreen();
+      if (provisionAfterSecurity) {
+        provisionAfterSecurity = false;
+        startProvision();
+      } else {
+        screen = securityWarningTarget; focusIndex = 0; drawScreen();
+      }
     }
   } else if (screen == Screen::vault_label) {
     const size_t length = strlen(vaultLabel);
@@ -5164,7 +5245,7 @@ void click(int x, int y) {
       else { screen = Screen::vault_password; focusIndex = 0; drawVaultPassword(); }
     } else if (kBack.contains(x, y)) {
       memset(vaultLabel, 0, sizeof(vaultLabel));
-      if (vaultFlow == VaultFlow::individual) { screen = Screen::backup_seed; focusIndex = 3; }
+      if (vaultFlow == VaultFlow::individual) { screen = Screen::backup_seed; focusIndex = 4; }
       else { screen = Screen::session_menu; focusIndex = 0; }
       drawScreen();
     }
@@ -5242,7 +5323,7 @@ void click(int x, int y) {
     if (kAction.contains(x, y)) {
       if (vaultFlow == VaultFlow::session_save_seed || vaultFlow == VaultFlow::session_create) {
         screen = Screen::session_menu; focusIndex = 0;
-      } else { screen = Screen::backup_seed; focusIndex = 3; }
+      } else { screen = Screen::backup_seed; focusIndex = 4; }
       drawScreen();
     }
   } else if (screen == Screen::vault_loaded) {
@@ -5529,6 +5610,17 @@ void click(int x, int y) {
     } else {
       if (kAction.contains(x, y)) exitBleKeyTest();
     }
+  } else if (screen == Screen::provision_test) {
+    const auto p = provisionClient.phase();
+    if (p == ble_provision::BleProvisionClient::Phase::Provisioned) {
+      if (kAction.contains(x, y)) exitProvisionTest();
+    } else if (p == ble_provision::BleProvisionClient::Phase::Denied ||
+               p == ble_provision::BleProvisionClient::Phase::Failed) {
+      if (kBack.contains(x, y)) exitProvisionTest();
+      else if (kAction.contains(x, y)) retryProvisionTest();
+    } else {
+      if (kAction.contains(x, y)) exitProvisionTest();
+    }
   }
 }
 
@@ -5708,6 +5800,12 @@ void activateFocus() {
                      p == ble_key::BleKeyClient::Phase::Failed)
                         ? (focusIndex == 0 ? kBack : kAction) : kAction;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::provision_test) {
+    const auto p = provisionClient.phase();
+    const Rect& r = (p == ble_provision::BleProvisionClient::Phase::Denied ||
+                     p == ble_provision::BleProvisionClient::Phase::Failed)
+                        ? (focusIndex == 0 ? kBack : kAction) : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::twofa_list) {
     const Rect& r = focusIndex < twoFaCount ? kVaultFiles[focusIndex] : kBack;
     click(r.x + 5, r.y + 5);
@@ -5792,6 +5890,25 @@ void loop() {
   } else if (keyClient.phase() != ble_key::BleKeyClient::Phase::Idle &&
              keyClient.phase() != ble_key::BleKeyClient::Phase::Cancelled) {
     keyClient.cancel();
+  }
+
+  provisionClient.update();
+  if (provisionClient.phase() != ble_provision::BleProvisionClient::Phase::Idle &&
+      provisionClient.phase() != ble_provision::BleProvisionClient::Phase::Cancelled) {
+    lastUserActivity = millis();  // no auto-lock durante el provisioning
+  }
+  if (screen == Screen::provision_test) {
+    const auto pp = provisionClient.phase();
+    if (pp == ble_provision::BleProvisionClient::Phase::Cancelled ||
+        pp == ble_provision::BleProvisionClient::Phase::Idle) {
+      screen = Screen::active_seed; focusIndex = 1; drawScreen();
+    } else if (pp != lastProvisionPhase) {
+      lastProvisionPhase = pp;
+      drawProvisionTest();
+    }
+  } else if (provisionClient.phase() != ble_provision::BleProvisionClient::Phase::Idle &&
+             provisionClient.phase() != ble_provision::BleProvisionClient::Phase::Cancelled) {
+    provisionClient.cancel();
   }
 
   wifiServer.update();

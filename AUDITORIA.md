@@ -326,3 +326,70 @@ almacenar material de descifrado. Los hallazgos restantes son de endurecimiento:
 blinding ECC (BL-2), PIN más largo (BL-1), confirmación visual anti-MITM (BL-3) y,
 si se quiere "cifrado en reposo" de verdad, Flash Encryption del ESP32. Ninguno es
 bloqueante para un prototipo "sin fondos reales".
+
+---
+
+## 8. Addendum 2026-08-14 — Provisioning BLE al M5Stick + fix de buffer
+
+Alcance: revisión estática del provisioning de seed hacia el M5Stick
+(`ble_provision.hpp`, `ble_provision_client.*`) y su integración en `NativeApp.cpp`,
+además de la corrección de un desbordamiento de buffer en el cliente BLE existente.
+Especificación de cable en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
+
+### 8.1 Fix de desbordamiento de buffer (BLE client)
+
+**PV-BUF (CRÍTICA, corregida).** En `ble_key_client.hpp`, `blob_` estaba declarado
+de `vault_2fa::kBlobSize` (125 bytes), pero `startUnlock` escribía
+`kPubKeySize + vault_2fa::kBlobSize` (65 + 125 = 190 bytes: `E_sess ‖ ECIES(M)`),
+corrompiendo el heap. Se corrigió declarando
+`blob_[kPubKeySize + vault_2fa::kBlobSize]`. El desbordamiento coincidía exactamente
+con el tamaño enviado por BLE (`kUnlockReqSize`), por lo que era un bug real de
+escritura fuera de límites, no un falso positivo.
+
+### 8.2 Hallazgos del provisioning
+
+**PV-1 (MEDIA). Intercambio de `pk` del M5Stick sin confirmación *out-of-band* (MITM).**
+El M5Paper lee `PROV_PUBKEY` de quien anuncie `M5Stick-Signer`; un adversario activo
+podría entregar su propia `pk` y reenviar. La confirmación física del M5Stick
+(`HOLD CENTER`) y el fingerprint mostrado en pantalla mitigan pero no eliminan el
+riesgo. Misma clase que BL-3. Mitigación: se añadió `fingerprintHex()` en `ble_key.hpp`
+(huella corta `SHA256(pk)` para comparar visualmente en ambos dispositivos), aún sin
+cablear a la UI del provisioning.
+
+**PV-2 (INFO, correcto). La seed nunca viaja en claro.**
+El payload (`count ‖ word_idx ‖ fingerprint`) se cifra con ECIES (ECDH secp256k1 +
+AES-256-GCM) hacia la `pk` del M5Stick; solo el M5Stick (dueño de `sk_stick`) puede
+descifrar. Separación de dominio propia: tag `m5-stick-provision-v1` (distinto del de
+desbloqueo de vault `m5-vault-ecies-v1`).
+
+**PV-3 (INFO, correcto). Confirmación física en ambos dispositivos.**
+M5Paper: aviso de seguridad previo al envío. M5Stick: `HOLD CENTER` para aceptar la
+importación. Estados `accepted`/`denied`/`error` notificados por `PROV_STATUS`.
+
+**PV-4 (INFO). `fingerprint` enviado se deriva de las palabras (sin passphrase).**
+El M5Paper envía la huella BIP32 de las palabras (`bitcoin_fingerprint::calculate`
+con passphrase vacía). Si la semilla activa del M5Paper usa passphrase, la huella
+mostrada en el M5Stick no coincidirá (señal clara de que el M5Stick no lleva
+passphrase). El passphrase **no** se transfiere en esta versión.
+
+**PV-5 (BAJA, recurrencia de BL-2). ECC sin *blinding*.**
+`ble_provision::encrypt`/`decrypt` usan `mbedtls_ecp_mul(..., NULL, NULL)` vía
+`ble_key::deriveEcdhKey`, igual que el resto del proyecto (S-1/BL-2).
+
+### 8.3 Verificado correcto
+
+- `wipe()` sobre el payload, la clave efímera `e`, `E` y `K` tras cifrar, y sobre
+  `payload_`/`pk_` en `clear()` del cliente.
+- Límites correctos: `kPayloadSize` (53) y `kBlobSize` (146) cubren exactamente el
+  caso peor (24 palabras); sin escrituras fuera de límites.
+- El auto-lock del dispositivo se desactiva mientras el provisioning está activo
+  (se refresca `lastUserActivity`), evitando que el M5Paper se bloquee a mitad de la
+  espera de confirmación en el M5Stick.
+
+### 8.4 Conclusión
+
+El provisioning hereda el modelo asimétrico ya validado para el Core2 (ECIES sobre
+secp256k1, clave pública en el emisor, clave privada en el receptor). El riesgo
+restante más relevante es de MITM en el intercambio de `pk` (PV-1), mitigable con la
+confirmación visual de la huella corta pendiente de cablear. Ningún hallazgo es
+bloqueante para un prototipo "sin fondos reales".

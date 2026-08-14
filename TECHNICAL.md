@@ -70,6 +70,8 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `ble_key_client.hpp/.cpp` | Cliente BLE (M5Paper): emparejamiento ECDH + challenge/response HMAC. |
 | `ble_key_server.hpp/.cpp` | Servidor GATT BLE (M5Core2): challenge/response + emparejamiento con confirmación física. |
 | `vault_key.hpp` | Segundo factor Core2+PIN: envuelve la clave maestra de sesión (`.k2f`). |
+| `ble_provision.hpp` | Protocolo de provisioning M5Paper→M5Stick: payload (`count ‖ word_idx ‖ fingerprint`) + ECIES con tag `m5-stick-provision-v1`. |
+| `ble_provision_client.hpp/.cpp` | Cliente BLE (M5Paper): scan → leer pubkey → ECIES(seed) → escribir → esperar `PROV_STATUS`. |
 | `psbt_parser.hpp` | Parser PSBT (BIP174) + deserialización de transacciones; detecta binario/base64/hex/UR. |
 | `ur_psbt.hpp` | Decodificación `UR:CRYPTO-PSBT` (bytewords + CBOR) para QR de Sparrow. |
 | `tx_sign.hpp` | Firma segwit v0: RFC6979, sighash BIP143, finalización PSBT, serialización. |
@@ -80,6 +82,7 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
 | `lang.hpp` | i18n EN/ES (`lang::tr`), tabla castellano→inglés. |
 | `device_settings.hpp` | Ajustes en SD (`/m5settings.cfg`). |
 | `multisig.hpp` | Multisig P2WSH sortedmulti (detección, firma, finalización). |
+| `PROTOCOLO_M5STICK.md` | Especificación de cable del provisioning BLE M5Paper→M5Stick. |
 | `DEBUG_FIRMA.md` | Post-mortem del bug de firma P2WPKH (scriptCode + pubkey comprimida). |
 
 ---
@@ -170,6 +173,33 @@ de sesión `K_sess = SHA256(x(ECDH(sk, E_sess)) ‖ tag)` y devuelve
 La contraseña sigue operativa como recuperación, y `MIGRAR A PASS+LLAVE` añade la
 llave a un vault existente sin perder acceso.
 
+### 4.7 Provisioning al M5Stick (BLE)
+
+El M5Paper provisiona la semilla activa a un **M5Stick Pocket Signer**. El M5Stick
+es el servidor (peripheral) en modo `IMPORT SEED` y expone su clave pública; el
+M5Paper es el cliente (central) que cifra y envía.
+
+**Payload en claro** (antes de cifrar):
+
+```
+count(1) ‖ word_idx LE(count*2) ‖ fingerprint(4)
+```
+
+**Cifrado** — ECIES sobre secp256k1, con separación de dominio propia:
+
+```
+blob = E ‖ nonce ‖ AES-256-GCM(payload, K) ‖ tag     (E = clave pública efímera)
+K = SHA256(x(ECDH(e, pk_stick)) ‖ "m5-stick-provision-v1")
+```
+
+La seed **nunca** viaja en claro. El M5Stick descifra con su privada `sk_stick`,
+muestra `IMPORT SEED? FPR …`, y tras la confirmación física (`HOLD CENTER`) notifica
+el estado por `PROV_STATUS` (`idle`/`requested`/`accepted`/`denied`/`error`). La
+confirmación es física en **ambos** dispositivos (en el M5Paper, aviso de seguridad
+previo).
+
+UUIDs, tamaños exactos y flujo completo en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
+
 ---
 
 ## 5. QR y emisión
@@ -214,6 +244,14 @@ SHA256 y respuesta `READY`. También acepta `incommit-transaction: <base64>`.
 `qr_ble_client` implementa un cliente GATT (NimBLE) para recibir QR desde una
 Raspberry Pi. Se migró de Bluedroid a **NimBLE** por los `configASSERT` internos
 de Bluedroid en el M5Paper. No está accesible desde el menú.
+
+### 6.4 BLE (provisioning M5Stick)
+
+`ble_provision_client` implementa el cliente GATT (NimBLE) que envía la semilla al
+M5Stick. Anuncia como `M5Paper-Provis`, escanea `M5Stick-Signer`, lee
+`PROV_PUBKEY`, cifra con ECIES y escribe `PROV_REQ`; después se suscribe a
+`PROV_STATUS` y espera la confirmación física del M5Stick. El servicio/plantilla de
+características está definido en [`PROTOCOLO_M5STICK.md`](PROTOCOLO_M5STICK.md).
 
 ---
 
@@ -268,6 +306,8 @@ automáticamente; los textos dibujados directamente con `page.*` usan `lang::tr(
 - El soporte Taproot (BIP86) fue **eliminado** temporalmente porque su
   self-test fallaba; queda como trabajo futuro.
 - Soporte Ethereum (v2.0) — ver [`ETH_v2.0.md`](ETH_v2.0.md), sin implementar.
+- Provisioning M5Stick: el lado **servidor** (firmware del M5Stick) es un proyecto
+  aparte; el M5Paper solo implementa el cliente.
 
 Nota: los hallazgos S-1 (blinding ECC), S-2 (limpieza de `String`) y S-3
 (límite de iteraciones PBKDF2) de [`AUDITORIA.md`](AUDITORIA.md) ya fueron

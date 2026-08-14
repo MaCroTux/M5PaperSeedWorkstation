@@ -6,3 +6,7 @@
 
 # Snapshots de heap (debug)
 *.heapsnapshot
+
+# Compilacion / editor
+compile_commands.json
+.cache/
