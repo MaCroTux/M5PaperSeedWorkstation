@@ -136,34 +136,39 @@ BIP39, BIP32 xpub/zpub (+ passphrase), fingerprint, PBKDF2 (comparado contra
 La llave Core2 añade un **segundo método de desbloqueo** del vault de sesión, sin
 modificar el formato `.svm`/`.svs` existente.
 
-**Emparejamiento (ECDH secp256k1).** El Core2 guarda una privada de largo plazo
-`P_core2` (NVS `kpriv`). Durante el emparejamiento:
+**Modelo asimétrico.** El Core2 guarda una clave privada `sk` (secp256k1) y expone
+su clave pública `pk`. El M5Paper cifra la maestra `M` del vault con `pk`; solo el
+Core2 puede descifrarla. Así, robar únicamente el M5Paper no revela nada.
 
-- M5Paper genera un par efímero `(p_m, Q_m)` y envía `Q_m` (65 bytes, sin comprimir).
-- Core2 deriva `S = P_core2 · Q_m` y `K_pair = SHA256(x(S) ‖ tag)`; envía `Q_core2`.
-- M5Paper deriva `S = p_m · Q_core2` y el mismo `K_pair`.
+**Emparejamiento.** El M5Paper lee `pk` (característica `PAIR_PUBKEY` de solo
+lectura) y escribe `PAIR_CONFIRM`; el Core2 muestra `PAIR REQUEST` y, al pulsar
+`AUTHORIZE`, confirma. El M5Paper guarda `pk` en NVS (`bpk`), que es pública.
 
-`K_pair` nunca viaja por el aire y queda guardado en NVS (`kpair`) en ambos
-dispositivos. El Core2 exige confirmación física (`AUTHORIZE`) antes de revelar
-`Q_core2`.
-
-**Desbloqueo (challenge/response).** El M5Paper genera un challenge aleatorio de
-32 bytes; el Core2, solo tras `ALLOW`, devuelve `HMAC-SHA256(K_pair, challenge)`;
-el M5Paper verifica de forma independiente (comparación en tiempo constante).
-
-**Clave del vault.** La clave maestra `M` (32 bytes) del vault de sesión se envuelve
-en un archivo paralelo `.k2f`:
+**Clave protegida por PIN.** En el Core2, `sk` se guarda cifrada en NVS (`ksk`):
 
 ```
-K_pin = PBKDF2-HMAC-SHA256(PIN, salt, 150.000)   // frena fuerza bruta del PIN
-K_2f  = HMAC-SHA256(K_pair, K_pin)               // une llave + PIN
-.k2f  = AES-256-GCM(M, K_2f)  (ligado al vaultId, cabecera completa como AAD)
+K_pin = PBKDF2-HMAC-SHA256(PIN, salt, 150.000)
+ksk   = salt ‖ nonce ‖ AES-256-GCM(sk, K_pin) ‖ tag
 ```
 
-El flujo `DESBLOQUEAR CON CORE2` = BLE auth (Core2 presente) → PIN → `K_2f` →
-desencriptar `M` → cargar semillas. La contraseña sigue operativa como
-recuperación, y `MIGRAR A PASS+LLAVE` añade la llave a un vault existente sin
-perder acceso.
+El PIN se introduce en el propio Core2. 3 PINs fallidos borran `ksk` (la llave
+queda inutilizada; el vault solo se recupera re-migrando con la contraseña).
+
+**Envolver la maestra.** La maestra `M` (32 bytes) se guarda en un `.k2f`:
+
+```
+blob = E ‖ nonce ‖ AES-256-GCM(M, K_ecies) ‖ tag     (E = clave pública efímera)
+K_ecies = SHA256(x(ECDH(e, pk)) ‖ tag)
+```
+
+**Desbloqueo.** El M5Paper envía `E_sess ‖ blob` al Core2 (característica
+`UNLOCK_REQ`). El Core2 pide el PIN, recupera `sk`, descifra `M`, deriva la clave
+de sesión `K_sess = SHA256(x(ECDH(sk, E_sess)) ‖ tag)` y devuelve
+`AES-256-GCM(M, K_sess)` por `UNLOCK_RESP`. El M5Paper descifra con su `e_sess` y
+`pk`. `M` nunca viaja en claro; el Core2 solo la ve en RAM durante el descifrado.
+
+La contraseña sigue operativa como recuperación, y `MIGRAR A PASS+LLAVE` añade la
+llave a un vault existente sin perder acceso.
 
 ---
 

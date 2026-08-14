@@ -4,6 +4,9 @@ namespace ble_key {
 
 namespace {
 constexpr uint32_t kResultHoldMs = 1500;
+constexpr size_t kUnlockReqSize = kPubKeySize + vault_2fa::kBlobSize;
+constexpr size_t kUnlockRespSize =
+    kEciesNonceSize + vault_2fa::kMasterSize + kGcmTagSize;
 }
 
 class BleKeyServer::ServerCallbacks : public NimBLEServerCallbacks {
@@ -15,18 +18,26 @@ private:
   BleKeyServer* srv;
 };
 
-class BleKeyServer::ChallengeCallbacks : public NimBLECharacteristicCallbacks {
+class BleKeyServer::PairCallbacks : public NimBLECharacteristicCallbacks {
 public:
-  explicit ChallengeCallbacks(BleKeyServer* s) : srv(s) {}
-  void onWrite(NimBLECharacteristic* c) override { srv->onChallengeWrite(c); }
+  explicit PairCallbacks(BleKeyServer* s) : srv(s) {}
+  void onWrite(NimBLECharacteristic* c) override { srv->onPairConfirmWrite(c); }
 private:
   BleKeyServer* srv;
 };
 
-class BleKeyServer::PairCallbacks : public NimBLECharacteristicCallbacks {
+class BleKeyServer::SetPinCallbacks : public NimBLECharacteristicCallbacks {
 public:
-  explicit PairCallbacks(BleKeyServer* s) : srv(s) {}
-  void onWrite(NimBLECharacteristic* c) override { srv->onPairPubWrite(c); }
+  explicit SetPinCallbacks(BleKeyServer* s) : srv(s) {}
+  void onWrite(NimBLECharacteristic* c) override { srv->onSetPinWrite(c); }
+private:
+  BleKeyServer* srv;
+};
+
+class BleKeyServer::UnlockCallbacks : public NimBLECharacteristicCallbacks {
+public:
+  explicit UnlockCallbacks(BleKeyServer* s) : srv(s) {}
+  void onWrite(NimBLECharacteristic* c) override { srv->onUnlockWrite(c); }
 private:
   BleKeyServer* srv;
 };
@@ -34,26 +45,35 @@ private:
 BleKeyServer::BleKeyServer() {
   mux_ = xSemaphoreCreateMutex();
   serverCallbacks_ = new ServerCallbacks(this);
-  challengeCallbacks_ = new ChallengeCallbacks(this);
   pairCallbacks_ = new PairCallbacks(this);
+  setPinCallbacks_ = new SetPinCallbacks(this);
+  unlockCallbacks_ = new UnlockCallbacks(this);
 }
 
 BleKeyServer::~BleKeyServer() {
   delete serverCallbacks_;
-  delete challengeCallbacks_;
   delete pairCallbacks_;
+  delete setPinCallbacks_;
+  delete unlockCallbacks_;
   if (mux_) vSemaphoreDelete(mux_);
   mux_ = nullptr;
 }
 
 bool BleKeyServer::begin() {
-  if (!loadStoredPrivKey(priv_)) {
-    if (!generateKey(priv_)) return false;
-    saveStoredPrivKey(priv_);
-    Serial.println("[BLEKEY] identity key generated");
+  if (vault_2fa::hasEncryptedSk()) {
+    if (!loadStoredPk(pub_)) return false;
+    Serial.println("[BLEKEY] sk locked (PIN required)");
+  } else if (loadStoredPrivKey(sk_)) {
+    if (!derivePublicKey(sk_, pub_)) return false;
+    saveStoredPk(pub_);
+    Serial.println("[BLEKEY] sk loaded (no PIN yet)");
+  } else {
+    if (!generateKey(sk_)) return false;
+    saveStoredPrivKey(sk_);
+    if (!derivePublicKey(sk_, pub_)) return false;
+    saveStoredPk(pub_);
+    Serial.println("[BLEKEY] identity generated");
   }
-  if (!derivePublicKey(priv_, pub_)) return false;
-  hasPaired_ = loadStoredKey(kpair_);
 
   NimBLEDevice::init(kDeviceName);
   server_ = NimBLEDevice::createServer();
@@ -62,27 +82,27 @@ bool BleKeyServer::begin() {
   NimBLEService* svc = server_->createService(kServiceUUID);
   if (!svc) return false;
 
-  challengeChar_ = svc->createCharacteristic(kChallengeUUID, NIMBLE_PROPERTY::WRITE);
-  challengeChar_->setCallbacks(challengeCallbacks_);
-  responseChar_ = svc->createCharacteristic(kResponseUUID,
-                                            NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  statusChar_ = svc->createCharacteristic(kStatusUUID,
-                                          NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-
-  pairPubChar_ = svc->createCharacteristic(kPairPubKeyUUID, NIMBLE_PROPERTY::WRITE);
-  pairPubChar_->setCallbacks(pairCallbacks_);
-  pairResponseChar_ = svc->createCharacteristic(kPairResponseUUID,
-                                                NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  pairPubChar_ = svc->createCharacteristic(kPairPubKeyUUID, NIMBLE_PROPERTY::READ);
+  pairPubChar_->setValue(pub_, kPubKeySize);
+  pairConfirmChar_ = svc->createCharacteristic(kPairConfirmUUID, NIMBLE_PROPERTY::WRITE);
+  pairConfirmChar_->setCallbacks(pairCallbacks_);
   pairStatusChar_ = svc->createCharacteristic(kPairStatusUUID,
                                               NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-
+  setPinChar_ = svc->createCharacteristic(kSetPinUUID, NIMBLE_PROPERTY::WRITE);
+  setPinChar_->setCallbacks(setPinCallbacks_);
+  unlockReqChar_ = svc->createCharacteristic(kUnlockReqUUID, NIMBLE_PROPERTY::WRITE);
+  unlockReqChar_->setCallbacks(unlockCallbacks_);
+  unlockRespChar_ = svc->createCharacteristic(kUnlockRespUUID,
+                                              NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  unlockStatusChar_ = svc->createCharacteristic(kUnlockStatusUUID,
+                                                NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   infoChar_ = svc->createCharacteristic(kDeviceInfoUUID, NIMBLE_PROPERTY::READ);
   infoChar_->setValue(kDeviceInfoValue);
   svc->start();
 
-  const uint8_t idle = kStatusIdle;
-  statusChar_->setValue(&idle, 1);
+  const uint8_t idle = kPairIdle;
   pairStatusChar_->setValue(&idle, 1);
+  unlockStatusChar_->setValue(&idle, 1);
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(kServiceUUID);
@@ -92,84 +112,17 @@ bool BleKeyServer::begin() {
 
   state_ = State::Idle;
   pairState_ = PairState::Idle;
+  pinState_ = PinState::Idle;
   Serial.println("[BLEKEY] advertising as M5Core2-Key");
   return true;
 }
 
-// ---- desbloqueo (challenge/response) ----
+// ---- emparejamiento (intercambio de pk + confirmacion) ----
 
-void BleKeyServer::onChallengeWrite(NimBLECharacteristic* c) {
-  if (!hasPaired_) {
-    Serial.println("[BLEKEY] challenge ignored: not paired");
-    return;
-  }
-  const std::string v = c->getValue();
-  if (v.size() != kChallengeSize) {
-    Serial.println("[BLEKEY] challenge malformed");
-    return;
-  }
-  lock();
-  memcpy(challenge_, v.data(), kChallengeSize);
-  challengeReady_ = true;
-  state_ = State::Requested;
-  requestStartMs_ = 0;
-  unlock();
-  notifyStatus(kStatusRequested);
-  Serial.println("[BLEKEY] challenge received");
-}
-
-void BleKeyServer::notifyStatus(Status s) {
-  if (!statusChar_) return;
-  const uint8_t b = static_cast<uint8_t>(s);
-  statusChar_->setValue(&b, 1);
-  statusChar_->notify();
-}
-
-void BleKeyServer::allow() {
-  if (state_ != State::Requested || !hasPaired_) return;
-  uint8_t resp[kResponseSize] = {};
-  lock();
-  const bool ok = hmacSha256(kpair_, kKeySize, challenge_, kChallengeSize, resp);
-  wipe(challenge_, sizeof(challenge_));
-  challengeReady_ = false;
-  state_ = State::Authorized;
-  unlock();
-  resultStartMs_ = 0;
-  if (ok && responseChar_) {
-    responseChar_->setValue(resp, kResponseSize);
-    responseChar_->notify();
-  }
-  notifyStatus(kStatusAuthorized);
-  wipe(resp, sizeof(resp));
-  Serial.println("[BLEKEY] authorization confirmed");
-}
-
-void BleKeyServer::deny() {
-  if (state_ != State::Requested) return;
-  lock();
-  wipe(challenge_, sizeof(challenge_));
-  challengeReady_ = false;
-  state_ = State::Denied;
-  unlock();
-  resultStartMs_ = 0;
-  notifyStatus(kStatusDenied);
-  Serial.println("[BLEKEY] denied");
-}
-
-// ---- emparejamiento ----
-
-void BleKeyServer::onPairPubWrite(NimBLECharacteristic* c) {
-  const std::string v = c->getValue();
-  if (v.size() != kPubKeySize) {
-    Serial.println("[BLEKEY] pair pubkey malformed");
-    return;
-  }
-  lock();
-  memcpy(pairPub_, v.data(), kPubKeySize);
-  pairPubReady_ = true;
+void BleKeyServer::onPairConfirmWrite(NimBLECharacteristic*) {
+  if (pairState_ != PairState::Idle) return;
   pairState_ = PairState::Requested;
   pairStartMs_ = 0;
-  unlock();
   notifyPairStatus(kPairRequested);
   Serial.println("[BLEKEY] pairing requested");
 }
@@ -183,38 +136,196 @@ void BleKeyServer::notifyPairStatus(PairStatus s) {
 
 void BleKeyServer::allowPairing() {
   if (pairState_ != PairState::Requested) return;
-  lock();
-  wipe(kpair_, sizeof(kpair_));
-  const bool ok = deriveSharedKpair(priv_, pairPub_, kpair_);
-  wipe(pairPub_, sizeof(pairPub_));
-  pairPubReady_ = false;
   pairState_ = PairState::Authorized;
-  unlock();
   pairResultStartMs_ = 0;
-  if (ok) {
-    saveStoredKey(kpair_);
-    hasPaired_ = true;
-    if (pairResponseChar_) {
-      pairResponseChar_->setValue(pub_, kPubKeySize);
-      pairResponseChar_->notify();
-    }
-    Serial.println("[BLEKEY] paired");
-  } else {
-    Serial.println("[BLEKEY] pairing derivation failed");
-  }
-  notifyPairStatus(ok ? kPairAuthorized : kPairDenied);
+  hasPaired_ = true;
+  if (pairPubChar_) pairPubChar_->setValue(pub_, kPubKeySize);
+  notifyPairStatus(kPairAuthorized);
+  Serial.println("[BLEKEY] paired");
 }
 
 void BleKeyServer::denyPairing() {
   if (pairState_ != PairState::Requested) return;
-  lock();
-  wipe(pairPub_, sizeof(pairPub_));
-  pairPubReady_ = false;
   pairState_ = PairState::Denied;
-  unlock();
   pairResultStartMs_ = 0;
   notifyPairStatus(kPairDenied);
   Serial.println("[BLEKEY] pairing denied");
+}
+
+// ---- PIN ----
+
+void BleKeyServer::onSetPinWrite(NimBLECharacteristic*) {
+  if (vault_2fa::hasEncryptedSk()) {
+    // PIN ya fijado: no hay nada que hacer.
+    notifyUnlockStatus(kUnlockAuthorized);
+    Serial.println("[BLEKEY] PIN already set");
+    return;
+  }
+  if (!loadStoredPrivKey(sk_)) {
+    notifyUnlockStatus(kUnlockDenied);
+    return;
+  }
+  memset(pinBuffer_, 0, sizeof(pinBuffer_));
+  memset(pinFirst_, 0, sizeof(pinFirst_));
+  pinFails_ = 0;
+  pinState_ = PinState::SetEntry;
+  notifyUnlockStatus(kUnlockPinRequired);
+  Serial.println("[BLEKEY] PIN set requested");
+}
+
+void BleKeyServer::pinDigit(char d) {
+  if (pinState_ != PinState::SetEntry && pinState_ != PinState::SetConfirm &&
+      pinState_ != PinState::UnlockEntry) return;
+  const size_t len = strlen(pinBuffer_);
+  if (len < 6) { pinBuffer_[len] = d; pinBuffer_[len + 1] = '\0'; }
+}
+
+void BleKeyServer::pinBackspace() {
+  const size_t len = strlen(pinBuffer_);
+  if (len) pinBuffer_[len - 1] = '\0';
+}
+
+void BleKeyServer::pinSubmit() {
+  if (strlen(pinBuffer_) != 6) return;
+  if (pinState_ == PinState::SetEntry) {
+    strncpy(pinFirst_, pinBuffer_, sizeof(pinFirst_) - 1);
+    memset(pinBuffer_, 0, sizeof(pinBuffer_));
+    pinState_ = PinState::SetConfirm;
+  } else if (pinState_ == PinState::SetConfirm) {
+    if (!strcmp(pinBuffer_, pinFirst_)) {
+      doSetPin();
+    } else {
+      pinFails_++;
+      memset(pinFirst_, 0, sizeof(pinFirst_));
+      memset(pinBuffer_, 0, sizeof(pinBuffer_));
+      pinState_ = PinState::SetEntry;
+      notifyUnlockStatus(kUnlockPinFailed);
+    }
+  } else if (pinState_ == PinState::UnlockEntry) {
+    if (unlockSkWithPin()) {
+      pinFails_ = 0;
+      pinState_ = PinState::Done;
+      processUnlock();
+    } else {
+      pinFails_++;
+      memset(pinBuffer_, 0, sizeof(pinBuffer_));
+      if (pinFails_ >= 3) wipeSk();
+      else notifyUnlockStatus(kUnlockPinFailed);
+    }
+  }
+}
+
+void BleKeyServer::pinCancel() {
+  memset(pinBuffer_, 0, sizeof(pinBuffer_));
+  memset(pinFirst_, 0, sizeof(pinFirst_));
+  pinState_ = PinState::Idle;
+  if (state_ == State::Requested) {
+    lock();
+    wipe(unlockReq_, sizeof(unlockReq_));
+    unlockReqReady_ = false;
+    unlock();
+    state_ = State::Denied;
+    resultStartMs_ = 0;
+    notifyUnlockStatus(kUnlockDenied);
+  }
+}
+
+bool BleKeyServer::unlockSkWithPin() {
+  return vault_2fa::loadDecryptedSk(pinBuffer_, sk_);
+}
+
+void BleKeyServer::doSetPin() {
+  if (!vault_2fa::saveEncryptedSk(sk_, pinBuffer_)) {
+    pinState_ = PinState::Failed;
+    notifyUnlockStatus(kUnlockDenied);
+    return;
+  }
+  ble_key::detail::nvsErase("kpriv");
+  memset(pinBuffer_, 0, sizeof(pinBuffer_));
+  memset(pinFirst_, 0, sizeof(pinFirst_));
+  pinState_ = PinState::Done;
+  notifyUnlockStatus(kUnlockAuthorized);
+  Serial.println("[BLEKEY] PIN set");
+}
+
+void BleKeyServer::wipeSk() {
+  vault_2fa::eraseEncryptedSk();
+  memset(pinBuffer_, 0, sizeof(pinBuffer_));
+  memset(pinFirst_, 0, sizeof(pinFirst_));
+  pinFails_ = 0;
+  pinState_ = PinState::Idle;
+  lock();
+  wipe(unlockReq_, sizeof(unlockReq_));
+  unlockReqReady_ = false;
+  unlock();
+  state_ = State::Denied;
+  resultStartMs_ = 0;
+  notifyUnlockStatus(kUnlockWiped);
+  Serial.println("[BLEKEY] PIN failed 3x: sk wiped");
+}
+
+// ---- desbloqueo ----
+
+void BleKeyServer::onUnlockWrite(NimBLECharacteristic* c) {
+  const std::string v = c->getValue();
+  if (v.size() != kUnlockReqSize) {
+    notifyUnlockStatus(kUnlockDenied);
+    return;
+  }
+  if (!vault_2fa::hasEncryptedSk()) {
+    notifyUnlockStatus(kUnlockDenied);
+    Serial.println("[BLEKEY] unlock denied: no PIN set");
+    return;
+  }
+  lock();
+  memcpy(unlockReq_, v.data(), kUnlockReqSize);
+  unlockReqReady_ = true;
+  state_ = State::Requested;
+  requestStartMs_ = 0;
+  unlock();
+  memset(pinBuffer_, 0, sizeof(pinBuffer_));
+  pinFails_ = 0;
+  pinState_ = PinState::UnlockEntry;
+  notifyUnlockStatus(kUnlockPinRequired);
+  Serial.println("[BLEKEY] unlock requested");
+}
+
+void BleKeyServer::notifyUnlockStatus(uint8_t s) {
+  if (!unlockStatusChar_) return;
+  unlockStatusChar_->setValue(&s, 1);
+  unlockStatusChar_->notify();
+}
+
+void BleKeyServer::processUnlock() {
+  // unlockReq_ = E_sess(65) || ECIES(M)(125)
+  uint8_t M[vault_2fa::kMasterSize] = {};
+  size_t Mlen = 0;
+  const bool ok = eciesDecrypt(sk_, unlockReq_ + kPubKeySize,
+                               vault_2fa::kBlobSize, M, &Mlen);
+  if (ok && Mlen == vault_2fa::kMasterSize) {
+    uint8_t Ksess[kKeySize] = {};
+    if (deriveEcdhKey(sk_, unlockReq_, "m5-vault-session-v1", Ksess)) {
+      uint8_t resp[kUnlockRespSize] = {};
+      size_t respLen = 0;
+      if (aesGcmEncrypt(Ksess, M, vault_2fa::kMasterSize, resp, &respLen) &&
+          unlockRespChar_) {
+        unlockRespChar_->setValue(resp, respLen);
+        unlockRespChar_->notify();
+      }
+      wipe(resp, sizeof(resp));
+    }
+    wipe(Ksess, sizeof(Ksess));
+  }
+  wipe(M, sizeof(M));
+  wipe(sk_, sizeof(sk_));  // la privada no debe quedar en RAM
+  lock();
+  wipe(unlockReq_, sizeof(unlockReq_));
+  unlockReqReady_ = false;
+  unlock();
+  state_ = State::Authorized;
+  resultStartMs_ = 0;
+  notifyUnlockStatus(kUnlockAuthorized);
+  Serial.println("[BLEKEY] vault master decrypted");
 }
 
 // ---- conexion / estados ----
@@ -227,61 +338,50 @@ void BleKeyServer::onClientDisconnect(NimBLEServer*) {
   Serial.println("[BLEKEY] client disconnected");
   lock();
   if (state_ == State::Requested) {
-    wipe(challenge_, sizeof(challenge_));
-    challengeReady_ = false;
+    wipe(unlockReq_, sizeof(unlockReq_));
+    unlockReqReady_ = false;
     state_ = State::Idle;
   }
-  if (pairState_ == PairState::Requested) {
-    wipe(pairPub_, sizeof(pairPub_));
-    pairPubReady_ = false;
-    pairState_ = PairState::Idle;
-  }
+  if (pairState_ == PairState::Requested) pairState_ = PairState::Idle;
   unlock();
+  pinState_ = PinState::Idle;
+  memset(pinBuffer_, 0, sizeof(pinBuffer_));
+  memset(pinFirst_, 0, sizeof(pinFirst_));
 }
 
 void BleKeyServer::update() {
+  const uint32_t now = millis();
   if (state_ == State::Requested) {
-    if (requestStartMs_ == 0) {
-      requestStartMs_ = millis();
-    } else if (millis() - requestStartMs_ > kAuthTimeoutMs) {
-      Serial.println("[BLEKEY] auth timeout");
+    if (requestStartMs_ == 0) requestStartMs_ = now;
+    else if (now - requestStartMs_ > kAuthTimeoutMs) {
       lock();
-      wipe(challenge_, sizeof(challenge_));
-      challengeReady_ = false;
-      state_ = State::Timeout;
+      wipe(unlockReq_, sizeof(unlockReq_));
+      unlockReqReady_ = false;
       unlock();
+      state_ = State::Timeout;
+      pinState_ = PinState::Idle;
+      memset(pinBuffer_, 0, sizeof(pinBuffer_));
       resultStartMs_ = 0;
-      notifyStatus(kStatusTimeout);
+      notifyUnlockStatus(kUnlockDenied);
+      Serial.println("[BLEKEY] unlock timeout");
     }
   } else if (state_ == State::Authorized || state_ == State::Denied ||
              state_ == State::Timeout) {
-    if (resultStartMs_ == 0) {
-      resultStartMs_ = millis();
-    } else if (millis() - resultStartMs_ > kResultHoldMs) {
-      state_ = State::Idle;
-      resultStartMs_ = 0;
-      notifyStatus(kStatusIdle);
-    }
+    if (resultStartMs_ == 0) resultStartMs_ = now;
+    else if (now - resultStartMs_ > kResultHoldMs) { state_ = State::Idle; resultStartMs_ = 0; }
   }
 
   if (pairState_ == PairState::Requested) {
-    if (pairStartMs_ == 0) {
-      pairStartMs_ = millis();
-    } else if (millis() - pairStartMs_ > kAuthTimeoutMs) {
-      Serial.println("[BLEKEY] pairing timeout");
-      lock();
-      wipe(pairPub_, sizeof(pairPub_));
-      pairPubReady_ = false;
+    if (pairStartMs_ == 0) pairStartMs_ = now;
+    else if (now - pairStartMs_ > kAuthTimeoutMs) {
       pairState_ = PairState::Timeout;
-      unlock();
       pairResultStartMs_ = 0;
       notifyPairStatus(kPairDenied);
     }
   } else if (pairState_ == PairState::Authorized || pairState_ == PairState::Denied ||
              pairState_ == PairState::Timeout) {
-    if (pairResultStartMs_ == 0) {
-      pairResultStartMs_ = millis();
-    } else if (millis() - pairResultStartMs_ > kResultHoldMs) {
+    if (pairResultStartMs_ == 0) pairResultStartMs_ = now;
+    else if (now - pairResultStartMs_ > kResultHoldMs) {
       pairState_ = PairState::Idle;
       pairResultStartMs_ = 0;
       notifyPairStatus(kPairIdle);

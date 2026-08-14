@@ -4,13 +4,8 @@ namespace ble_key {
 
 namespace {
 constexpr uint32_t kScanTimeoutMs = 15000;
-
-bool ctEqual(const uint8_t* a, const uint8_t* b, size_t n) {
-  uint8_t d = 0;
-  for (size_t i = 0; i < n; ++i) d |= a[i] ^ b[i];
-  return d == 0;
+constexpr size_t kUnlockReqSize = kPubKeySize + vault_2fa::kBlobSize;
 }
-}  // namespace
 
 class BleKeyClient::ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 public:
@@ -43,57 +38,51 @@ BleKeyClient::~BleKeyClient() {
   mux_ = nullptr;
 }
 
-void BleKeyClient::start() {
-  if (phase_ == Phase::Scanning || phase_ == Phase::Connecting ||
-      phase_ == Phase::Requesting) return;
+void BleKeyClient::startPairing() {
+  if (phase_ == Phase::Scanning || phase_ == Phase::Connecting) return;
   teardown();
-  pairingMode_ = false;
-  if (!loadStoredKey(key_)) {
-    Serial.println("[BLEKEY] no stored key");
-    phase_ = Phase::Failed;
-    error_ = Error::None;
-    return;
-  }
-  esp_fill_random(challenge_, kChallengeSize);
+  mode_ = 1;
   lock();
-  found_ = false;
-  connected_ = false;
-  disconnected_ = false;
-  responseReceived_ = false;
-  memset(response_, 0, sizeof(response_));
-  statusReceived_ = false;
-  status_ = kStatusIdle;
+  found_ = connected_ = disconnected_ = false;
+  pairStatusRcvd_ = unlockStatusRcvd_ = unlockRespRcvd_ = false;
   unlock();
   error_ = Error::None;
   beginScan();
 }
 
-void BleKeyClient::startPairing() {
-  if (phase_ == Phase::Scanning || phase_ == Phase::Connecting ||
-      phase_ == Phase::Requesting) return;
+void BleKeyClient::startSetPin() {
+  if (phase_ == Phase::Scanning || phase_ == Phase::Connecting) return;
   teardown();
-  pairingMode_ = true;
-  if (!generateKeyPair(ephPriv_, ephPub_)) {
+  mode_ = 2;
+  lock();
+  found_ = connected_ = disconnected_ = false;
+  pairStatusRcvd_ = unlockStatusRcvd_ = unlockRespRcvd_ = false;
+  unlock();
+  error_ = Error::None;
+  beginScan();
+}
+
+void BleKeyClient::startUnlock(const uint8_t blob[vault_2fa::kBlobSize]) {
+  if (phase_ == Phase::Scanning || phase_ == Phase::Connecting) return;
+  teardown();
+  mode_ = 3;
+  if (!loadStoredPk(pk_) || !generateKeyPair(eSess_, blob_ /* E_sess */)) {
     phase_ = Phase::Failed;
     error_ = Error::BleInit;
     return;
   }
+  memcpy(blob_ + kPubKeySize, blob, vault_2fa::kBlobSize);
+  masterReady_ = false;
+  memset(master_, 0, sizeof(master_));
   lock();
-  found_ = false;
-  connected_ = false;
-  disconnected_ = false;
-  responseReceived_ = false;
-  statusReceived_ = false;
-  pairResponseReceived_ = false;
-  pairStatusReceived_ = false;
-  pairStatus_ = kPairIdle;
+  found_ = connected_ = disconnected_ = false;
+  pairStatusRcvd_ = unlockStatusRcvd_ = unlockRespRcvd_ = false;
   unlock();
   error_ = Error::None;
   beginScan();
 }
 
 void BleKeyClient::beginScan() {
-  Serial.println("[BLEKEY] stack=NimBLE");
   Serial.println("[BLEKEY] scanning");
   NimBLEDevice::init("M5Paper-Key");
   bleOn_ = true;
@@ -109,22 +98,20 @@ void BleKeyClient::beginScan() {
 
 void BleKeyClient::cancel() {
   if (phase_ == Phase::Idle || phase_ == Phase::Cancelled) return;
-  Serial.println("[BLEKEY] cancel");
   teardown();
   phase_ = Phase::Cancelled;
 }
 
 void BleKeyClient::clear() {
   teardown();
-  wipe(key_, sizeof(key_));
-  wipe(challenge_, sizeof(challenge_));
-  wipe(response_, sizeof(response_));
-  wipe(ephPriv_, sizeof(ephPriv_));
-  wipe(ephPub_, sizeof(ephPub_));
-  wipe(theirPub_, sizeof(theirPub_));
+  wipe(pk_, sizeof(pk_));
+  wipe(eSess_, sizeof(eSess_));
+  wipe(blob_, sizeof(blob_));
+  wipe(master_, sizeof(master_));
+  masterReady_ = false;
   error_ = Error::None;
   phase_ = Phase::Idle;
-  pairingMode_ = false;
+  mode_ = 0;
 }
 
 void BleKeyClient::onScanResult(NimBLEAdvertisedDevice* device) {
@@ -140,78 +127,52 @@ void BleKeyClient::onScanResult(NimBLEAdvertisedDevice* device) {
 }
 
 void BleKeyClient::onConnectCallback(NimBLEClient*) {
-  lock();
-  connected_ = true;
-  disconnected_ = false;
-  unlock();
+  lock(); connected_ = true; disconnected_ = false; unlock();
 }
 
 void BleKeyClient::onDisconnectCallback(NimBLEClient*) {
-  lock();
-  disconnected_ = true;
-  connected_ = false;
-  unlock();
+  lock(); disconnected_ = true; connected_ = false; unlock();
   Serial.println("[BLEKEY] disconnected");
-}
-
-void BleKeyClient::onResponseNotify(uint8_t* data, size_t len) {
-  if (len != kResponseSize) return;
-  lock();
-  memcpy(response_, data, kResponseSize);
-  responseReceived_ = true;
-  unlock();
-  Serial.println("[BLEKEY] response received");
-}
-
-void BleKeyClient::onStatusNotify(uint8_t* data, size_t len) {
-  if (len < 1) return;
-  lock();
-  status_ = static_cast<Status>(data[0]);
-  statusReceived_ = true;
-  unlock();
-  Serial.printf("[BLEKEY] status=%u\n", static_cast<unsigned>(data[0]));
-}
-
-void BleKeyClient::onPairResponseNotify(uint8_t* data, size_t len) {
-  if (len != kPubKeySize) return;
-  lock();
-  memcpy(theirPub_, data, kPubKeySize);
-  pairResponseReceived_ = true;
-  unlock();
-  Serial.println("[BLEKEY] pair pubkey received");
 }
 
 void BleKeyClient::onPairStatusNotify(uint8_t* data, size_t len) {
   if (len < 1) return;
-  lock();
-  pairStatus_ = static_cast<PairStatus>(data[0]);
-  pairStatusReceived_ = true;
-  unlock();
+  lock(); pairStatus_ = data[0]; pairStatusRcvd_ = true; unlock();
   Serial.printf("[BLEKEY] pair status=%u\n", static_cast<unsigned>(data[0]));
+}
+
+void BleKeyClient::onUnlockStatusNotify(uint8_t* data, size_t len) {
+  if (len < 1) return;
+  lock(); unlockStatus_ = data[0]; unlockStatusRcvd_ = true; unlock();
+  Serial.printf("[BLEKEY] unlock status=%u\n", static_cast<unsigned>(data[0]));
+}
+
+void BleKeyClient::onUnlockRespNotify(uint8_t* data, size_t len) {
+  if (len != sizeof(unlockResp_)) return;
+  lock();
+  memcpy(unlockResp_, data, len);
+  unlockRespRcvd_ = true;
+  unlock();
+  Serial.println("[BLEKEY] unlock response received");
 }
 
 void BleKeyClient::update() {
   switch (phase_) {
     case Phase::Scanning: {
       bool found = false;
-      lock();
-      found = found_;
-      unlock();
+      lock(); found = found_; unlock();
       if (found) {
         if (scan_ && scanning_) { scan_->stop(); scanning_ = false; }
-
         phase_ = Phase::Connecting;
         client_ = NimBLEDevice::createClient();
         client_->setClientCallbacks(clientCallbacks_, false);
         if (!client_->connect(NimBLEAddress(foundAddr_, foundType_))) {
-          Serial.println("[BLEKEY] connect failed");
           error_ = Error::ConnectFailed;
           teardown();
           phase_ = Phase::Failed;
           break;
         }
         Serial.println("[BLEKEY] connected");
-
         NimBLERemoteService* service = client_->getService(kServiceUUID);
         if (!service) {
           error_ = Error::ServiceNotFound;
@@ -219,170 +180,157 @@ void BleKeyClient::update() {
           phase_ = Phase::Failed;
           break;
         }
-
-        if (pairingMode_) {
-          NimBLERemoteCharacteristic* pubKey =
-              service->getCharacteristic(kPairPubKeyUUID);
-          NimBLERemoteCharacteristic* response =
-              service->getCharacteristic(kPairResponseUUID);
-          NimBLERemoteCharacteristic* status =
-              service->getCharacteristic(kPairStatusUUID);
-          if (!pubKey || !response || !status) {
+        if (mode_ == 1) {
+          NimBLERemoteCharacteristic* pubKey = service->getCharacteristic(kPairPubKeyUUID);
+          NimBLERemoteCharacteristic* confirm = service->getCharacteristic(kPairConfirmUUID);
+          NimBLERemoteCharacteristic* status = service->getCharacteristic(kPairStatusUUID);
+          if (!pubKey || !confirm || !status) {
             error_ = Error::SubscribeFailed;
             teardown();
             phase_ = Phase::Failed;
             break;
           }
-          response->subscribe(true, [this](NimBLERemoteCharacteristic*,
-                                           uint8_t* p, size_t l, bool) {
-            onPairResponseNotify(p, l);
-          });
+          const std::string pkStr = pubKey->readValue();
+          if (pkStr.size() != kPubKeySize) {
+            error_ = Error::BadResponse;
+            teardown();
+            phase_ = Phase::Failed;
+            break;
+          }
+          memcpy(pk_, pkStr.data(), kPubKeySize);
           status->subscribe(true, [this](NimBLERemoteCharacteristic*,
                                          uint8_t* p, size_t l, bool) {
             onPairStatusNotify(p, l);
           });
-          if (!pubKey->writeValue(ephPub_, kPubKeySize, false)) {
+          const uint8_t one = 1;
+          if (!confirm->writeValue(&one, 1, false)) {
             error_ = Error::WriteFailed;
             teardown();
             phase_ = Phase::Failed;
             break;
           }
-          Serial.println("[BLEKEY] pair pubkey sent");
           requestStartMs_ = millis();
-          phase_ = Phase::Requesting;
-        } else {
-          NimBLERemoteCharacteristic* challenge =
-              service->getCharacteristic(kChallengeUUID);
-          NimBLERemoteCharacteristic* response =
-              service->getCharacteristic(kResponseUUID);
-          NimBLERemoteCharacteristic* status =
-              service->getCharacteristic(kStatusUUID);
-          if (!challenge || !response || !status) {
+          phase_ = Phase::PairRequesting;
+        } else if (mode_ == 2) {
+          NimBLERemoteCharacteristic* setPin = service->getCharacteristic(kSetPinUUID);
+          NimBLERemoteCharacteristic* status = service->getCharacteristic(kUnlockStatusUUID);
+          if (!setPin || !status) {
             error_ = Error::SubscribeFailed;
             teardown();
             phase_ = Phase::Failed;
             break;
           }
-          response->subscribe(true, [this](NimBLERemoteCharacteristic*,
-                                           uint8_t* p, size_t l, bool) {
-            onResponseNotify(p, l);
-          });
           status->subscribe(true, [this](NimBLERemoteCharacteristic*,
                                          uint8_t* p, size_t l, bool) {
-            onStatusNotify(p, l);
+            onUnlockStatusNotify(p, l);
           });
-          if (!challenge->writeValue(challenge_, kChallengeSize, false)) {
+          const uint8_t one = 1;
+          if (!setPin->writeValue(&one, 1, false)) {
             error_ = Error::WriteFailed;
             teardown();
             phase_ = Phase::Failed;
             break;
           }
-          Serial.println("[BLEKEY] challenge generated");
           requestStartMs_ = millis();
-          phase_ = Phase::Requesting;
+          phase_ = Phase::SetPinRequesting;
+        } else {  // mode 3 unlock
+          NimBLERemoteCharacteristic* req = service->getCharacteristic(kUnlockReqUUID);
+          NimBLERemoteCharacteristic* resp = service->getCharacteristic(kUnlockRespUUID);
+          NimBLERemoteCharacteristic* status = service->getCharacteristic(kUnlockStatusUUID);
+          if (!req || !resp || !status) {
+            error_ = Error::SubscribeFailed;
+            teardown();
+            phase_ = Phase::Failed;
+            break;
+          }
+          resp->subscribe(true, [this](NimBLERemoteCharacteristic*,
+                                       uint8_t* p, size_t l, bool) {
+            onUnlockRespNotify(p, l);
+          });
+          status->subscribe(true, [this](NimBLERemoteCharacteristic*,
+                                         uint8_t* p, size_t l, bool) {
+            onUnlockStatusNotify(p, l);
+          });
+          if (!req->writeValue(blob_, kUnlockReqSize, false)) {
+            error_ = Error::WriteFailed;
+            teardown();
+            phase_ = Phase::Failed;
+            break;
+          }
+          requestStartMs_ = millis();
+          phase_ = Phase::UnlockRequesting;
         }
       } else if (millis() - scanStartMs_ > kScanTimeoutMs) {
         if (scan_ && scanning_) { scan_->stop(); scanning_ = false; }
         error_ = Error::ScanTimeout;
-        Serial.println("[BLEKEY] scan timeout");
         teardown();
         phase_ = Phase::Failed;
       }
       break;
     }
 
-    case Phase::Requesting: {
-      bool disconnected = false;
-      lock();
-      disconnected = disconnected_;
-      unlock();
-      if (disconnected) {
-        error_ = Error::Disconnected;
+    case Phase::PairRequesting: {
+      bool dis = false, rcvd = false;
+      uint8_t st = 0;
+      lock(); dis = disconnected_; rcvd = pairStatusRcvd_; st = pairStatus_; unlock();
+      if (dis) { error_ = Error::Disconnected; teardown(); phase_ = Phase::Failed; break; }
+      if (rcvd && st == kPairAuthorized) {
+        saveStoredPk(pk_);
         teardown();
-        phase_ = Phase::Failed;
+        phase_ = Phase::Paired;
+        Serial.println("[BLEKEY] paired (pk saved)");
         break;
       }
+      if (rcvd && st == kPairDenied) { teardown(); phase_ = Phase::Denied; break; }
+      if (millis() - requestStartMs_ > kAuthTimeoutMs) {
+        error_ = Error::Timeout; teardown(); phase_ = Phase::Failed;
+      }
+      break;
+    }
 
-      if (pairingMode_) {
-        bool response = false, statusRcvd = false;
-        PairStatus st = kPairIdle;
-        lock();
-        response = pairResponseReceived_;
-        statusRcvd = pairStatusReceived_;
-        st = pairStatus_;
-        unlock();
-        if (statusRcvd && st == kPairDenied) {
-          Serial.println("[BLEKEY] pairing denied");
-          teardown();
-          phase_ = Phase::Denied;
-          break;
-        }
-        if (response) {
-          uint8_t kpair[kKeySize] = {};
-          const bool ok = deriveSharedKpair(ephPriv_, theirPub_, kpair);
-          if (ok) saveStoredKey(kpair);
-          wipe(kpair, sizeof(kpair));
-          teardown();
-          if (ok) {
-            Serial.println("[BLEKEY] paired");
-            phase_ = Phase::Paired;
-          } else {
-            Serial.println("[BLEKEY] pairing derivation failed");
-            error_ = Error::BadResponse;
-            phase_ = Phase::Failed;
-          }
-          break;
-        }
-        if (millis() - requestStartMs_ > kAuthTimeoutMs) {
-          error_ = Error::Timeout;
-          Serial.println("[BLEKEY] pairing timeout");
-          teardown();
+    case Phase::SetPinRequesting: {
+      bool dis = false, rcvd = false;
+      uint8_t st = 0;
+      lock(); dis = disconnected_; rcvd = unlockStatusRcvd_; st = unlockStatus_; unlock();
+      if (dis) { error_ = Error::Disconnected; teardown(); phase_ = Phase::Failed; break; }
+      if (rcvd && st == kUnlockAuthorized) { teardown(); phase_ = Phase::SetPinDone; break; }
+      if (rcvd && st == kUnlockDenied) { teardown(); phase_ = Phase::Denied; break; }
+      if (millis() - requestStartMs_ > kAuthTimeoutMs) {
+        error_ = Error::Timeout; teardown(); phase_ = Phase::Failed;
+      }
+      break;
+    }
+
+    case Phase::UnlockRequesting: {
+      bool dis = false, resp = false;
+      lock(); dis = disconnected_; resp = unlockRespRcvd_; unlock();
+      if (dis) { error_ = Error::Disconnected; teardown(); phase_ = Phase::Failed; break; }
+      if (resp) {
+        uint8_t Ksess[kKeySize] = {};
+        size_t ml = 0;
+        const bool ok = deriveEcdhKey(eSess_, pk_, "m5-vault-session-v1", Ksess) &&
+            aesGcmDecrypt(Ksess, unlockResp_, sizeof(unlockResp_), master_, &ml) &&
+            ml == vault_2fa::kMasterSize;
+        wipe(Ksess, sizeof(Ksess));
+        teardown();
+        if (ok) {
+          masterReady_ = true;
+          phase_ = Phase::Unlocked;
+          Serial.println("[BLEKEY] vault master received");
+        } else {
+          error_ = Error::BadResponse;
           phase_ = Phase::Failed;
         }
-      } else {
-        bool response = false, statusRcvd = false;
-        Status st = kStatusIdle;
-        lock();
-        response = responseReceived_;
-        statusRcvd = statusReceived_;
-        st = status_;
-        unlock();
-        if (statusRcvd && st == kStatusDenied) {
-          Serial.println("[BLEKEY] denied by user");
-          teardown();
-          phase_ = Phase::Denied;
-          break;
-        }
-        if (statusRcvd && st == kStatusTimeout) {
-          error_ = Error::Timeout;
-          teardown();
-          phase_ = Phase::Failed;
-          break;
-        }
-        if (response) {
-          uint8_t expected[kResponseSize] = {};
-          const bool ok = hmacSha256(key_, kKeySize, challenge_, kChallengeSize,
-                                     expected);
-          const bool match = ok && ctEqual(expected, response_, kResponseSize);
-          wipe(expected, sizeof(expected));
-          teardown();
-          if (match) {
-            Serial.println("[BLEKEY] HMAC verified");
-            Serial.println("[AUTH] Core2 verified");
-            phase_ = Phase::Verified;
-          } else {
-            Serial.println("[BLEKEY] HMAC mismatch");
-            error_ = Error::BadResponse;
-            phase_ = Phase::Failed;
-          }
-          break;
-        }
-        if (millis() - requestStartMs_ > kAuthTimeoutMs) {
-          error_ = Error::Timeout;
-          Serial.println("[BLEKEY] auth timeout");
-          teardown();
-          phase_ = Phase::Failed;
-        }
+        break;
+      }
+      {
+        bool rcvd = false; uint8_t st = 0;
+        lock(); rcvd = unlockStatusRcvd_; st = unlockStatus_; unlock();
+        if (rcvd && st == kUnlockWiped) { teardown(); phase_ = Phase::Failed; break; }
+        if (rcvd && st == kUnlockDenied) { teardown(); phase_ = Phase::Denied; break; }
+      }
+      if (millis() - requestStartMs_ > kAuthTimeoutMs) {
+        error_ = Error::Timeout; teardown(); phase_ = Phase::Failed;
       }
       break;
     }
@@ -393,35 +341,24 @@ void BleKeyClient::update() {
 }
 
 const char* BleKeyClient::statusText() {
-  if (pairingMode_) {
-    switch (phase_) {
-      case Phase::Scanning: return "Buscando M5Core2...";
-      case Phase::Connecting: return "Conectando...";
-      case Phase::Requesting: return "Autoriza el emparejamiento en el Core2...";
-      case Phase::Paired: return "EMPAREJADO";
-      case Phase::Denied: return "EMPAREJAMIENTO DENEGADO";
-      case Phase::Failed: return "El emparejamiento ha fallado";
-      case Phase::Cancelled: return "Cancelado";
-      default: return "";
-    }
-  }
   switch (phase_) {
     case Phase::Scanning: return "Buscando M5Core2...";
     case Phase::Connecting: return "Conectando...";
-    case Phase::Requesting: return "Esperando autorizacion en el Core2...";
-    case Phase::Verified: return "LLAVE VERIFICADA";
-    case Phase::Denied: return "AUTORIZACION DENEGADA";
-    case Phase::Failed: return "La autenticacion ha fallado";
+    case Phase::PairRequesting: return "Autoriza el emparejamiento en el Core2...";
+    case Phase::Paired: return "EMPAREJADO";
+    case Phase::SetPinRequesting: return "Fija el PIN en el Core2...";
+    case Phase::SetPinDone: return "PIN FIJADO";
+    case Phase::UnlockRequesting: return "Introduce el PIN en el Core2...";
+    case Phase::Unlocked: return "VAULT DESBLOQUEADO";
+    case Phase::Denied: return "DENEGADO";
+    case Phase::Failed: return "La operacion ha fallado";
     case Phase::Cancelled: return "Cancelado";
     default: return "";
   }
 }
 
 void BleKeyClient::teardown() {
-  if (scan_ && scanning_) {
-    scan_->stop();
-    scanning_ = false;
-  }
+  if (scan_ && scanning_) { scan_->stop(); scanning_ = false; }
   if (client_) {
     if (client_->isConnected()) client_->disconnect();
     NimBLEDevice::deleteClient(client_);
@@ -431,15 +368,11 @@ void BleKeyClient::teardown() {
   found_ = false;
   connected_ = false;
   disconnected_ = false;
-  responseReceived_ = false;
-  statusReceived_ = false;
-  pairResponseReceived_ = false;
-  pairStatusReceived_ = false;
+  pairStatusRcvd_ = false;
+  unlockStatusRcvd_ = false;
+  unlockRespRcvd_ = false;
   unlock();
-  if (bleOn_) {
-    NimBLEDevice::deinit(true);
-    bleOn_ = false;
-  }
+  if (bleOn_) { NimBLEDevice::deinit(true); bleOn_ = false; }
 }
 
 }  // namespace ble_key

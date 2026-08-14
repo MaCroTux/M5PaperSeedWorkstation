@@ -29,7 +29,7 @@ inline bool headerBackHit(int x, int y) { return y < 26 && x < 44; }
 
 enum class Screen { menu, length, keyboard, review, active_seed, dice, address,
                     settings, settings_lang, locked, stub,
-                    key_idle, key_request, key_result, key_pair_request, key_pair_result };
+                    key_idle, key_pin, key_result, key_pair_request, key_pair_result };
 
 // Semilla.
 uint16_t words[24] = {};
@@ -422,23 +422,41 @@ void drawKeyIdle() {
   M5.Display.setTextSize(3);
   M5.Display.drawString("LOCKED", DEVICE_WIDTH / 2, 120);
   M5.Display.setTextSize(1);
-  M5.Display.drawString(keyServer.hasPaired() ? "PAIRED - Waiting..." : "NOT PAIRED - Waiting...",
+  M5.Display.drawString(keyServer.hasPin() ? "PIN SET - Waiting..." : "NO PIN - Waiting...",
                         DEVICE_WIDTH / 2, 170);
   drawFooter("", "", "");
 }
 
-void drawKeyRequest() {
+constexpr Rect kPinKey[12] = {
+  {15, 92, 70, 46}, {90, 92, 70, 46}, {165, 92, 70, 46}, {240, 92, 70, 46},
+  {15, 145, 70, 46}, {90, 145, 70, 46}, {165, 145, 70, 46}, {240, 145, 70, 46},
+  {15, 198, 70, 46}, {90, 198, 70, 46}, {165, 198, 70, 46}, {240, 198, 70, 46}};
+constexpr const char* kPinLabels[12] =
+    {"1", "2", "3", "DEL", "4", "5", "6", "OK", "7", "8", "9", "0"};
+
+void drawKeyPin() {
   M5.Display.fillScreen(kWhite);
-  drawKeyHeader("UNLOCK REQUEST");
+  const auto pin = keyServer.pinState();
+  const bool set = pin == ble_key::BleKeyServer::PinState::SetEntry ||
+                   pin == ble_key::BleKeyServer::PinState::SetConfirm;
+  drawKeyHeader(set ? "SET PIN" : "ENTER PIN");
   M5.Display.setTextColor(kBlack, kWhite);
   M5.Display.setTextDatum(middle_center);
-  M5.Display.setTextSize(2);
-  M5.Display.drawString("M5Paper Vault", DEVICE_WIDTH / 2, 60);
   M5.Display.setTextSize(1);
-  M5.Display.drawString("requests Vault access", DEVICE_WIDTH / 2, 92);
-  drawButton({10, 130, 145, 55}, "DENY", false, 2);
-  drawButton({165, 130, 145, 55}, "ALLOW", false, 2);
-  drawFooter("", "DENY", "ALLOW");
+  if (pin == ble_key::BleKeyServer::PinState::SetConfirm)
+    M5.Display.drawString("Repite el PIN", DEVICE_WIDTH / 2, 38);
+  else if (pin == ble_key::BleKeyServer::PinState::UnlockEntry)
+    M5.Display.drawString("PIN de 6 digitos", DEVICE_WIDTH / 2, 38);
+  else
+    M5.Display.drawString("Crea un PIN de 6 digitos", DEVICE_WIDTH / 2, 38);
+  M5.Display.drawRoundRect(60, 52, 200, 28, 6, kBlack);
+  M5.Display.setTextSize(2);
+  char dots[7] = {};
+  const size_t n = strlen(keyServer.pinBuffer());
+  for (size_t i = 0; i < 6; ++i) dots[i] = i < n ? '*' : ' ';
+  M5.Display.drawString(dots, DEVICE_WIDTH / 2, 66);
+  for (int i = 0; i < 12; ++i)
+    drawButton(kPinKey[i], kPinLabels[i], false, 2);
 }
 
 void drawKeyResult() {
@@ -491,6 +509,8 @@ void loopKeyMode() {
 
   const auto st = keyServer.state();
   const auto pst = keyServer.pairState();
+  const auto pin = keyServer.pinState();
+
   if (pst == ble_key::BleKeyServer::PairState::Requested &&
       screen != Screen::key_pair_request) {
     screen = Screen::key_pair_request; drawScreen();
@@ -503,40 +523,51 @@ void loopKeyMode() {
   } else if (pst == ble_key::BleKeyServer::PairState::Idle &&
              screen == Screen::key_pair_result) {
     screen = Screen::key_idle; drawScreen();
-  } else if (st == ble_key::BleKeyServer::State::Requested &&
-             screen != Screen::key_request) {
-    screen = Screen::key_request; drawScreen();
+  } else if ((pin == ble_key::BleKeyServer::PinState::SetEntry ||
+              pin == ble_key::BleKeyServer::PinState::SetConfirm ||
+              pin == ble_key::BleKeyServer::PinState::UnlockEntry) &&
+             screen != Screen::key_pin) {
+    screen = Screen::key_pin; drawScreen();
   } else if (st == ble_key::BleKeyServer::State::Authorized &&
              screen != Screen::key_result) {
     keyResultAuthorized = true; screen = Screen::key_result; drawScreen();
-  } else if (st == ble_key::BleKeyServer::State::Denied &&
-             screen != Screen::key_result) {
-    keyResultAuthorized = false; screen = Screen::key_result; drawScreen();
-  } else if (st == ble_key::BleKeyServer::State::Timeout &&
+  } else if ((st == ble_key::BleKeyServer::State::Denied ||
+              st == ble_key::BleKeyServer::State::Timeout) &&
              screen != Screen::key_result) {
     keyResultAuthorized = false; screen = Screen::key_result; drawScreen();
   } else if (st == ble_key::BleKeyServer::State::Idle &&
              screen == Screen::key_result) {
     screen = Screen::key_idle; drawScreen();
+  } else if (pin == ble_key::BleKeyServer::PinState::Done &&
+             screen == Screen::key_pin) {
+    screen = Screen::key_idle; drawScreen();
   }
 
   auto t = M5.Touch.getDetail();
   if (t.wasPressed()) {
-    if (screen == Screen::key_request) {
-      if (contains({10, 130, 145, 55}, t.x, t.y)) keyServer.deny();
-      else if (contains({165, 130, 145, 55}, t.x, t.y)) keyServer.allow();
-    } else if (screen == Screen::key_pair_request) {
+    if (screen == Screen::key_pair_request) {
       if (contains({10, 130, 145, 55}, t.x, t.y)) keyServer.denyPairing();
       else if (contains({165, 130, 145, 55}, t.x, t.y)) keyServer.allowPairing();
+    } else if (screen == Screen::key_pin) {
+      for (int i = 0; i < 12; ++i) if (contains(kPinKey[i], t.x, t.y)) {
+        if (i == 3) keyServer.pinBackspace();
+        else if (i == 7) keyServer.pinSubmit();
+        else if (i < 3) keyServer.pinDigit(static_cast<char>('1' + i));
+        else if (i < 7) keyServer.pinDigit(static_cast<char>('4' + (i - 4)));
+        else if (i < 11) keyServer.pinDigit(static_cast<char>('7' + (i - 8)));
+        else keyServer.pinDigit('0');
+        drawScreen();
+        return;
+      }
     }
   }
   if (M5.BtnB.wasPressed()) {
-    if (screen == Screen::key_request) keyServer.deny();
-    else if (screen == Screen::key_pair_request) keyServer.denyPairing();
+    if (screen == Screen::key_pair_request) keyServer.denyPairing();
+    else if (screen == Screen::key_pin) keyServer.pinBackspace();
   }
   if (M5.BtnC.wasPressed()) {
-    if (screen == Screen::key_request) keyServer.allow();
-    else if (screen == Screen::key_pair_request) keyServer.allowPairing();
+    if (screen == Screen::key_pair_request) keyServer.allowPairing();
+    else if (screen == Screen::key_pin) keyServer.pinSubmit();
   }
   // Salir del modo llave manteniendo A pulsado.
   if (M5.BtnA.pressedFor(600)) {
@@ -558,7 +589,7 @@ void drawScreen() {
     case Screen::settings_lang: drawSettingsLang(); break;
     case Screen::locked: drawLocked(); break;
     case Screen::key_idle: drawKeyIdle(); break;
-    case Screen::key_request: drawKeyRequest(); break;
+    case Screen::key_pin: drawKeyPin(); break;
     case Screen::key_result: drawKeyResult(); break;
     case Screen::key_pair_request: drawKeyPairRequest(); break;
     case Screen::key_pair_result: drawKeyPairResult(); break;

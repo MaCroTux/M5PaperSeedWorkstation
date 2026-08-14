@@ -69,10 +69,12 @@ aquí solo falta la **UI** de Core2.
 
 - [x] Servidor GATT `M5Core2-Key` (NimBLE) con servicio "M5 Vault Key".
 - [x] Pantalla `LOCKED / Waiting...` + `PAIR REQUEST [CANCEL][AUTHORIZE]`.
-- [x] Emparejamiento ECDH secp256k1 (sin teclear), identidad de largo plazo en NVS.
-- [x] Challenge/response HMAC-SHA256 con confirmación física (`UNLOCK REQUEST [DENY][ALLOW]`).
-- [x] En el M5Paper: emparejar / probar / eliminar llave, y **desbloquear el vault de
-      sesión con Core2 + PIN** (incluida la migración de vault solo-contraseña).
+- [x] Identidad asimétrica: `sk` (privada, cifrada con PIN) + `pk` (pública).
+- [x] Teclado de PIN en el Core2 (fijar PIN + verificar en el desbloqueo).
+- [x] Desbloqueo ECIES: el Core2 descifra la maestra del vault con `sk` tras el PIN.
+- [x] 3 PINs fallidos borran la clave (`sk`) del Core2.
+- [x] En el M5Paper: emparejar / eliminar llave, y **desbloquear el vault de sesión con
+      Core2 + PIN** (incluida la migración de vault solo-contraseña).
 
 ---
 

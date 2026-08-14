@@ -2,27 +2,30 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include "ble_key.hpp"
+#include "vault_key.hpp"
 
-// Cliente BLE (M5Paper) de la llave criptografica.
+// Cliente BLE (M5Paper) de la llave M5Core2.
 //
-// Desbloqueo: scan -> connect -> suscribir AUTH_RESPONSE/AUTH_STATUS ->
-// challenge aleatorio -> verificar HMAC-SHA256(K_pair, challenge).
+// EMPAREJAR: scan -> connect -> leer pk (PAIR_PUBKEY) -> escribir PAIR_CONFIRM
+//            -> confirmar en el Core2 -> guardar pk.
+// SET PIN:   scan -> connect -> escribir SET_PIN -> esperar a que el usuario
+//            fije el PIN en el Core2 (UNLOCK_STATUS authorized).
+// DESBLOQUEAR: scan -> connect -> generar (e_sess,E_sess) -> escribir
+//            E_sess || ECIES(M) -> el Core2 pide PIN y descifra -> recibir
+//            AES-GCM(M, K_sess) -> descifrar la maestra.
 //
-// Emparejamiento: scan -> connect -> suscribir PAIR_RESPONSE/PAIR_STATUS ->
-// generar par efimero -> escribir PAIR_PUBKEY -> recibir pub del Core2 ->
-// derivar K_pair = SHA256(x(ECDH(p_m, Q_core2))||tag) -> guardar en NVS.
-// K_pair jamas viaja en claro.
-//
-// Toda la logica de conexion se ejecuta desde update() (loop). Las callbacks
-// de NimBLE NO hacen cripto ni dibujan; solo guardan datos bajo mutex.
+// La maestra descifrada queda en master() y debe limpiarse tras usarla.
 
 namespace ble_key {
 
 class BleKeyClient {
 public:
   enum class Phase : uint8_t {
-    Idle, Scanning, Connecting, Requesting,
-    Verified, Paired, Denied, Failed, Cancelled
+    Idle, Scanning, Connecting,
+    PairRequesting, Paired,
+    SetPinRequesting, SetPinDone,
+    UnlockRequesting, Unlocked,
+    Denied, Failed, Cancelled
   };
   enum class Error : uint8_t {
     None, BleInit, ScanTimeout, ConnectFailed, ServiceNotFound,
@@ -32,17 +35,20 @@ public:
   BleKeyClient();
   ~BleKeyClient();
 
-  void start();       // desbloqueo (carga K_pair de NVS) + scan
-  void startPairing();// emparejamiento + scan
+  void startPairing();
+  void startSetPin();
+  void startUnlock(const uint8_t blob[vault_2fa::kBlobSize]);
   void cancel();
-  void update();      // llamar desde loop()
+  void update();
   void clear();
 
   Phase phase() const { return phase_; }
   Error error() const { return error_; }
-  bool verified() const { return phase_ == Phase::Verified; }
   bool paired() const { return phase_ == Phase::Paired; }
-  bool pairing() const { return pairingMode_; }
+  bool setPinDone() const { return phase_ == Phase::SetPinDone; }
+  bool unlocked() const { return phase_ == Phase::Unlocked; }
+  bool hasMaster() const { return masterReady_; }
+  const uint8_t* master() const { return master_; }
   const char* statusText();
 
 private:
@@ -54,22 +60,21 @@ private:
   void onScanResult(NimBLEAdvertisedDevice* d);
   void onConnectCallback(NimBLEClient* c);
   void onDisconnectCallback(NimBLEClient* c);
-  void onResponseNotify(uint8_t* data, size_t len);
-  void onStatusNotify(uint8_t* data, size_t len);
-  void onPairResponseNotify(uint8_t* data, size_t len);
   void onPairStatusNotify(uint8_t* data, size_t len);
+  void onUnlockStatusNotify(uint8_t* data, size_t len);
+  void onUnlockRespNotify(uint8_t* data, size_t len);
 
   Phase phase_ = Phase::Idle;
   Error error_ = Error::None;
-  bool pairingMode_ = false;
+  uint8_t mode_ = 0;  // 0 none, 1 pair, 2 setpin, 3 unlock
 
   SemaphoreHandle_t mux_ = nullptr;
-  uint8_t key_[kKeySize] = {};        // K_pair (desbloqueo)
-  uint8_t challenge_[kChallengeSize] = {};
+  uint8_t pk_[kPubKeySize] = {};
 
-  uint8_t ephPriv_[kKeySize] = {};    // par efimero (emparejamiento)
-  uint8_t ephPub_[kPubKeySize] = {};
-  uint8_t theirPub_[kPubKeySize] = {};
+  uint8_t eSess_[kKeySize] = {};
+  uint8_t blob_[kPubKeySize + vault_2fa::kBlobSize] = {};  // E_sess || ECIES(M)
+  uint8_t master_[vault_2fa::kMasterSize] = {};
+  bool masterReady_ = false;
 
   bool found_ = false;
   std::string foundAddr_;
@@ -77,14 +82,12 @@ private:
   bool connected_ = false;
   bool disconnected_ = false;
 
-  bool responseReceived_ = false;
-  uint8_t response_[kResponseSize] = {};
-  bool statusReceived_ = false;
-  Status status_ = kStatusIdle;
-
-  bool pairResponseReceived_ = false;
-  bool pairStatusReceived_ = false;
-  PairStatus pairStatus_ = kPairIdle;
+  bool pairStatusRcvd_ = false;
+  uint8_t pairStatus_ = 0;
+  bool unlockStatusRcvd_ = false;
+  uint8_t unlockStatus_ = 0;
+  bool unlockRespRcvd_ = false;
+  uint8_t unlockResp_[kEciesNonceSize + vault_2fa::kMasterSize + kGcmTagSize] = {};
 
   NimBLEScan* scan_ = nullptr;
   NimBLEClient* client_ = nullptr;

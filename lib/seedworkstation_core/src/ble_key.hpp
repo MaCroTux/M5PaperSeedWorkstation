@@ -5,6 +5,7 @@
 #include <mbedtls/md.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/gcm.h>
 #include <string.h>
 
 // Llave criptografica BLE compartida entre M5Paper (cliente/verificador) y
@@ -45,10 +46,14 @@ constexpr char kResponseUUID[] = "e5a10003-7a1e-4b9c-8d2f-3c6b1a4d0001";
 constexpr char kStatusUUID[] = "e5a10004-7a1e-4b9c-8d2f-3c6b1a4d0001";
 constexpr char kDeviceInfoUUID[] = "e5a10005-7a1e-4b9c-8d2f-3c6b1a4d0001";
 constexpr char kPairPubKeyUUID[] = "e5a10006-7a1e-4b9c-8d2f-3c6b1a4d0001";
-constexpr char kPairResponseUUID[] = "e5a10007-7a1e-4b9c-8d2f-3c6b1a4d0001";
+constexpr char kPairConfirmUUID[] = "e5a1000d-7a1e-4b9c-8d2f-3c6b1a4d0001";
 constexpr char kPairStatusUUID[] = "e5a10008-7a1e-4b9c-8d2f-3c6b1a4d0001";
+constexpr char kSetPinUUID[] = "e5a10009-7a1e-4b9c-8d2f-3c6b1a4d0001";
+constexpr char kUnlockReqUUID[] = "e5a1000a-7a1e-4b9c-8d2f-3c6b1a4d0001";
+constexpr char kUnlockRespUUID[] = "e5a1000b-7a1e-4b9c-8d2f-3c6b1a4d0001";
+constexpr char kUnlockStatusUUID[] = "e5a1000c-7a1e-4b9c-8d2f-3c6b1a4d0001";
 constexpr char kDeviceName[] = "M5Core2-Key";
-constexpr char kDeviceInfoValue[] = "M5Core2-Key/v3";
+constexpr char kDeviceInfoValue[] = "M5Core2-Key/v4";
 
 // Estados notificados por el servidor en AUTH_STATUS (1 byte).
 enum Status : uint8_t {
@@ -65,6 +70,15 @@ enum PairStatus : uint8_t {
   kPairRequested = 1,
   kPairAuthorized = 2,
   kPairDenied = 3,
+};
+
+enum UnlockStatus : uint8_t {
+  kUnlockIdle = 0,
+  kUnlockPinRequired = 1,
+  kUnlockAuthorized = 2,
+  kUnlockDenied = 3,
+  kUnlockPinFailed = 4,
+  kUnlockWiped = 5,
 };
 
 inline void wipe(void* data, size_t size) {
@@ -229,5 +243,118 @@ inline bool eraseStoredKey() { return detail::nvsErase("kpair"); }
 inline bool hasStoredPrivKey() { return detail::nvsHas("kpriv", kKeySize); }
 inline bool loadStoredPrivKey(uint8_t priv[kKeySize]) { return detail::nvsRead("kpriv", priv, kKeySize); }
 inline bool saveStoredPrivKey(const uint8_t priv[kKeySize]) { return detail::nvsWrite("kpriv", priv, kKeySize); }
+
+// ---- ECIES (secp256k1) ----
+// La clave maestra del vault se cifra con la clave PUBLICA del Core2 (pk), de
+// modo que solo el Core2 (con su privada sk, protegida por PIN) puede abrirla.
+// La clave publica va SIN comprimir (65 bytes) para evitar el fallo de
+// descompresion de punto comprimido en mbedtls 2.28.
+
+constexpr size_t kEciesNonceSize = 12;
+constexpr size_t kGcmTagSize = 16;
+// blob ECIES = E(65) || nonce(12) || ciphertext(N) || tag(16)
+
+// K = SHA256(x(ECDH(priv, theirPub)) || tag)
+inline bool deriveEcdhKey(const uint8_t priv[kKeySize],
+                          const uint8_t theirPub[kPubKeySize],
+                          const char* tag, uint8_t out[kKeySize]) {
+  mbedtls_ecp_group grp;
+  mbedtls_mpi d;
+  mbedtls_ecp_point Q;
+  mbedtls_ecp_point S;
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_mpi_init(&d);
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_ecp_point_init(&S);
+  int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256K1);
+  if (ret == 0) ret = mbedtls_mpi_read_binary(&d, priv, kKeySize);
+  if (ret == 0) ret = mbedtls_ecp_point_read_binary(&grp, &Q, theirPub, kPubKeySize);
+  if (ret == 0) ret = mbedtls_ecp_mul(&grp, &S, &d, &Q, NULL, NULL);
+  uint8_t x[kKeySize] = {};
+  if (ret == 0) ret = mbedtls_mpi_write_binary(&S.X, x, kKeySize);
+  if (ret != 0)
+    Serial.printf("[BLEKEY] ecdh failed: -0x%04x\n", static_cast<unsigned>(-ret));
+  mbedtls_mpi_free(&d);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_ecp_point_free(&S);
+  mbedtls_ecp_group_free(&grp);
+  if (ret != 0) return false;
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts_ret(&ctx, 0);
+  mbedtls_sha256_update_ret(&ctx, x, kKeySize);
+  mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char*>(tag), strlen(tag));
+  mbedtls_sha256_finish_ret(&ctx, out);
+  mbedtls_sha256_free(&ctx);
+  wipe(x, sizeof(x));
+  return true;
+}
+
+// AES-256-GCM generico. out = nonce(12) || ciphertext || tag(16).
+inline bool aesGcmEncrypt(const uint8_t key[kKeySize], const uint8_t* plain,
+                          size_t plainLen, uint8_t* out, size_t* outLen) {
+  uint8_t nonce[kEciesNonceSize];
+  esp_fill_random(nonce, sizeof(nonce));
+  mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
+  const bool ok = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0 &&
+      mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plainLen, nonce,
+          sizeof(nonce), nullptr, 0, plain, out + sizeof(nonce),
+          kGcmTagSize, out + sizeof(nonce) + plainLen) == 0;
+  mbedtls_gcm_free(&gcm);
+  if (ok) {
+    memcpy(out, nonce, sizeof(nonce));
+    *outLen = sizeof(nonce) + plainLen + kGcmTagSize;
+  }
+  wipe(nonce, sizeof(nonce));
+  return ok;
+}
+
+inline bool aesGcmDecrypt(const uint8_t key[kKeySize], const uint8_t* in,
+                          size_t inLen, uint8_t* plain, size_t* plainLen) {
+  if (inLen < kEciesNonceSize + kGcmTagSize) return false;
+  const size_t ctLen = inLen - kEciesNonceSize - kGcmTagSize;
+  mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
+  const int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0
+      ? mbedtls_gcm_auth_decrypt(&gcm, ctLen, in, kEciesNonceSize, nullptr, 0,
+          in + kEciesNonceSize + ctLen, kGcmTagSize, in + kEciesNonceSize, plain) : -1;
+  mbedtls_gcm_free(&gcm);
+  if (rc != 0) return false;
+  *plainLen = ctLen;
+  return true;
+}
+
+// Cifra con la clave publica del receptor. blob = E || nonce || ct || tag.
+inline bool eciesEncrypt(const uint8_t pk[kPubKeySize], const uint8_t* plain,
+                         size_t plainLen, uint8_t* blob, size_t* blobLen) {
+  uint8_t e[kKeySize], E[kPubKeySize], K[kKeySize];
+  if (!generateKeyPair(e, E)) return false;
+  if (!deriveEcdhKey(e, pk, "m5-vault-ecies-v1", K)) {
+    wipe(e, sizeof(e)); wipe(E, sizeof(E)); return false;
+  }
+  memcpy(blob, E, kPubKeySize);
+  size_t olen = 0;
+  const bool ok = aesGcmEncrypt(K, plain, plainLen, blob + kPubKeySize, &olen);
+  wipe(e, sizeof(e)); wipe(E, sizeof(E)); wipe(K, sizeof(K));
+  if (ok) *blobLen = kPubKeySize + olen;
+  return ok;
+}
+
+// Descifra con la privada propia. blob = E || nonce || ct || tag.
+inline bool eciesDecrypt(const uint8_t sk[kKeySize], const uint8_t* blob,
+                         size_t blobLen, uint8_t* plain, size_t* plainLen) {
+  if (blobLen < kPubKeySize + kEciesNonceSize + kGcmTagSize) return false;
+  uint8_t K[kKeySize];
+  if (!deriveEcdhKey(sk, blob, "m5-vault-ecies-v1", K)) return false;
+  const bool ok = aesGcmDecrypt(K, blob + kPubKeySize, blobLen - kPubKeySize,
+                                plain, plainLen);
+  wipe(K, sizeof(K));
+  return ok;
+}
+
+// pk (clave publica del Core2, NO secreta) guardada en el M5Paper.
+inline bool hasStoredPk() { return detail::nvsHas("bpk", kPubKeySize); }
+inline bool loadStoredPk(uint8_t pk[kPubKeySize]) { return detail::nvsRead("bpk", pk, kPubKeySize); }
+inline bool saveStoredPk(const uint8_t pk[kPubKeySize]) { return detail::nvsWrite("bpk", pk, kPubKeySize); }
+inline bool eraseStoredPk() { return detail::nvsErase("bpk"); }
 
 }  // namespace ble_key

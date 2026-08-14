@@ -206,10 +206,11 @@ Flasheo fiable en USB marginal: `esptool.py --no-stub --baud 115200 write_flash 
   manipulación de sal, nonce y metadatos.
 - **Derivación de clave**: PBKDF2-HMAC-SHA256 con **600.000 iteraciones** y sal de
   16 bytes aleatoria por archivo (RNG de hardware `esp_fill_random`).
-- **Llave BLE (Core2 + PIN)**: la clave maestra del vault de sesión se envuelve
-  además bajo `K_2f = HMAC-SHA256(K_pair, PBKDF2(PIN))`, donde `K_pair` es un
-  secreto de 256 bits establecido por ECDH durante el emparejamiento. La ruta por
-  contraseña sigue siempre disponible como recuperación.
+- **Llave BLE (Core2 + PIN)**: el M5Core2 guarda la **clave privada `sk`**, cifrada en
+  reposo bajo `PBKDF2(PIN)` (el PIN se teclea en el propio Core2; 3 fallos borran `sk`).
+  El M5Paper envuelve la maestra del vault con la **clave pública** del Core2 (ECIES sobre
+  secp256k1), de modo que no puede descifrar sin el Core2. La contraseña sigue siempre
+  disponible como recuperación.
 - **Firma**: ECDSA secp256k1 con **nonce determinista RFC6979** + **low-S**; sighash
   **BIP143** (segwit v0). Verificación de la ruta BIP32 por fingerprint maestra.
 - **Limpieza de memoria**: funciones `wipe()` (volátil) sobre claves, plaintext,
@@ -230,29 +231,34 @@ Cliente BLE (`qr_ble_client.hpp/.cpp`) para recibir QR desde una Raspberry Pi
 
 ## 9. Llave BLE (M5Core2): contraseña + llave
 
-Un **M5Core2** actúa como llave criptográfica física que desbloquea el **vault de
-sesión** (`.svm`), como segundo factor junto a un PIN de 6 dígitos.
+Un **M5Core2** actúa como llave física que descifra el **vault de sesión** (`.svm`).
+El Core2 guarda una clave privada `sk` (protegida por PIN); el M5Paper guarda la
+maestra del vault cifrada con la clave pública del Core2. Robar solo el M5Paper no
+revela nada.
 
-### Emparejamiento (una vez, sin teclear)
+### Emparejamiento (una vez)
 
-1. Core2: menú → `LLAVE BLE` (genera su identidad la primera vez).
+1. Core2: menú → `LLAVE BLE` (genera `sk` la primera vez, queda `LOCKED`).
 2. M5Paper: `AJUSTES → BLE KEY → EMPAREJAR M5CORE2`.
 3. El Core2 muestra `PAIR REQUEST` → pulsa `AUTHORIZE`.
-4. Ambos derivan el secreto compartido `K_pair` mediante **ECDH sobre secp256k1**;
-   nunca viaja por el aire.
+4. El M5Paper lee la **clave pública** `pk` del Core2 y la guarda (es pública).
 
 ### Activar / migrar un vault
 
 - Vault nuevo: desbloquea por contraseña → `ACTIVAR CORE2+PIN` (menú de sesión).
 - Vault existente solo con contraseña: `AJUSTES → BLE KEY → MIGRAR A PASS+LLAVE` →
-  elige el `.svm` → introduce su contraseña → define el PIN. La contraseña sigue
-  disponible como recuperación.
+  elige el `.svm` → introduce su contraseña.
+- Después el **Core2** te pide **fijar un PIN de 6 dígitos** (tecleado en el Core2,
+  dos veces). El M5Paper envuelve la maestra con `pk` (ECIES) en un archivo `.k2f`.
+  La contraseña sigue disponible como recuperación.
 
 ### Desbloquear
 
-`VAULT DE SESION → DESBLOQUEAR CON CORE2` → el M5Paper verifica el Core2 con un
-challenge/response nuevo → introduce el PIN → el vault se abre. El Core2 nunca ve
-la clave maestra, el PIN ni las semillas.
+`VAULT DE SESION → DESBLOQUEAR CON CORE2` → el M5Paper manda la maestra envuelta al
+Core2 → el Core2 pide el **PIN** (en su pantalla) → descifra y devuelve la maestra
+**cifrada con una clave de sesión ECIES** (nunca en claro). 3 PINs fallidos en el
+Core2 borran su clave. El Core2 solo ve la maestra un instante en RAM, nunca las
+semillas.
 
 ---
 

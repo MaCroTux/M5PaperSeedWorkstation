@@ -441,6 +441,14 @@ inline const char* tr(const char* es) {
     {"MIGRAR A PASS+LLAVE", "Migrate to pass+key"},
     {"Selecciona el Vault que quieres migrar", "Select the Vault to migrate"},
     {"NO HAY VAULTS DE SESION", "No session vaults"},
+    {"LIMPIAR PANTALLA", "Clean screen"},
+    {"PANTALLA", "Screen"},
+    {"Limpieza de pantalla", "Screen cleaning"},
+    {"Limpia el panel cada N refrescos", "Clean the panel every N refreshes"},
+    {"NUNCA", "Never"},
+    {"CADA %u", "Every %u"},
+    {"LIMPIAR AHORA", "Clean now"},
+    {"Llave eliminada tras 3 intentos", "Key removed after 3 attempts"},
 
     // Perfiles
     {"Legacy P2PKH", "Legacy P2PKH"},

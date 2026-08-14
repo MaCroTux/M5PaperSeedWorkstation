@@ -204,10 +204,11 @@ Reliable flashing over marginal USB: `esptool.py --no-stub --baud 115200 write_f
   tampering of salt, nonce and metadata.
 - **Key derivation**: PBKDF2-HMAC-SHA256 with **600,000 iterations** and a random
   16-byte salt per file (hardware RNG `esp_fill_random`).
-- **BLE key (Core2 + PIN)**: the session vault master key is additionally wrapped
-  under `K_2f = HMAC-SHA256(K_pair, PBKDF2(PIN))`, where `K_pair` is a 256-bit
-  secret established by ECDH during pairing. The password path always remains
-  available as recovery.
+- **BLE key (Core2 + PIN)**: the M5Core2 holds the **private key `sk`**, encrypted at
+  rest under `PBKDF2(PIN)` (the PIN is entered on the Core2 itself; 3 wrong PINs wipe
+  `sk`). The M5Paper wraps the session master key with the Core2's **public key**
+  (ECIES over secp256k1), so it cannot decrypt without the Core2. The password path
+  always remains available as recovery.
 - **Signing**: ECDSA secp256k1 with **deterministic nonce RFC6979** + **low-S**;
   **BIP143** sighash (segwit v0). BIP32 path verified via master fingerprint.
 - **Memory wiping**: `wipe()` (volatile) over keys, plaintext, seed buffers, etc.
@@ -227,29 +228,34 @@ BLE client (`qr_ble_client.hpp/.cpp`) to receive a QR from a Raspberry Pi
 
 ## 9. BLE key (M5Core2): password + key
 
-A **M5Core2** acts as a physical cryptographic key that unlocks the **session
-vault** (`.svm`), used as a second factor in addition to a 6-digit PIN.
+A **M5Core2** acts as the physical key that decrypts the **session vault**
+(`.svm`). The Core2 holds a private key `sk` (PIN-protected); the M5Paper stores
+the vault master key encrypted with the Core2's public key. Stealing the M5Paper
+alone reveals nothing.
 
-### Pairing (once, no typing)
+### Pairing (once)
 
-1. Core2: menu → `LLAVE BLE` (generates its long-term identity the first time).
+1. Core2: menu → `LLAVE BLE` (generates `sk` the first time, stays `LOCKED`).
 2. M5Paper: `AJUSTES → BLE KEY → EMPAREJAR M5CORE2`.
 3. The Core2 shows `PAIR REQUEST` → press `AUTHORIZE`.
-4. Both derive a shared secret `K_pair` via **ECDH over secp256k1**; it never
-   travels over the air.
+4. The M5Paper reads the Core2's **public key** `pk` and stores it (it is public).
 
 ### Enabling / migrating a vault
 
 - New vault: unlock by password → `ACTIVAR CORE2+PIN` (session menu).
 - Existing password-only vault: `AJUSTES → BLE KEY → MIGRAR A PASS+LLAVE` →
-  select the `.svm` → enter its password → set the PIN. The password path stays
-  available as recovery.
+  select the `.svm` → enter its password.
+- Then the **Core2** asks you to **set a 6-digit PIN** (entered on the Core2,
+  twice). The M5Paper wraps the master key with `pk` (ECIES) into a `.k2f` file.
+  The password path stays available as recovery.
 
 ### Unlocking
 
-`VAULT DE SESION → DESBLOQUEAR CON CORE2` → the M5Paper verifies the Core2 via a
-fresh challenge/response → enter the PIN → vault opens. The Core2 never sees the
-master key, the PIN or the seeds.
+`VAULT DE SESION → DESBLOQUEAR CON CORE2` → the M5Paper sends the wrapped master
+to the Core2 → the Core2 asks for the **PIN** (on its own screen) → decrypts and
+returns the master key **encrypted with a per-session ECIES key** (never in
+clear). 3 wrong PINs on the Core2 wipe its key. The Core2 only sees the master
+key transiently in RAM, never the seeds.
 
 ---
 
