@@ -1,5 +1,8 @@
 .pio
 
+# macOS
+.DS_Store
+
 # Artefactos temporales del preprocesador de Arduino IDE
 *.ino *.cpp
 * 2.hpp
