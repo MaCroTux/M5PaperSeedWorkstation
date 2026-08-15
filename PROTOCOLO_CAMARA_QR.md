@@ -65,6 +65,11 @@ QREND
 
 Reglas:
 
+- **Cada notificación debe terminar en `\n`** (incluidos `QRBEGIN`, cada chunk
+  y `QREND`). El M5Paper reconstruye el stream dividiendo por `\n`; si el
+  emisor no lo añade, dos notificaciones consecutivas se concatenan y se
+  parsean mal (`QR_TRANSFER_ERROR`, `overlap`). Los comandos `PONG`/`SCANNING`
+  también van terminados en `\n`.
 - `size` = tamaño total en bytes del payload reconstruido.
 - `chunks` = número de fragmentos.
 - `<index>` = índice decimal desde `0` hasta `chunks-1`.
@@ -95,11 +100,11 @@ Si `reconstructed.size() != expectedSize` → `QR_TRANSFER_ERROR`.
 |---|---|
 | `MAX_QR_PAYLOAD` | 32768 bytes |
 | `MAX_QR_CHUNKS` | 1024 |
-| Timeout de transferencia | 5000 ms |
+| Timeout de transferencia | 30000 ms |
 
 Antes de reservar memoria se valida: `size > 0`, `size <= MAX_QR_PAYLOAD`,
 `chunks > 0`, `chunks <= MAX_QR_CHUNKS`. Si `QRBEGIN` no cumple → error. Si la
-transferencia no termina en 5 s → cancelar, liberar buffer, mostrar/reintentar.
+transferencia no termina en 30 s → cancelar, liberar buffer, mostrar/reintentar.
 
 ## 7. Payload opaco y seguridad
 
@@ -118,6 +123,13 @@ La cámara es **no confiable** y **nunca** debe:
 - almacenar seed;
 - firmar;
 - interpretar o desbloquear el Vault.
+
+**QR animados (fountain code).** Si la cámara soporta reensamblado, los QR
+animados `ur:crypto-psbt/<seqnum>-<seqlen>/<part>` (BCR-2020-003, fountain
+code) se reensamblan **en la cámara** y se entregan por el mismo transporte
+como un payload completo (por ejemplo, un UR de una sola parte
+`ur:crypto-psbt/<bytewords>` o un PSBT Base64). El M5Paper **no** hace
+reensamblado de fountain codes: recibe un único payload completo.
 
 Todo contenido recibido pasa por las mismas validaciones que un QR de cualquier
 otra fuente. Nunca: `cámara → firmar` directamente. Siempre:
@@ -143,7 +155,7 @@ Complete, Error, Cancelled`.
 
 ## 10. Fuera de alcance (V1)
 
-No implementar todavía: ensamblado de UR/BBQr en cámara, fotografías, streaming,
-vídeo. La interfaz M5Paper debe permanecer igual si la cámara evoluciona para
-reconstruir QR animados (la cámara seguirá entregando un payload decodificado
-completo por el mismo transporte).
+No implementar todavía en el M5Paper: ensamblado de fountain codes en el
+M5Paper, fotografías, streaming, vídeo. El **reensamblado de QR animados
+(fountain) se hace en la cámara**, que entrega un payload completo por el
+mismo transporte (ver §7). La interfaz M5Paper permanece igual.

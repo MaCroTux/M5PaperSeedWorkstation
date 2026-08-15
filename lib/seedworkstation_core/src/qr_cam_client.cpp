@@ -154,6 +154,9 @@ void QRCamClient::processLine(const std::string& raw) {
   }
 
   if (line.compare(0, 8, "QRBEGIN:") == 0) {
+    if (transferActive_)
+      Serial.println("[CAM] WARNING: QRBEGIN mientras transferencia activa (overlap)");
+    Serial.printf("[CAM] RX raw: %s\n", line.c_str());
     const size_t c1 = line.find(':');
     const size_t c2 = line.find(':', c1 + 1);
     if (c1 == std::string::npos || c2 == std::string::npos) {
@@ -191,8 +194,10 @@ void QRCamClient::processLine(const std::string& raw) {
     }
     chunks_[index].assign(data.begin(), data.end());
     chunksBytes_ += data.size();
-    Serial.printf("[CAM] chunk %u/%u\n", static_cast<unsigned>(chunks_.size()),
-                  expectedChunks_);
+    Serial.printf("[CAM] chunk idx=%u len=%u (%u/%u, %u bytes)\n",
+                  static_cast<unsigned>(index), static_cast<unsigned>(data.size()),
+                  static_cast<unsigned>(chunks_.size()), expectedChunks_,
+                  static_cast<unsigned>(chunksBytes_));
   }
 }
 

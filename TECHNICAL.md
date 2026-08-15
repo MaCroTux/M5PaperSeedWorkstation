@@ -262,7 +262,7 @@ desde un ESP32-CAM. Escanea `M5Paper-QR-CAM`, se conecta, se suscribe a `TX`
 (NOTIFY) y envía `STATUS` por `RX` (WRITE). Recibe el payload fragmentado
 (`QRBEGIN:<size>:<chunks>`, `<index>:<data>`, `QREND`) como líneas de texto, lo
 reconstruye por índice (validando `size`/`chunks` contra `MAX_QR_PAYLOAD`/`MAX_QR_CHUNKS`
-y un timeout de 5 s) y entrega un payload opaco al QR dispatcher. La cámara es no
+y un timeout de 30 s) y entrega un payload opaco al QR dispatcher. La cámara es no
 confiable: nunca recibe seed/claves. Detalles en
 [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
 

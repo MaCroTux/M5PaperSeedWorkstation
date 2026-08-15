@@ -57,14 +57,14 @@ struct Rect {
   }
 };
 
-constexpr Rect kMenu[] = {{40, 152, 460, 66}, {40, 224, 460, 66},
-                          {40, 296, 460, 66}, {40, 368, 460, 66},
-                          {40, 440, 460, 66}, {40, 512, 460, 66},
-                          {40, 584, 460, 66}};
+constexpr Rect kMenu[] = {{40, 152, 460, 57}, {40, 215, 460, 57},
+                          {40, 278, 460, 57}, {40, 341, 460, 57},
+                          {40, 404, 460, 57}, {40, 467, 460, 57},
+                          {40, 530, 460, 57}, {40, 593, 460, 57}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
                                        "RECIBIR POR WIFI", "HISTORIAL", "AJUSTES",
-                                       "BLOQUEAR"};
+                                       "BLOQUEAR", "ESCANEAR QR (CAMARA)"};
 constexpr Rect kHelpIcon{456, 776, 64, 64};
 constexpr Rect kChoose12{40, 260, 210, 150};
 constexpr Rect kChoose24{290, 260, 210, 150};
@@ -89,11 +89,11 @@ constexpr Rect kDiceLength24{275, 195, 235, 52};
 constexpr Rect kDiceValue[] = {{30, 330, 150, 80}, {195, 330, 150, 80}, {360, 330, 150, 80},
                                {30, 420, 150, 80}, {195, 420, 150, 80}, {360, 420, 150, 80}};
 constexpr Rect kDiceReset{30, 540, 480, 60};
-constexpr Rect kActiveMenu[] = {{40, 150, 460, 66}, {40, 222, 460, 66},
-                                {40, 294, 460, 66}, {40, 366, 460, 66},
-                                {40, 438, 460, 66}, {40, 510, 460, 66},
-                                {40, 582, 460, 66}, {40, 654, 460, 66},
-                                {40, 726, 460, 66}};
+constexpr Rect kActiveMenu[] = {{40, 150, 460, 58}, {40, 214, 460, 58},
+                                {40, 278, 460, 58}, {40, 342, 460, 58},
+                                {40, 406, 460, 58}, {40, 470, 460, 58},
+                                {40, 534, 460, 58}, {40, 598, 460, 58},
+                                {40, 662, 460, 58}, {40, 726, 460, 58}};
 constexpr const char* kActiveLabels[] = {"VER CLAVE PUBLICA", "BACKUP SEED",
                                          "PASSPHRASE", "EXPLORAR DIRECCIONES",
                                          "DESCARTAR SEED"};
@@ -247,6 +247,8 @@ qr_cam::QRCamClient camClient;
 qr_cam::Phase lastCamPhase = qr_cam::Phase::Off;
 bool camResultShown = false;
 uint8_t lastCamProgress = 255;
+Screen camReturnScreen = Screen::menu;
+uint8_t camReturnFocus = 7;
 constexpr uint8_t kMaxLoadedSeeds = 6;
 struct LoadedSeed {
   uint16_t indices[24];
@@ -688,6 +690,7 @@ const char* menuHint(uint8_t index) {
                                     : "Recibe una semilla BIP39 por texto desde tu movil";
     case 4: return "Transacciones guardadas para revisar o volver a firmar";
     case 5: return "Idioma, bloqueo, derivacion y estado de la radio";
+    case 7: return "Escanea un QR con la camara externa por BLE";
     default: return "Bloquea el dispositivo y muestra la portada";
   }
 }
@@ -701,9 +704,10 @@ const char* activeHint(uint8_t index) {
     case 4: return sessionUnlocked ? "Gestiona las semillas del vault de sesion"
                                     : "Borra la semilla de la memoria RAM";
     case 5: return "Recibe un PSBT o archivo por WiFi para firmar";
-    case 6: return sessionUnlocked ? "Cierra el vault y borra la clave maestra de RAM"
-                                   : "Ajustes del dispositivo";
-    case 7: return sessionUnlocked ? "Ajustes del dispositivo" : "Vuelve al menu general";
+    case 6: return "Escanea un QR con la camara externa por BLE";
+    case 7: return sessionUnlocked ? "Cierra el vault y borra la clave maestra de RAM"
+                                    : "Ajustes del dispositivo";
+    case 8: return sessionUnlocked ? "Ajustes del dispositivo" : "Vuelve al menu general";
     default: return "Vuelve al menu general";
   }
 }
@@ -713,8 +717,9 @@ void drawMenu() {
   title("SEED WORKSTATION",
         fingerprintValid ? "Semilla activa en memoria" : "Sin semilla cargada");
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
-                                    Icon::wifi, Icon::list, Icon::wrench, Icon::lock};
-  for (uint8_t i = 0; i < 7; ++i) {
+                                    Icon::wifi, Icon::list, Icon::wrench, Icon::lock,
+                                    Icon::qr};
+  for (uint8_t i = 0; i < 8; ++i) {
     buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
@@ -1909,12 +1914,14 @@ void drawActiveSeed() {
   }
   buttonOn(page, kActiveMenu[5], "RECIBIR POR WIFI", true, focusIndex == 5,
            Icon::wifi);
+  buttonOn(page, kActiveMenu[6], "ESCANEAR QR (CAMARA)", true, focusIndex == 6,
+           Icon::qr);
   if (sessionUnlocked) {
-    buttonOn(page, kActiveMenu[6], "CERRAR VAULT", true, focusIndex == 6,
+    buttonOn(page, kActiveMenu[7], "CERRAR VAULT", true, focusIndex == 7,
              Icon::lock);
   }
-  const uint8_t settingsIdx = sessionUnlocked ? 7 : 6;
-  const uint8_t menuIdx = sessionUnlocked ? 8 : 7;
+  const uint8_t settingsIdx = sessionUnlocked ? 8 : 7;
+  const uint8_t menuIdx = sessionUnlocked ? 9 : 8;
   buttonOn(page, kActiveMenu[settingsIdx], "AJUSTES", true,
            focusIndex == settingsIdx, Icon::wrench);
   buttonOn(page, kActiveMenu[menuIdx], "VOLVER AL MENU", true,
@@ -2775,10 +2782,16 @@ void beginCamScan() {
   drawScanCamQr();
 }
 
+void openCamScan(Screen ret, uint8_t retFocus) {
+  camReturnScreen = ret;
+  camReturnFocus = retFocus;
+  beginCamScan();
+}
+
 void exitCamScan() {
   camClient.clear();
-  screen = Screen::wifi_mode;
-  focusIndex = 3;
+  screen = camReturnScreen;
+  focusIndex = camReturnFocus;
   drawScreen();
 }
 
@@ -4018,12 +4031,11 @@ void returnFromWifiReceive() {
 
 void drawWifiMode() {
   blankPage();
-  title("RECIBIR", "Elige la fuente de datos");
+  title("RECIBIR POR WIFI", "Elige que vas a enviar");
   buttonOn(page, kMenu[0], "SUBIR FICHERO (PSBT)", fingerprintValid, focusIndex == 0, Icon::wifi);
   buttonOn(page, kMenu[1], "PEGAR TRANSACCION (PSBT)", fingerprintValid, focusIndex == 1, Icon::wifi);
   buttonOn(page, kMenu[2], "PEGAR SEMILLA BIP39", true, focusIndex == 2, Icon::key);
-  buttonOn(page, kMenu[3], "ESCANEAR QR (CAMARA)", true, focusIndex == 3, Icon::qr);
-  buttonOn(page, kBack, "VOLVER", true, focusIndex == 4);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 3);
   fullRefresh();
 }
 
@@ -4586,7 +4598,7 @@ void updateFocusButton(uint8_t index) {
     case Screen::menu: {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
                                         Icon::wifi, Icon::list, Icon::wrench,
-                                        Icon::lock};
+                                        Icon::lock, Icon::qr};
       updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
                    index == focusIndex, kMenuIcons[index]); break;
     }
@@ -4596,13 +4608,16 @@ void updateFocusButton(uint8_t index) {
       if (index == 5) {
         updateButton(kActiveMenu[index], "RECIBIR POR WIFI", true,
                      index == focusIndex, Icon::wifi);
-      } else if (sessionUnlocked && index == 6) {
+      } else if (index == 6) {
+        updateButton(kActiveMenu[index], "ESCANEAR QR (CAMARA)", true,
+                     index == focusIndex, Icon::qr);
+      } else if (sessionUnlocked && index == 7) {
         updateButton(kActiveMenu[index], "CERRAR VAULT", true,
                      index == focusIndex, Icon::lock);
-      } else if (index == (sessionUnlocked ? 7 : 6)) {
+      } else if (index == (sessionUnlocked ? 8 : 7)) {
         updateButton(kActiveMenu[index], "AJUSTES", true,
                      index == focusIndex, Icon::wrench);
-      } else if (index == (sessionUnlocked ? 8 : 7)) {
+      } else if (index == (sessionUnlocked ? 9 : 8)) {
         updateButton(kActiveMenu[index], "VOLVER AL MENU", true,
                      index == focusIndex, Icon::home);
       } else {
@@ -4833,17 +4848,16 @@ void updateFocusButton(uint8_t index) {
       break;
     }
     case Screen::wifi_mode: {
-      static const Icon kWifiModeIcons[] = {Icon::wifi, Icon::wifi, Icon::key, Icon::qr, Icon::none};
+      static const Icon kWifiModeIcons[] = {Icon::wifi, Icon::wifi, Icon::key, Icon::none};
       static const char* kWifiModeLabels[] = {"SUBIR FICHERO (PSBT)",
                                               "PEGAR TRANSACCION (PSBT)",
-                                              "PEGAR SEMILLA BIP39",
-                                              "ESCANEAR QR (CAMARA)", "VOLVER"};
+                                              "PEGAR SEMILLA BIP39", "VOLVER"};
       const bool psbtOk = fingerprintValid;
       if (index == 0 || index == 1) updateButton(kMenu[index], kWifiModeLabels[index], psbtOk,
                                                  index == focusIndex, kWifiModeIcons[index]);
-      else if (index == 2 || index == 3) updateButton(kMenu[index], kWifiModeLabels[index], true,
-                                                      index == focusIndex, kWifiModeIcons[index]);
-      else updateButton(kBack, kWifiModeLabels[4], true, index == focusIndex);
+      else if (index == 2) updateButton(kMenu[index], kWifiModeLabels[index], true,
+                                        index == focusIndex, kWifiModeIcons[index]);
+      else updateButton(kBack, kWifiModeLabels[3], true, index == focusIndex);
       break;
     }
     case Screen::settings: {
@@ -4998,12 +5012,12 @@ void updateFocusButton(uint8_t index) {
 void moveFocus(int direction) {
   const uint8_t previous = focusIndex;
   uint8_t count = 1;
-  if (screen == Screen::active_seed) count = sessionUnlocked ? 9 : 8;
+  if (screen == Screen::active_seed) count = sessionUnlocked ? 10 : 9;
   else if (screen == Screen::seed_switcher) count = loadedSeedCount + 1;
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 5 : 6;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 7;
+  else if (screen == Screen::menu) count = 8;
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive) {
@@ -5014,7 +5028,7 @@ void moveFocus(int direction) {
       count = fingerprintValid ? 3 : 2;
     else count = 1;
   }
-  else if (screen == Screen::wifi_mode) count = 5;
+  else if (screen == Screen::wifi_mode) count = 4;
   else if (screen == Screen::settings) count = 8;
   else if (screen == Screen::settings_screen) count = device_settings::kScreenCleanOptionCount + 2;
   else if (screen == Screen::settings_lang) count = 3;
@@ -5128,6 +5142,7 @@ void click(int x, int y) {
     else if (kMenu[4].contains(x, y)) { openTxHistory(); }
     else if (kMenu[5].contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
     else if (kMenu[6].contains(x, y)) { lockDevice(); }
+    else if (kMenu[7].contains(x, y)) { openCamScan(Screen::menu, 7); }
     else if (kHelpIcon.contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(gSettings.defaultProfile); }
@@ -5141,11 +5156,12 @@ void click(int x, int y) {
       else { screen = Screen::discard_confirm; focusIndex = 0; drawScreen(); }
     }
     else if (kActiveMenu[5].contains(x, y)) { openWifiMode(); }
-    else if (sessionUnlocked && kActiveMenu[6].contains(x, y)) lockSessionVault();
-    else if (kActiveMenu[sessionUnlocked ? 7 : 6].contains(x, y)) {
+    else if (kActiveMenu[6].contains(x, y)) { openCamScan(Screen::active_seed, 6); }
+    else if (sessionUnlocked && kActiveMenu[7].contains(x, y)) lockSessionVault();
+    else if (kActiveMenu[sessionUnlocked ? 8 : 7].contains(x, y)) {
       screen = Screen::settings; focusIndex = 0; drawScreen();
     }
-    else if (kActiveMenu[sessionUnlocked ? 8 : 7].contains(x, y)) {
+    else if (kActiveMenu[sessionUnlocked ? 9 : 8].contains(x, y)) {
       screen = Screen::menu; focusIndex = 0; drawScreen();
     }
   } else if (screen == Screen::seed_switcher) {
@@ -5616,7 +5632,6 @@ void click(int x, int y) {
     if (kMenu[0].contains(x, y) && fingerprintValid) { beginWifiReceive(qr_wifi::Mode::kFile); }
     else if (kMenu[1].contains(x, y) && fingerprintValid) { beginWifiReceive(qr_wifi::Mode::kTxText); }
     else if (kMenu[2].contains(x, y)) { beginWifiReceive(qr_wifi::Mode::kSeedText); }
-    else if (kMenu[3].contains(x, y)) { beginCamScan(); }
     else if (kBack.contains(x, y)) { returnFromWifiReceive(); }
   } else if (screen == Screen::signed_tx) {
     if (kAction.contains(x, y)) { screen = Screen::signed_mode; focusIndex = 0; drawScreen(); }
@@ -5875,8 +5890,7 @@ void activateFocus() {
   } else if (screen == Screen::wifi_mode) {
     const Rect& r = focusIndex == 0 ? kMenu[0] :
                     focusIndex == 1 ? kMenu[1] :
-                    focusIndex == 2 ? kMenu[2] :
-                    focusIndex == 3 ? kMenu[3] : kBack;
+                    focusIndex == 2 ? kMenu[2] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings) {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
@@ -6055,7 +6069,7 @@ void loop() {
   if (screen == Screen::scan_cam_qr) {
     const auto cp = camClient.phase();
     if (cp == qr_cam::Phase::Cancelled || cp == qr_cam::Phase::Off) {
-      screen = Screen::wifi_mode; focusIndex = 3; drawScreen();
+      screen = camReturnScreen; focusIndex = camReturnFocus; drawScreen();
     } else if (cp == qr_cam::Phase::Complete) {
       if (!camResultShown) {
         camResultShown = true;

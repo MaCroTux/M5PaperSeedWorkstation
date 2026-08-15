@@ -32,7 +32,7 @@ namespace qr_cam {
 
 constexpr size_t MAX_QR_PAYLOAD = 32768;
 constexpr uint16_t MAX_QR_CHUNKS = 1024;
-constexpr uint32_t kTransferTimeoutMs = 5000;
+constexpr uint32_t kTransferTimeoutMs = 30000;
 
 constexpr char kDeviceName[]  = "M5Paper-QR-CAM";
 constexpr char kServiceUUID[] = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";

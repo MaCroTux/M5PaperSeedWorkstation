@@ -330,7 +330,7 @@ BLE; el M5Paper no recibe imágenes.
    mismo pipeline que cualquier QR: si es un **PSBT**, se guarda y abre la revisión
    de la transacción; si no, muestra el contenido decodificado.
 
-Límites (`MAX_QR_PAYLOAD` 32 KB, `MAX_QR_CHUNKS` 1024) y timeout de 5 s. La cámara
+Límites (`MAX_QR_PAYLOAD` 32 KB, `MAX_QR_CHUNKS` 1024) y timeout de 30 s. La cámara
 es **no confiable**: nunca recibe seed ni claves y todo lo recibido se valida como
 cualquier QR. Detalles en [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
 
