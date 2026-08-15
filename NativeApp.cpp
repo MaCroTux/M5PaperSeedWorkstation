@@ -77,7 +77,7 @@ constexpr Rect kAdd{185, 510, 335, 70};
 constexpr Rect kSuggestion[] = {{20, 610, 240, 72}, {280, 610, 240, 72},
                                 {20, 700, 240, 72}, {280, 700, 240, 72}};
 constexpr Rect kQrPrevious{20, 835, 145, 85};
-constexpr Rect kQrBack{190, 835, 160, 85};
+constexpr Rect kQrBack{175, 835, 185, 85};
 constexpr Rect kQrNext{375, 835, 145, 85};
 constexpr Rect kPublicQr{150, 720, 240, 80};
 constexpr Rect kFingerprintBadge{325, 72, 195, 40};
@@ -1307,23 +1307,17 @@ void drawVaultResult() {
   const bool sessionRecord = vaultFlow == VaultFlow::session_save_seed;
   title(sessionRecord ? "VAULT DE SESION" : "VAULT SEGURO",
         vaultResult == encrypted_seed_store::Result::ok ? "Copia cifrada terminada" : "Operacion no completada");
-  uint8_t resultSize = 3; textStyle(page, resultSize);
-  while (resultSize > 1 && page.textWidth(vaultResultText(vaultResult)) > 500) {
-    --resultSize; textStyle(page, resultSize);
-  }
-  page.setTextDatum(MC_DATUM);
-  page.drawString(vaultResultText(vaultResult), 270, 290);
-  textStyle(page, 2);
+  centeredFit(page, vaultResultText(vaultResult), 290, 500, 3);
   if (vaultResult == encrypted_seed_store::Result::ok) {
-    page.drawString(sessionRecord ? lang::tr("AES-256-GCM / clave de sesion") :
-                    "AES-256-GCM + PBKDF2 (600.000)", 270, 390);
+    centeredFit(page, sessionRecord ? "AES-256-GCM / clave de sesion"
+                                    : "AES-256-GCM + PBKDF2 (600.000)", 390);
+    textStyle(page, 2); page.setTextDatum(MC_DATUM);
     page.drawString(String(lang::tr("Archivo: ")) + vaultPath, 270, 445);
-    page.drawString(lang::tr("La semilla sigue activa en memoria."), 270, 510);
+    centeredFit(page, "La semilla sigue activa en memoria.", 510);
   } else if (vaultResult == encrypted_seed_store::Result::exists) {
-    page.drawString(lang::tr("El archivo existente"), 270, 400);
-    page.drawString(lang::tr("no se ha sobrescrito."), 270, 445);
+    centeredFit(page, "El archivo existente", 400);
+    centeredFit(page, "no se ha sobrescrito.", 445);
   }
-  page.setTextDatum(TL_DATUM);
   buttonOn(page, kAction, "VOLVER AL MENU SEED", true, true);
   fullRefresh();
 }
@@ -1492,10 +1486,9 @@ void drawTxHistory() {
       buttonOn(page, kVaultFiles[i], txDisplayName(i), true, focusIndex == i);
   }
   buttonOn(page, kBack, "VOLVER", true, focusIndex == txFileCount);
-  buttonOn(page, kDetail, txDeleteMode ? "CANCELAR BORRADO" : "MODO BORRAR",
-           txFileCount > 0, focusIndex == txFileCount + 1, Icon::trash);
-  buttonOn(page, kFirmar, "BORRAR TODOS", txFileCount > 0, focusIndex == txFileCount + 2,
-           Icon::trash);
+  buttonOn(page, kDetail, txDeleteMode ? "CANCELAR" : "MODO BORRAR",
+           txFileCount > 0, focusIndex == txFileCount + 1);
+  buttonOn(page, kFirmar, "BORRAR TODO", txFileCount > 0, focusIndex == txFileCount + 2);
   fullRefresh();
 }
 
@@ -1720,18 +1713,15 @@ void drawDeleteConfirm() {
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Se eliminara de la tarjeta SD:"), 270, 345);
   if (pendingDeleteTx && deleteAllTx) {
-    uint8_t size = 3; textStyle(page, size);
-    while (size > 1 && page.textWidth(lang::tr("TODAS las transacciones.")) > 500) {
-      textStyle(page, --size);
-    }
-    page.drawString(lang::tr("TODAS las transacciones."), 270, 410);
+    centeredFit(page, "TODAS las transacciones.", 410, 500, 3);
   } else {
     String display = pendingDeletePath[0] == '/' ? pendingDeletePath + 1 : pendingDeletePath;
     uint8_t size = 2; textStyle(page, size);
     while (size > 1 && page.textWidth(display) > 500) { --size; textStyle(page, size); }
+    page.setTextDatum(MC_DATUM);
     page.drawString(display, 270, 410);
   }
-  textStyle(page, 2);
+  textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr(pendingDeleteTx ? "La transaccion se borrara de la SD."
                                            : "La semilla activa no se descarta."), 270, 480);
   page.setTextDatum(TL_DATUM);
@@ -1934,13 +1924,11 @@ void drawReview() {
   const bool valid = complete && bip39::checksum_valid(words, targetWords);
   page.setCursor(20, 795);
   page.printf(lang::tr("Checksum: %s"), !complete ? lang::tr("INCOMPLETA") : valid ? lang::tr("VALIDO") : lang::tr("INVALIDO"));
-  const char* actionLabel = newSeedIntent == NewSeedIntent::to_vault ? "GUARDAR EN VAULT" :
-                            newSeedIntent == NewSeedIntent::ram_only ? "ACTIVAR EN RAM" :
+  const char* actionLabel = newSeedIntent == NewSeedIntent::to_vault ? "GUARDAR VAULT" :
+                            newSeedIntent == NewSeedIntent::ram_only ? "ACTIVAR RAM" :
                             "MENU SEED";
-  const Icon actionIcon = newSeedIntent == NewSeedIntent::to_vault ? Icon::save :
-                          newSeedIntent == NewSeedIntent::ram_only ? Icon::memory : Icon::none;
   buttonOn(page, kQrPrevious, "ULTIMA", true, focusIndex == 0, Icon::draw);
-  buttonOn(page, kQrBack, actionLabel, valid, focusIndex == 1, actionIcon);
+  buttonOn(page, kQrBack, actionLabel, valid, focusIndex == 1);
   buttonOn(page, kQrNext, "VER QR", valid, focusIndex == 2, Icon::qr);
   fullRefresh();
 }
@@ -2923,6 +2911,7 @@ psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
 bool txIsMultisig = false;
 multisig::MultisigInfo txMsInfo;
+String multisigSignLabel;
 Screen utxoReturnScreen = Screen::menu;
 std::vector<uint8_t> signedTxBytes;
 String signedTxHex;
@@ -3224,7 +3213,7 @@ void drawAnimatedQr() {
   page.setTextDatum(MC_DATUM);
   page.drawString(String(static_cast<uint32_t>(bbqrIndex) + 1) + " / " +
                   String(static_cast<uint32_t>(bbqrTotalParts)), 270, oy + px + 40);
-  textStyle(page, 2);
+  textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Manten el movil quieto"), 270, oy + px + 80);
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kAction, "VOLVER", true, focusIndex == 0);
@@ -3375,8 +3364,8 @@ void drawMultisigConfirm() {
 
   const bool enough = (existingSigs + vaultKeys) >= m;
   buttonOn(page, kBack, lang::tr("CANCELAR"), true, focusIndex == 0);
-  String signLabel = String(lang::tr("FIRMAR CON ")) + String(vaultKeys) + " " + lang::tr("claves");
-  buttonOn(page, kFirmar, signLabel.c_str(), enough, focusIndex == 1, Icon::key);
+  multisigSignLabel = String(lang::tr("FIRMAR CON ")) + String(vaultKeys) + " " + lang::tr("claves");
+  buttonOn(page, kAction, multisigSignLabel.c_str(), enough, focusIndex == 1, Icon::key);
   fullRefresh();
 }
 
@@ -3386,7 +3375,7 @@ void drawSigningFeedback() {
   textStyle(page, 3);
   page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Calculando firmas ECDSA."), kWidth / 2, 380);
-  textStyle(page, 2);
+  textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Puede tardar unos segundos."), kWidth / 2, 450);
   page.setTextDatum(TL_DATUM);
   fullRefresh(UPDATE_MODE_DU4);
@@ -4111,7 +4100,7 @@ void drawWifiReceive() {
     page.drawString(String("SSID: ") + qr_wifi::kApSsid, 270, ty);
     page.drawString(String(lang::tr("Clave: ")) + wifiServer.password(), 270, ty + 40);
     page.drawString("URL: http://192.168.4.1", 270, ty + 80);
-    textStyle(page, 1);
+    textStyle(page, 1); page.setTextDatum(MC_DATUM);
     page.drawString(String(lang::tr("Modo: ")) + lang::tr(wifiModeTitle(mode)), 270, ty + 130);
     page.setTextDatum(TL_DATUM);
     buttonOn(page, kAction, "CANCELAR", true, focusIndex == 0, Icon::x);
@@ -4830,13 +4819,11 @@ void updateFocusButton(uint8_t index) {
                    index == 0 ? Icon::none : Icon::check); break;
     case Screen::review: {
       const bool valid = wordCount == targetWords && bip39::checksum_valid(words, targetWords);
-      const char* actionLabel = newSeedIntent == NewSeedIntent::to_vault ? "GUARDAR EN VAULT" :
-                                newSeedIntent == NewSeedIntent::ram_only ? "ACTIVAR EN RAM" :
+      const char* actionLabel = newSeedIntent == NewSeedIntent::to_vault ? "GUARDAR VAULT" :
+                                newSeedIntent == NewSeedIntent::ram_only ? "ACTIVAR RAM" :
                                 "MENU SEED";
-      const Icon actionIcon = newSeedIntent == NewSeedIntent::to_vault ? Icon::save :
-                              newSeedIntent == NewSeedIntent::ram_only ? Icon::memory : Icon::none;
       if (index == 0) updateButton(kQrPrevious, "ULTIMA", true, index == focusIndex, Icon::draw);
-      else if (index == 1) updateButton(kQrBack, actionLabel, valid, index == focusIndex, actionIcon);
+      else if (index == 1) updateButton(kQrBack, actionLabel, valid, index == focusIndex);
       else updateButton(kQrNext, "VER QR", valid, index == focusIndex, Icon::qr);
       break;
     }
@@ -5078,7 +5065,7 @@ void updateFocusButton(uint8_t index) {
       break;
     case Screen::multisig_confirm:
       if (index == 0) updateButton(kBack, "CANCELAR", true, index == focusIndex);
-      else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
+      else updateButton(kAction, multisigSignLabel.c_str(), true, index == focusIndex, Icon::key);
       break;
     case Screen::tx_history:
       if (index < txFileCount)
@@ -5086,10 +5073,10 @@ void updateFocusButton(uint8_t index) {
       else if (index == txFileCount)
         updateButton(kBack, "VOLVER", true, index == focusIndex);
       else if (index == txFileCount + 1)
-        updateButton(kDetail, txDeleteMode ? "CANCELAR BORRADO" : "MODO BORRAR",
-                     txFileCount > 0, index == focusIndex, Icon::trash);
+        updateButton(kDetail, txDeleteMode ? "CANCELAR" : "MODO BORRAR",
+                     txFileCount > 0, index == focusIndex);
       else
-        updateButton(kFirmar, "BORRAR TODOS", txFileCount > 0, index == focusIndex, Icon::trash);
+        updateButton(kFirmar, "BORRAR TODO", txFileCount > 0, index == focusIndex);
       break;
     case Screen::tx_review:
       if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
@@ -5902,7 +5889,7 @@ void click(int x, int y) {
     if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 4; drawScreen(); }
   } else if (screen == Screen::multisig_confirm) {
     if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 0; drawScreen(); }
-    else if (kFirmar.contains(x, y) && fingerprintValid) { beginMultisigSign(); }
+    else if (kAction.contains(x, y) && fingerprintValid) { beginMultisigSign(); }
   } else if (screen == Screen::tx_history) {
     for (uint8_t i = 0; i < txFileCount; ++i) {
       if (kVaultFiles[i].contains(x, y)) {
@@ -6143,7 +6130,7 @@ void activateFocus() {
   } else if (screen == Screen::settings_radio) {
     click(kBack.x + 5, kBack.y + 5);
   } else if (screen == Screen::multisig_confirm) {
-    const Rect& r = focusIndex == 0 ? kBack : kFirmar;
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::tx_history) {
     const Rect& r = focusIndex < txFileCount ? kVaultFiles[focusIndex] :
