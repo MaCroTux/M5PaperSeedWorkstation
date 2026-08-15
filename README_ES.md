@@ -49,6 +49,9 @@ Documentación en inglés: [`README.md`](README.md).
 - **Recibir por WiFi** (punto de acceso + portal cautivo) o por **serial USB**:
   PSBT (fichero o texto) o semilla BIP39 en texto (esta última sin necesidad de
   tener una semilla cargada en RAM).
+- **Importar SeedQR**: la semilla se puede recuperar escaneando con la cámara (o
+  pegando por WiFi/serial) el mismo **SeedQR** que genera el backup, además de una
+  semilla en texto plano.
 - **Firmar PSBT** (ECDSA RFC6979 + BIP143) y emitir la transacción:
   - **Single-sig** P2WPKH.
   - **Multisig** P2WSH `sortedmulti` (BIP48), 2-de-2 / 2-de-3 / 3-de-3, con

@@ -48,6 +48,8 @@ Documentación en español: [`README_ES.md`](README_ES.md).
   [**Android-M5Paper-QRCam**](https://github.com/MaCroTux/Android-M5Paper-QRCam) app.
 - **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
+- **SeedQR import**: recover a seed by scanning with the camera (or pasting via
+  WiFi/serial) the same **SeedQR** the backup produces, plus plain-text seeds.
 - **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
   - **Single-sig** P2WPKH.
   - **Multisig** P2WSH `sortedmulti` (BIP48), 2-of-2 / 2-of-3 / 3-of-3, with

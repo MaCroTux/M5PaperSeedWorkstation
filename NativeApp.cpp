@@ -840,7 +840,7 @@ void renderEntropyProgress(bool updateCreate = false) {
 
 void drawEntropy() {
   blankPage();
-  title("DIBUJA ENTROPIA", "Traza movimientos largos e irregulares");
+  title("DIBUJA ENTROPIA", "Dibuja trazos largos");
   textStyle(page, 2);
   page.setCursor(20, 145);
   page.printf(lang::tr("Mezcla: %u/%u | RNG: %s"), entropySamples, kEntropyTarget,
@@ -992,7 +992,7 @@ void finishDice() {
 
 void drawDice() {
   blankPage();
-  title("TIRAR DADOS", "Entropia con dados fisicos 1-6");
+  title("TIRAR DADOS", "Dados fisicos (1-6)");
   buttonOn(page, kDiceLength12, "12 PALABRAS", true, diceTargetWords == 12, Icon::list);
   buttonOn(page, kDiceLength24, "24 PALABRAS", true, diceTargetWords == 24, Icon::list);
   textStyle(page, 2);
@@ -1087,7 +1087,7 @@ void updateKeyboardDynamic() {
 
 void drawKeyboard() {
   blankPage();
-  title("TECLADO BIP39", "Escribe 4 letras y toca la palabra");
+  title("TECLADO BIP39", "Escribe 4 letras y elige");
   drawKeyboardKeys();
   M5EPD_Canvas wordRegion(&M5.EPD);
   wordRegion.createCanvas(510, 120);
@@ -1142,7 +1142,7 @@ char* currentPassphraseEntry() {
 
 void drawPassphraseInput() {
   blankPage();
-  title("BIP39 PASSPHRASE", passphraseConfirmPhase ? "Repite EXACTAMENTE: mayusculas incluidas" :
+  title("BIP39 PASSPHRASE", passphraseConfirmPhase ? "Repite con mayusculas" :
         "Las mayusculas importan (ASCII)");
   char* value = currentPassphraseEntry(); const size_t length = strlen(value);
   textStyle(page, 2); page.setCursor(20, 150);
@@ -1191,8 +1191,8 @@ void drawVaultLabel() {
   const bool sessionSeed = vaultFlow == VaultFlow::session_save_seed;
   const bool sessionCreate = vaultFlow == VaultFlow::session_create;
   title(sessionSeed ? "ETIQUETA SEMILLA" : sessionCreate ? "NUEVO VAULT" : "ETIQUETA VAULT",
-        sessionSeed ? "Nombre reconocible dentro del Vault" :
-        sessionCreate ? "Nombre del Vault de sesion" : "Nombre reconocible para la copia cifrada");
+        sessionSeed ? "Nombre de la semilla" :
+        sessionCreate ? "Nombre del Vault" : "Nombre de la copia");
   textStyle(page, 2); page.setCursor(20, 155);
   page.println(lang::tr("1-16 letras. Ejemplos:"));
   page.setCursor(20, 180); page.println(lang::tr("ahorro, viajes o casa"));
@@ -1239,7 +1239,7 @@ void updateVaultLabelDynamic(bool updateActions = false) {
 
 void drawVaultPassword() {
   blankPage();
-  title("VAULT SEGURO", vaultConfirmPhase ? "Repite la contrasena" : "Crea una contrasena para la SD");
+  title("VAULT SEGURO", vaultConfirmPhase ? "Repite la contrasena" : "Contrasena para la SD");
   char* value = activeVaultPassword();
   const size_t length = strlen(value);
   textStyle(page, 2);
@@ -1340,7 +1340,7 @@ void saveVault() {
   snprintf(vaultPath, sizeof(vaultPath), "/%s-%s.vlt",
            activeFingerprint + 5, vaultLabel);
   blankPage();
-  title("VAULT SEGURO", "Cifrando y verificando la tarjeta SD...");
+  title("VAULT SEGURO", "Cifrando la tarjeta SD...");
   textStyle(page, 2); page.setCursor(30, 260);
   page.println(lang::tr("Puede tardar. No retires la tarjeta."));
   page.setCursor(30, 300);
@@ -1432,8 +1432,8 @@ const char* vaultDisplayName(uint8_t index) {
 
 void drawVaultList() {
   blankPage(); title(vaultDeleteMode ? "ELIMINAR VAULT" : "ABRIR VAULT",
-                     vaultDeleteMode ? "Selecciona el archivo que quieres borrar" :
-                     "Selecciona una copia cifrada de la SD");
+                     vaultDeleteMode ? "Elige el archivo a borrar" :
+                     "Elige una copia cifrada");
   if (SD.cardType() == CARD_NONE) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -1480,7 +1480,7 @@ const char* txDisplayName(uint8_t index) {
 void drawTxHistory() {
   blankPage();
   title(txDeleteMode ? "BORRAR TRANSACCION" : "HISTORIAL",
-        txDeleteMode ? "Toca una transaccion para borrarla" : "Transacciones guardadas");
+        txDeleteMode ? "Elige la transaccion" : "Transacciones guardadas");
   if (SD.cardType() == CARD_NONE) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -1558,7 +1558,7 @@ void vaultUnlockFailed() {
 
 void loadSelectedVault() {
   if (vaultUnlockBlocked()) return;
-  blankPage(); title("ABRIR VAULT", "Descifrando y verificando...");
+  blankPage(); title("ABRIR VAULT", "Descifrando y verificando");
   textStyle(page, 2); page.setCursor(30, 260); page.println(lang::tr("No retires la tarjeta SD."));
   page.setCursor(30, 300); page.println(lang::tr("Derivando clave (PBKDF2)..."));
   fullRefresh(UPDATE_MODE_DU4);
@@ -1676,7 +1676,7 @@ void drawSessionMenu() {
 }
 
 void drawSessionMetaList() {
-  blankPage(); title("VAULT DE SESION", "Selecciona el Vault que quieres abrir");
+  blankPage(); title("VAULT DE SESION", "Elige el Vault a abrir");
   if (!sessionMetaCount) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("NO HAY VAULTS DE SESION"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -1688,7 +1688,7 @@ void drawSessionMetaList() {
 void drawSessionSeedList() {
   scanSessionSeeds(); blankPage();
   title(sessionDeleteMode ? "ELIMINAR SEMILLA" : "SEMILLAS DEL VAULT",
-        sessionDeleteMode ? "Selecciona el registro que quieres borrar" : sessionLabel);
+        sessionDeleteMode ? "Elige el registro a borrar" : sessionLabel);
   if (!sessionSeedCount) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("VAULT VACIO"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -1714,8 +1714,8 @@ void drawSessionSeedList() {
 }
 
 void drawDeleteConfirm() {
-  blankPage(); title("CONFIRMAR ELIMINACION", deleteFailed ? "No se pudo borrar el archivo" :
-                     "Esta operacion no se puede deshacer");
+  blankPage(); title("CONFIRMAR ELIMINACION", deleteFailed ? "No se pudo borrar" :
+                     "No se puede deshacer");
   warningIcon(page, 270, 185);
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Se eliminara de la tarjeta SD:"), 270, 345);
@@ -1919,10 +1919,10 @@ void drawReview() {
   blankPage();
   title("REVISION",
         newSeedIntent == NewSeedIntent::to_vault
-            ? "Semilla nueva para el Vault de sesion"
+            ? "Semilla para el Vault"
             : newSeedIntent == NewSeedIntent::ram_only
-                ? "Semilla nueva que quedara solo en RAM"
-                : "Toca una palabra para corregirla");
+                ? "Semilla solo en RAM"
+                : "Toca para corregir");
   textStyle(page, 2);
   for (uint8_t i = 0; i < targetWords; ++i) {
     const int column = targetWords == 24 && i >= 12 ? 1 : 0;
@@ -2009,7 +2009,7 @@ void drawSeedSwitcher() {
 
 void drawBackupSeed() {
   blankPage();
-  title("BACKUP SEED", "Copias y comprobacion de la semilla");
+  title("BACKUP SEED", "Copias y comprobacion");
   buttonOn(page, kActiveMenu[0], "VER PALABRAS", true, focusIndex == 0, Icon::list);
   buttonOn(page, kActiveMenu[1], "VER QR", true, focusIndex == 1, Icon::qr);
   buttonOn(page, kActiveMenu[2], "BACKUP SEEDQR", true, focusIndex == 2, Icon::qr);
@@ -2077,7 +2077,7 @@ void drawRadioPermission() {
   blankPage();
   const bool wifi = radioAction == RadioAction::wifi;
   title(wifi ? "ACTIVAR WIFI" : "ACTIVAR BLUETOOTH",
-        wifi ? "Punto de acceso inalambrico" : "Escaneo de dispositivos cercanos");
+        wifi ? "Punto de acceso WiFi" : "Escaneo de dispositivos");
   warningIcon(page, 270, 175);
   centeredFit(page, "¿PERMITIR ACTIVAR LA RADIO?", 340, 500, 3);
   centeredFit(page, wifi ? "Se encendera el WiFi (punto de acceso)."
@@ -2242,7 +2242,7 @@ void renderQrDynamic() {
 
 void drawSeedQR() {
   blankPage();
-  title("BACKUP SEEDQR", "Asistente de dibujo fila a fila");
+  title("BACKUP SEEDQR", "Dibujo fila a fila");
   const int module = seedqr.size == 25 ? 15 : 13;
   const int pixels = seedqr.size * module;
   const int ox = (kWidth - pixels) / 2;
@@ -2329,7 +2329,7 @@ void drawPublicKeyQr() {
 
 void openPublicKey(uint8_t profile) {
   blankPage();
-  title("CLAVE PUBLICA", "Calculando y verificando derivacion...");
+  title("CLAVE PUBLICA", "Calculando derivacion...");
   fullRefresh(UPDATE_MODE_DU4);
   derivePublicKey(profile);
   screen = Screen::public_key;
@@ -2403,7 +2403,7 @@ void updateAddressIndexDynamic() {
 
 void drawAddressIndexInput() {
   blankPage();
-  title("IR A INDICE", "Escribe el numero de indice (0-999999)");
+  title("IR A INDICE", "Numero de indice (0-999999)");
   page.drawRoundRect(20, 165, 500, 52, 8, kBlack);
   textStyle(page, 2); page.setCursor(35, 174);
   page.print(indexBuffer[0] ? indexBuffer : "0");
@@ -2444,7 +2444,7 @@ void drawAddressQr() {
 
 void drawDiscardConfirm() {
   blankPage();
-  title("DESCARTAR SEED", "Esta accion elimina la semilla de RAM");
+  title("DESCARTAR SEED", "Borra la semilla de RAM");
   textStyle(page, 2);
   page.setCursor(30, 220); page.println(lang::tr("Comprueba el fingerprint"));
   page.setCursor(30, 260); page.println(lang::tr("antes de continuar."));
@@ -2456,7 +2456,7 @@ void drawDiscardConfirm() {
 
 void drawUnlockConfirm() {
   blankPage();
-  title("ABRIR VAULT", "Hay una semilla activa en RAM");
+  title("ABRIR VAULT", "Semilla activa en RAM");
   warningIcon(page, 270, 200);
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Al abrir el vault se descartara"), 270, 360);
@@ -2535,8 +2535,8 @@ bool scanQrActive() {
 const char* scanSubtitle() {
   switch (qrClient.phase()) {
     case qr_ble::Phase::Scanning: return "Buscando camara...";
-    case qr_ble::Phase::Connecting: return "Camara encontrada. Conectando...";
-    case qr_ble::Phase::Waiting: return "Camara conectada. Esperando QR...";
+    case qr_ble::Phase::Connecting: return "Conectando a la camara";
+    case qr_ble::Phase::Waiting: return "Camara conectada";
     case qr_ble::Phase::Receiving: return "Recibiendo el QR...";
     case qr_ble::Phase::Success: return "Transferencia completada";
     case qr_ble::Phase::Failed: return "La transferencia ha fallado";
@@ -2771,9 +2771,9 @@ void renderScanQrDynamic() {
 const char* camSubtitle() {
   switch (camClient.phase()) {
     case qr_cam::Phase::Scanning: return "Buscando camara...";
-    case qr_cam::Phase::Connecting: return "Camara encontrada. Conectando...";
+    case qr_cam::Phase::Connecting: return "Conectando a la camara";
     case qr_cam::Phase::Connected:
-    case qr_cam::Phase::WaitingQr: return "Camara lista. Muestra el QR.";
+    case qr_cam::Phase::WaitingQr: return "Camara lista";
     case qr_cam::Phase::Receiving: return "Recibiendo QR...";
     case qr_cam::Phase::Complete: return "QR recibido";
     case qr_cam::Phase::Error: return "Error";
@@ -2800,7 +2800,7 @@ void drawScanCamQr() {
   blankPage();
   const auto p = camClient.phase();
   if (p == qr_cam::Phase::Complete) {
-    title("QR RECIBIDO", "Contenido decodificado por la camara");
+    title("QR RECIBIDO", "Contenido de la camara");
     const std::vector<uint8_t>& d = camClient.payload();
     textStyle(page, 2);
     page.setCursor(30, 175);
@@ -2985,7 +2985,7 @@ uint8_t drawGroupedAddress(M5EPD_Canvas& canvas, const String& addr, int cx, int
 void drawTxInfo() {
   Serial.printf("[TX] fingerprintValid=%d txIsPsbt=%d words=%u/%u\n",
                 fingerprintValid, txIsPsbt, wordCount, targetWords);
-  title("TRANSACCION", "PSBT sin firmar - verifica con calma");
+  title("TRANSACCION", "PSBT sin firmar");
   textStyle(page, 2);
   int y = 158;
   page.setCursor(20, y);
@@ -3138,7 +3138,7 @@ void drawSignedTx() {
     centeredFit(page, "Comprueba la semilla y que el PSBT", 400);
     centeredFit(page, "tenga entradas P2WPKH con ruta.", 445);
   } else {
-    title("TX FIRMADA", "Escanear con Sparrow para emitir");
+    title("TX FIRMADA", "Escanea con Sparrow");
     const int qrSize = signedTxQr.size;
     int module = kWidth / (qrSize + 8);  // 4 modulos de margen blanco a cada lado
     if (module < 2) module = 2;
@@ -3507,6 +3507,8 @@ String serialShaHex;
 String serialOpenVaultPath = "";  // vault pendiente de M5PASS
 
 bool loadSeedText(const std::vector<uint8_t>& data);
+bool loadSeedQR(const std::vector<uint8_t>& data);
+bool loadSeedAny(const std::vector<uint8_t>& data);
 
 bool isBase64Char(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -3749,7 +3751,7 @@ void serialProgress(uint32_t done, uint32_t total) {
 // Pantalla de progreso en el dispositivo durante el desbloqueo por serial.
 void drawSerialVaultProgress() {
   blankPage();
-  title("ABRIR VAULT", "Descifrando y verificando...");
+  title("ABRIR VAULT", "Descifrando y verificando");
   textStyle(page, 2);
   page.setCursor(30, 260); page.println(lang::tr("No retires la tarjeta SD."));
   page.setCursor(30, 300); page.println(lang::tr("Derivando clave (PBKDF2)..."));
@@ -3832,7 +3834,7 @@ void handleVaultPass(const String& password) {
 void handleSeed(const String& wordsStr) {
   std::vector<uint8_t> data(wordsStr.length());
   memcpy(data.data(), wordsStr.c_str(), wordsStr.length());
-  if (loadSeedText(data)) {
+  if (loadSeedAny(data)) {
     lastUserActivity = millis();
     Serial.printf("M5OK fingerprint=%s words=%u\n", activeFingerprint + 4, wordCount);
   } else {
@@ -4074,7 +4076,7 @@ void drawWifiReceive() {
   const qr_wifi::Mode mode = wifiServer.mode();
   if (p == qr_wifi::Phase::Received) {
     if (mode == qr_wifi::Mode::kSeedText) {
-      title("SEMILLA NO VALIDA", "No se pudo importar la semilla");
+      title("SEMILLA NO VALIDA", "No se pudo importar");
       warningIcon(page, 270, 200);
       centeredFit(page, "ERROR", 320, 500, 3);
       centeredFit(page, "Revisa las palabras y que sean 12 o 24.", 400);
@@ -4087,7 +4089,7 @@ void drawWifiReceive() {
       drawWifiResult();
     }
   } else if (p == qr_wifi::Phase::Failed) {
-    title("RECIBIR POR WIFI", "No se pudo activar el punto de acceso");
+    title("RECIBIR POR WIFI", "No se pudo activar el WiFi");
     warningIcon(page, 270, 200);
     centeredFit(page, "ERROR", 320, 500, 3);
     centeredFit(page, "No se pudo crear la red WiFi.", 400);
@@ -4124,10 +4126,10 @@ const char* wifiModeTitle(qr_wifi::Mode mode) {
 
 const char* wifiModeHint(qr_wifi::Mode mode) {
   return mode == qr_wifi::Mode::kFile
-             ? "Conectate y sube el fichero PSBT desde la web"
+             ? "Conectate y sube el PSBT"
          : mode == qr_wifi::Mode::kTxText
-             ? "Conectate y pega la transaccion en la web"
-             : "Conectate y pega la semilla BIP39 en la web";
+             ? "Conectate y pega la TX"
+             : "Conectate y pega la semilla";
 }
 
 void openWifiMode() {
@@ -4166,6 +4168,20 @@ void beginWifiReceive(qr_wifi::Mode mode) {
   drawWifiReceive();
 }
 
+bool applySeedIndices(uint16_t indices[24], uint8_t count) {
+  if (count != 12 && count != 24) return false;
+  if (!bip39::checksum_valid(indices, count)) return false;
+
+  if (fingerprintValid) discardActiveSeed();
+  resetPhrase(count);
+  memcpy(words, indices, count * sizeof(uint16_t));
+  wordCount = count;
+  targetWords = count;
+  prefix = "";
+  editingWord = -1;
+  return updateFingerprint();
+}
+
 bool loadSeedText(const std::vector<uint8_t>& data) {
   if (data.empty() || !isValidUtf8(data)) return false;
   String text = scanPayloadText(data);
@@ -4185,23 +4201,52 @@ bool loadSeedText(const std::vector<uint8_t>& data) {
            text[pos] != '\n' && text[pos] != '\r') ++pos;
     const String w = text.substring(start, pos);
     const uint16_t idx = bip39::find_exact(w);
-    if (idx == bip39::kInvalidWord) return false;
+    if (idx == bip39::kInvalidWord) {
+      encrypted_seed_store::wipe(indices, sizeof(indices));
+      return false;
+    }
     indices[count++] = idx;
   }
-  if (pos < len) return false;
-  if (count != 12 && count != 24) return false;
-  if (!bip39::checksum_valid(indices, count)) return false;
-
-  if (fingerprintValid) discardActiveSeed();
-  resetPhrase(static_cast<uint8_t>(count));
-  memcpy(words, indices, count * sizeof(uint16_t));
-  wordCount = static_cast<uint8_t>(count);
-  targetWords = static_cast<uint8_t>(count);
-  prefix = "";
-  editingWord = -1;
-  const bool ok = updateFingerprint();
+  if (pos < len) { encrypted_seed_store::wipe(indices, sizeof(indices)); return false; }
+  const bool ok = applySeedIndices(indices, static_cast<uint8_t>(count));
   encrypted_seed_store::wipe(indices, sizeof(indices));
   return ok;
+}
+
+bool loadSeedQR(const std::vector<uint8_t>& data) {
+  if (data.empty() || !isValidUtf8(data)) return false;
+  const String text = scanPayloadText(data);
+  String digits;
+  digits.reserve(text.length());
+  for (size_t i = 0; i < text.length(); ++i) {
+    const char c = text[i];
+    if (c >= '0' && c <= '9') digits += c;
+    else if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return false;
+  }
+  const size_t len = digits.length();
+  if (len != 48 && len != 96) return false;
+  const uint8_t count = len == 48 ? 12 : 24;
+
+  uint16_t indices[24] = {};
+  for (uint8_t i = 0; i < count; ++i) {
+    const uint32_t v = static_cast<uint32_t>(digits[i * 4] - '0') * 1000u +
+                       static_cast<uint32_t>(digits[i * 4 + 1] - '0') * 100u +
+                       static_cast<uint32_t>(digits[i * 4 + 2] - '0') * 10u +
+                       static_cast<uint32_t>(digits[i * 4 + 3] - '0');
+    if (v >= bip39::kWordCount) {
+      encrypted_seed_store::wipe(indices, sizeof(indices));
+      return false;
+    }
+    indices[i] = static_cast<uint16_t>(v);
+  }
+  const bool ok = applySeedIndices(indices, count);
+  encrypted_seed_store::wipe(indices, sizeof(indices));
+  return ok;
+}
+
+bool loadSeedAny(const std::vector<uint8_t>& data) {
+  if (loadSeedText(data)) return true;
+  return loadSeedQR(data);
 }
 
 const char* timeoutLabel(uint32_t ms) {
@@ -4243,7 +4288,7 @@ String settingsTimeoutLabel() {
 }
 
 String settingsDerivLabel() {
-  return String(lang::tr("Derivacion por defecto")) + ": " +
+  return String(lang::tr("Derivacion")) + ": " +
       profileLabel(gSettings.defaultProfile);
 }
 
@@ -4280,7 +4325,7 @@ String screenCleanLabel(uint8_t n) {
 
 void drawSettingsScreen() {
   blankPage();
-  title(lang::tr("Limpieza de pantalla"), lang::tr("Limpia el panel cada N refrescos"));
+  title(lang::tr("Limpieza de pantalla"), lang::tr("Limpieza cada N refrescos"));
   for (uint8_t i = 0; i < device_settings::kScreenCleanOptionCount; ++i) {
     const uint8_t n = device_settings::kScreenCleanOptions[i];
     buttonOn(page, kMenu[i], screenCleanLabel(n).c_str(), true,
@@ -4293,7 +4338,7 @@ void drawSettingsScreen() {
 
 void drawSettingsLang() {
   blankPage();
-  title(lang::tr("Idioma"), lang::tr("Elige el idioma de la interfaz"));
+  title(lang::tr("Idioma"), lang::tr("Elige el idioma"));
   buttonOn(page, kMenu[0], lang::tr("Ingles"), true,
            gSettings.language == 0 && focusIndex == 0, Icon::none);
   buttonOn(page, kMenu[1], lang::tr("Espanol"), true,
@@ -4304,7 +4349,7 @@ void drawSettingsLang() {
 
 void drawSettingsTimeout() {
   blankPage();
-  title(lang::tr("Tiempo de bloqueo"), lang::tr("Bloqueo automatico por inactividad"));
+  title(lang::tr("Tiempo de bloqueo"), lang::tr("Bloqueo por inactividad"));
   for (uint8_t i = 0; i < device_settings::kTimeoutOptionCount; ++i) {
     const uint32_t ms = device_settings::kTimeoutOptions[i];
     buttonOn(page, kMenu[i], timeoutLabel(ms), true,
@@ -4317,7 +4362,7 @@ void drawSettingsTimeout() {
 
 void drawSettingsClean() {
   blankPage();
-  title(lang::tr("Limpieza de seed"), lang::tr("Borra la semilla de RAM por inactividad"));
+  title(lang::tr("Limpieza de seed"), lang::tr("Borrado por inactividad"));
   for (uint8_t i = 0; i < device_settings::kCleanOptionCount; ++i) {
     const uint32_t ms = device_settings::kCleanOptions[i];
     buttonOn(page, kMenu[i], cleanLabel(ms), true,
@@ -4512,7 +4557,7 @@ void scanTwoFaFiles() {
 
 void drawTwoFaList() {
   blankPage();
-  title("CORE2 + PIN", "Selecciona el Vault que quieres abrir");
+  title("CORE2 + PIN", "Elige el Vault a abrir");
   if (SD.cardType() == CARD_NONE) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -4539,7 +4584,7 @@ void openTwoFaList() {
 void drawTwoFaMigrateList() {
   scanSessionMeta();
   blankPage();
-  title("MIGRAR A PASS+LLAVE", "Selecciona el Vault que quieres migrar");
+  title("MIGRAR A PASS+LLAVE", "Elige el Vault a migrar");
   if (SD.cardType() == CARD_NONE) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -6261,6 +6306,11 @@ void loop() {
           camClient.clear();
           showToast("PSBT recibido por camara");
           afterPsbtParsed(true);
+        } else if (loadSeedAny(camClient.payload())) {
+          camClient.clear();
+          newSeedIntent = NewSeedIntent::none;
+          screen = Screen::review; focusIndex = 0;
+          drawScreen();
         } else {
           drawScanCamQr();
         }
@@ -6291,7 +6341,7 @@ void loop() {
     } else if (wp == qr_wifi::Phase::Received && !wifiResultShown) {
       wifiResultShown = true;
       if (wifiServer.mode() == qr_wifi::Mode::kSeedText) {
-        if (loadSeedText(wifiServer.data())) {
+        if (loadSeedAny(wifiServer.data())) {
           wifiServer.clear();
           newSeedIntent = NewSeedIntent::none;
           screen = Screen::review;
