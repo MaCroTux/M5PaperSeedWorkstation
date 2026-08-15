@@ -16,6 +16,11 @@ Documentación en español: [`README_ES.md`](README_ES.md).
 
 ---
 
+<p align="center">
+  <img src="main_menu.jpeg" alt="M5Paper Seed Workstation — main menu" width="480">
+  <br><em>Main menu of the device.</em>
+</p>
+
 ## 1. What it does
 
 - **Enter a BIP39 seed** (on-screen keyboard with autocomplete of the 2048 words).
@@ -39,6 +44,8 @@ Documentación en español: [`README_ES.md`](README_ES.md).
   to a camera module that reads and decodes a QR and returns the already-decoded
   (opaque) payload. The content is delivered to the same pipeline as any QR
   (PSBT/UR/BBQr/descriptor). See [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
+  You can also use an **Android phone as camera** with the
+  [**Android-M5Paper-QRCam**](https://github.com/MaCroTux/Android-M5Paper-QRCam) app.
 - **Receive via WiFi** (access point + captive portal) or **USB serial**: PSBT
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
 - **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
@@ -331,6 +338,14 @@ the M5Paper receives no images.
 Limits (`MAX_QR_PAYLOAD` 32 KB, `MAX_QR_CHUNKS` 1024) and a 30 s timeout. The camera
 is **untrusted**: it never receives a seed or keys, and everything received is
 validated like any QR. Details in [`PROTOCOLO_CAMARA_QR.md`](PROTOCOLO_CAMARA_QR.md).
+
+### No-camera alternative: Android app
+
+If you don't want to build an ESP32-CAM module or use WiFi, you can use your
+**Android phone as camera**: the
+[**Android-M5Paper-QRCam**](https://github.com/MaCroTux/Android-M5Paper-QRCam) app
+acts as `M5Paper-QR-CAM` and sends the already-decoded QR over BLE (same protocol
+as this section). It's the practical solution for users who prefer not to use WiFi.
 
 ---
 

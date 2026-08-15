@@ -37,7 +37,7 @@ constexpr int kRockerLeftPin = 39;
 
 enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_seed, vault_actions, length, keyboard, review, plain_qr,
                     seedqr, public_key, public_key_qr, entropy_length, entropy, dice,
-                    security_warning, vault_password, vault_result,
+                    security_warning, radio_permission, vault_password, vault_result,
                     vault_label, address_explorer, address_index_input, address_qr,
                      vault_list, vault_unlock, vault_loaded,
                      session_menu, session_meta_list, session_seed_list,
@@ -80,7 +80,7 @@ constexpr Rect kQrPrevious{20, 835, 145, 85};
 constexpr Rect kQrBack{190, 835, 160, 85};
 constexpr Rect kQrNext{375, 835, 145, 85};
 constexpr Rect kPublicQr{150, 720, 240, 80};
-constexpr Rect kFingerprintBadge{325, 8, 195, 72};
+constexpr Rect kFingerprintBadge{325, 72, 195, 40};
 constexpr Rect kEntropyArea{20, 185, 500, 500};
 constexpr Rect kEntropyReset{20, 725, 155, 90};
 constexpr Rect kEntropyCreate{190, 725, 330, 90};
@@ -137,8 +137,13 @@ M5EPD_Canvas entropyCanvas(&M5.EPD);
 Screen screen = Screen::menu;
 Screen securityWarningReturn = Screen::review;
 Screen securityWarningTarget = Screen::review;
+enum class RadioAction : uint8_t { none, wifi, cam };
+RadioAction radioAction = RadioAction::none;
+Screen radioReturn = Screen::menu;
+uint8_t radioReturnFocus = 0;
 void requestSecurity(Screen target, Screen returnTo);
 void drawScreen();
+void statusBar();
 void beginTwoFaEnable();
 void wipeSessionState();
 uint8_t focusIndex = 0;
@@ -202,8 +207,11 @@ bool passphraseReveal = false;
 uint8_t passphraseKeyboardMode = 0;
 bool vaultDeleteMode = false;
 bool sessionDeleteMode = false;
+bool txDeleteMode = false;
 bool deleteFailed = false;
 bool pendingDeleteSession = false;
+bool pendingDeleteTx = false;
+bool deleteAllTx = false;
 bool unlockConfirmIsSession = false;
 char pendingDeletePath[64] = {};
 enum class VaultFlow { individual, session_create, session_unlock, session_save_seed,
@@ -391,18 +399,32 @@ void fingerprintBadge() {
                       fingerprintValid ? activeFingerprint + 5 : "--------";
   textStyle(page, 3);
   page.setTextDatum(MR_DATUM);
-  page.drawString(value, kWidth - 20, 46);
+  page.drawString(value, kWidth - 20, 96);
   textStyle(page, 2);          // restaurar tamaño (title() deja size 2)
   page.setTextDatum(TL_DATUM);
+}
+
+void subtitleFit(const char* text) {
+  const char* t = lang::tr(text);
+  const char* badge = !fingerprintSelfTest ? "ERROR" :
+                      fingerprintValid ? activeFingerprint + 5 : "--------";
+  textStyle(page, 3);
+  const int badgeWidth = page.textWidth(badge);
+  textStyle(page, 2);
+  const int maxWidth = kWidth - 40 - badgeWidth - 24;
+  page.setCursor(20, 88);
+  if (page.textWidth(t) <= maxWidth) { page.print(t); return; }
+  String s(t);
+  while (s.length() > 1 && page.textWidth(s + "...") > maxWidth) s.remove(s.length() - 1);
+  page.print(s + "...");
 }
 
 void title(const char* heading, const char* subtitle) {
   textStyle(page, 3);
   page.setCursor(20, 20);
   page.println(lang::tr(heading));
-  textStyle(page, 2);
-  page.setCursor(20, 88);
-  page.println(lang::tr(subtitle));
+  subtitleFit(subtitle);
+  statusBar();
   fingerprintBadge();
   page.drawFastHLine(20, 140, kWidth - 40, kBlack);
 }
@@ -410,7 +432,7 @@ void title(const char* heading, const char* subtitle) {
 enum class Icon : uint8_t {
   none, key, lock, unlock, trash, eye, qr, plus, minus, save, folder, memory,
   back, forward, up, down, wrench, draw, dice, keyboard, reset, list, home,
-  shield, x, check, wifi
+  shield, x, check, wifi, bluetooth
 };
 
 void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, Color c) {
@@ -567,6 +589,11 @@ void drawIcon(M5EPD_Canvas& canvas, Icon icon, int cx, int cy, Color c) {
       canvas.drawLine(cx, cy - 9, cx + 9, cy - 1, c);
       canvas.drawLine(cx - 4, cy - 1, cx, cy - 5, c);
       canvas.drawLine(cx, cy - 5, cx + 4, cy - 1, c);
+      break;
+    case Icon::bluetooth:
+      canvas.drawLine(cx, cy - 9, cx, cy + 9, c);
+      canvas.fillTriangle(cx, cy - 9, cx - 7, cy - 3, cx - 7, cy + 4, c);
+      canvas.fillTriangle(cx, cy + 9, cx + 7, cy + 3, cx + 7, cy - 4, c);
       break;
     case Icon::none: break;
   }
@@ -1452,7 +1479,8 @@ const char* txDisplayName(uint8_t index) {
 
 void drawTxHistory() {
   blankPage();
-  title("HISTORIAL", "Transacciones guardadas");
+  title(txDeleteMode ? "BORRAR TRANSACCION" : "HISTORIAL",
+        txDeleteMode ? "Toca una transaccion para borrarla" : "Transacciones guardadas");
   if (SD.cardType() == CARD_NONE) {
     textStyle(page, 3); page.setTextDatum(MC_DATUM);
     page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
@@ -1464,10 +1492,15 @@ void drawTxHistory() {
       buttonOn(page, kVaultFiles[i], txDisplayName(i), true, focusIndex == i);
   }
   buttonOn(page, kBack, "VOLVER", true, focusIndex == txFileCount);
+  buttonOn(page, kDetail, txDeleteMode ? "CANCELAR BORRADO" : "MODO BORRAR",
+           txFileCount > 0, focusIndex == txFileCount + 1, Icon::trash);
+  buttonOn(page, kFirmar, "BORRAR TODOS", txFileCount > 0, focusIndex == txFileCount + 2,
+           Icon::trash);
   fullRefresh();
 }
 
 void openTxHistory() {
+  txDeleteMode = false;
   scanTxFiles();
   screen = Screen::tx_history;
   focusIndex = 0;
@@ -1686,14 +1719,25 @@ void drawDeleteConfirm() {
   warningIcon(page, 270, 185);
   textStyle(page, 2); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr("Se eliminara de la tarjeta SD:"), 270, 345);
-  String display = pendingDeletePath[0] == '/' ? pendingDeletePath + 1 : pendingDeletePath;
-  uint8_t size = 2; textStyle(page, size);
-  while (size > 1 && page.textWidth(display) > 500) { --size; textStyle(page, size); }
-  page.drawString(display, 270, 410);
-  textStyle(page, 2); page.drawString(lang::tr("La semilla activa no se descarta."), 270, 480);
+  if (pendingDeleteTx && deleteAllTx) {
+    uint8_t size = 3; textStyle(page, size);
+    while (size > 1 && page.textWidth(lang::tr("TODAS las transacciones.")) > 500) {
+      textStyle(page, --size);
+    }
+    page.drawString(lang::tr("TODAS las transacciones."), 270, 410);
+  } else {
+    String display = pendingDeletePath[0] == '/' ? pendingDeletePath + 1 : pendingDeletePath;
+    uint8_t size = 2; textStyle(page, size);
+    while (size > 1 && page.textWidth(display) > 500) { --size; textStyle(page, size); }
+    page.drawString(display, 270, 410);
+  }
+  textStyle(page, 2);
+  page.drawString(lang::tr(pendingDeleteTx ? "La transaccion se borrara de la SD."
+                                           : "La semilla activa no se descarta."), 270, 480);
   page.setTextDatum(TL_DATUM);
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
-  buttonOn(page, kAction, "ELIMINAR ARCHIVO", true, focusIndex == 1, Icon::trash);
+  buttonOn(page, kAction, pendingDeleteTx && deleteAllTx ? "BORRAR TODO" : "ELIMINAR ARCHIVO",
+           true, focusIndex == 1, Icon::trash);
   fullRefresh();
 }
 
@@ -1903,7 +1947,7 @@ void drawReview() {
 
 void drawActiveSeed() {
   blankPage();
-  title("SEMILLA ACTIVA", "Acciones disponibles en memoria");
+  title("SEMILLA ACTIVA", "Acciones de la semilla");
   static const Icon kActiveIcons[] = {Icon::key, Icon::shield, Icon::lock,
                                       Icon::eye, Icon::trash};
   for (uint8_t i = 0; i < 5; ++i) {
@@ -2027,6 +2071,31 @@ void requestSecurity(Screen target, Screen returnTo) {
   screen = Screen::security_warning;
   focusIndex = 0;
   drawSecurityWarning();
+}
+
+void drawRadioPermission() {
+  blankPage();
+  const bool wifi = radioAction == RadioAction::wifi;
+  title(wifi ? "ACTIVAR WIFI" : "ACTIVAR BLUETOOTH",
+        wifi ? "Punto de acceso inalambrico" : "Escaneo de dispositivos cercanos");
+  warningIcon(page, 270, 175);
+  centeredFit(page, "¿PERMITIR ACTIVAR LA RADIO?", 340, 500, 3);
+  centeredFit(page, wifi ? "Se encendera el WiFi (punto de acceso)."
+                         : "Se encendera el Bluetooth (BLE).", 400);
+  centeredFit(page, "Emite senales de radio cercanas.", 445);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, "PERMITIR", true, focusIndex == 1,
+           wifi ? Icon::wifi : Icon::bluetooth);
+  fullRefresh();
+}
+
+void requestRadioPermission(RadioAction action, Screen returnTo, uint8_t returnFocus) {
+  radioAction = action;
+  radioReturn = returnTo;
+  radioReturnFocus = returnFocus;
+  screen = Screen::radio_permission;
+  focusIndex = 0;
+  drawRadioPermission();
 }
 
 void drawSessionLockWarning() {
@@ -2803,6 +2872,53 @@ qr_wifi::QRWiFiServer wifiServer;
 bool wifiResultShown = false;
 Screen wifiModeReturnScreen = Screen::menu;
 uint8_t wifiModeReturnFocus = 4;
+
+bool wifiActive() {
+  const auto p = wifiServer.phase();
+  return p == qr_wifi::Phase::Starting || p == qr_wifi::Phase::Waiting ||
+         p == qr_wifi::Phase::Received;
+}
+
+bool bleActive() {
+  const auto q = qrClient.phase();
+  if (q == qr_ble::Phase::Scanning || q == qr_ble::Phase::Connecting ||
+      q == qr_ble::Phase::Waiting || q == qr_ble::Phase::Receiving) return true;
+  const auto c = camClient.phase();
+  if (c != qr_cam::Phase::Off && c != qr_cam::Phase::Cancelled &&
+      c != qr_cam::Phase::Complete && c != qr_cam::Phase::Error) return true;
+  const auto k = keyClient.phase();
+  if (k != ble_key::BleKeyClient::Phase::Idle &&
+      k != ble_key::BleKeyClient::Phase::Cancelled &&
+      k != ble_key::BleKeyClient::Phase::Denied &&
+      k != ble_key::BleKeyClient::Phase::Failed &&
+      k != ble_key::BleKeyClient::Phase::Paired &&
+      k != ble_key::BleKeyClient::Phase::SetPinDone &&
+      k != ble_key::BleKeyClient::Phase::Unlocked) return true;
+  const auto p = provisionClient.phase();
+  if (p != ble_provision::BleProvisionClient::Phase::Idle &&
+      p != ble_provision::BleProvisionClient::Phase::Cancelled &&
+      p != ble_provision::BleProvisionClient::Phase::Denied &&
+      p != ble_provision::BleProvisionClient::Phase::Failed &&
+      p != ble_provision::BleProvisionClient::Phase::Provisioned) return true;
+  return false;
+}
+
+void statusBar() {
+  const bool wifiOn = wifiActive();
+  const bool btOn = bleActive();
+  const char* bt = btOn ? "BT:ON" : "BT:OFF";
+  const char* wf = wifiOn ? "WF:ON" : "WF:OFF";
+  textStyle(page, 2);
+  page.setTextDatum(MR_DATUM);
+  const int right = kWidth - 20;
+  const int btW = page.textWidth(bt);
+  page.setTextColor(btOn ? kBlack : kGray, kWhite);
+  page.drawString(bt, right, 18);
+  page.setTextColor(wifiOn ? kBlack : kGray, kWhite);
+  page.drawString(wf, right - btW - 14, 18);
+  page.setTextDatum(TL_DATUM);
+  textStyle(page);
+}
 psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
 bool txIsMultisig = false;
@@ -4547,6 +4663,7 @@ void drawScreen() {
     case Screen::entropy: drawEntropy(); break;
     case Screen::dice: drawDice(); break;
     case Screen::security_warning: drawSecurityWarning(); break;
+    case Screen::radio_permission: drawRadioPermission(); break;
     case Screen::vault_password: drawVaultPassword(); break;
     case Screen::vault_result: drawVaultResult(); break;
     case Screen::vault_label: drawVaultLabel(); break;
@@ -4717,6 +4834,12 @@ void updateFocusButton(uint8_t index) {
                    index == 0 ? "CANCELAR" : "ESTOY EN UN LUGAR SEGURO",
                    true, index == focusIndex,
                    index == 0 ? Icon::none : Icon::shield); break;
+    case Screen::radio_permission:
+      updateButton(index == 0 ? kBack : kAction,
+                   index == 0 ? "CANCELAR" : "PERMITIR",
+                   true, index == focusIndex,
+                   index == 0 ? Icon::none :
+                   radioAction == RadioAction::wifi ? Icon::wifi : Icon::bluetooth); break;
     case Screen::vault_password: {
       const size_t length = strlen(activeVaultPassword());
       const bool confirm = vaultConfirmPhase;
@@ -4782,7 +4905,8 @@ void updateFocusButton(uint8_t index) {
       break;
     case Screen::delete_confirm:
       updateButton(index == 0 ? kBack : kAction,
-          index == 0 ? "CANCELAR" : "ELIMINAR ARCHIVO", true, index == focusIndex,
+          index == 0 ? "CANCELAR" : (pendingDeleteTx && deleteAllTx ? "BORRAR TODO" : "ELIMINAR ARCHIVO"),
+          true, index == focusIndex,
           index == 0 ? Icon::none : Icon::trash); break;
     case Screen::address_explorer: {
       const PublicProfile& profile = kPublicProfiles[publicKeyProfile];
@@ -4912,8 +5036,15 @@ void updateFocusButton(uint8_t index) {
       else updateButton(kFirmar, "FIRMAR", true, index == focusIndex, Icon::key);
       break;
     case Screen::tx_history:
-      if (index < txFileCount) updateButton(kVaultFiles[index], txDisplayName(index), true, index == focusIndex);
-      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      if (index < txFileCount)
+        updateButton(kVaultFiles[index], txDisplayName(index), true, index == focusIndex);
+      else if (index == txFileCount)
+        updateButton(kBack, "VOLVER", true, index == focusIndex);
+      else if (index == txFileCount + 1)
+        updateButton(kDetail, txDeleteMode ? "CANCELAR BORRADO" : "MODO BORRAR",
+                     txFileCount > 0, index == focusIndex, Icon::trash);
+      else
+        updateButton(kFirmar, "BORRAR TODOS", txFileCount > 0, index == focusIndex, Icon::trash);
       break;
     case Screen::tx_review:
       if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
@@ -5037,7 +5168,7 @@ void moveFocus(int direction) {
   else if (screen == Screen::settings_derivation) count = kPublicProfileCount + 1;
   else if (screen == Screen::settings_radio) count = 1;
   else if (screen == Screen::multisig_confirm) count = 2;
-  else if (screen == Screen::tx_history) count = txFileCount + 1;
+  else if (screen == Screen::tx_history) count = txFileCount + 3;
   else if (screen == Screen::ble_key_menu) count = 4;
   else if (screen == Screen::ble_key_test) {
     const auto p = keyClient.phase();
@@ -5069,7 +5200,8 @@ void moveFocus(int direction) {
   else if (screen == Screen::dice) count = 3;
   else if (screen == Screen::review) count = 3;
   else if (screen == Screen::keyboard || screen == Screen::entropy ||
-           screen == Screen::security_warning || screen == Screen::vault_password ||
+           screen == Screen::security_warning || screen == Screen::radio_permission ||
+           screen == Screen::vault_password ||
            screen == Screen::vault_label || screen == Screen::vault_unlock ||
            screen == Screen::passphrase_input ||
            screen == Screen::address_index_input ||
@@ -5138,11 +5270,11 @@ void click(int x, int y) {
     } else if (kMenu[1].contains(x, y)) {
       if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
     }     else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
-    else if (kMenu[3].contains(x, y)) { openWifiMode(); }
+    else if (kMenu[3].contains(x, y)) { requestRadioPermission(RadioAction::wifi, Screen::menu, 3); }
     else if (kMenu[4].contains(x, y)) { openTxHistory(); }
     else if (kMenu[5].contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
     else if (kMenu[6].contains(x, y)) { lockDevice(); }
-    else if (kMenu[7].contains(x, y)) { openCamScan(Screen::menu, 7); }
+    else if (kMenu[7].contains(x, y)) { requestRadioPermission(RadioAction::cam, Screen::menu, 7); }
     else if (kHelpIcon.contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(gSettings.defaultProfile); }
@@ -5155,8 +5287,8 @@ void click(int x, int y) {
       if (sessionUnlocked) { screen = Screen::vault_actions; focusIndex = 0; drawScreen(); }
       else { screen = Screen::discard_confirm; focusIndex = 0; drawScreen(); }
     }
-    else if (kActiveMenu[5].contains(x, y)) { openWifiMode(); }
-    else if (kActiveMenu[6].contains(x, y)) { openCamScan(Screen::active_seed, 6); }
+    else if (kActiveMenu[5].contains(x, y)) { requestRadioPermission(RadioAction::wifi, Screen::active_seed, 5); }
+    else if (kActiveMenu[6].contains(x, y)) { requestRadioPermission(RadioAction::cam, Screen::active_seed, 6); }
     else if (sessionUnlocked && kActiveMenu[7].contains(x, y)) lockSessionVault();
     else if (kActiveMenu[sessionUnlocked ? 8 : 7].contains(x, y)) {
       screen = Screen::settings; focusIndex = 0; drawScreen();
@@ -5368,6 +5500,21 @@ void click(int x, int y) {
         screen = securityWarningTarget; focusIndex = 0; drawScreen();
       }
     }
+  } else if (screen == Screen::radio_permission) {
+    if (kBack.contains(x, y)) {
+      radioAction = RadioAction::none;
+      screen = radioReturn; focusIndex = radioReturnFocus; drawScreen();
+    } else if (kAction.contains(x, y)) {
+      const RadioAction action = radioAction;
+      radioAction = RadioAction::none;
+      if (action == RadioAction::wifi) {
+        wifiModeReturnScreen = radioReturn;
+        wifiModeReturnFocus = radioReturnFocus;
+        screen = Screen::wifi_mode; focusIndex = 0; drawScreen();
+      } else if (action == RadioAction::cam) {
+        openCamScan(radioReturn, radioReturnFocus);
+      }
+    }
   } else if (screen == Screen::vault_label) {
     const size_t length = strlen(vaultLabel);
     const char key = keyAt(x, y);
@@ -5530,10 +5677,26 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::delete_confirm) {
     if (kBack.contains(x, y)) {
-      screen = pendingDeleteSession ? Screen::session_seed_list : Screen::vault_list;
+      if (pendingDeleteTx) {
+        pendingDeleteTx = false; deleteAllTx = false; screen = Screen::tx_history;
+      } else {
+        screen = pendingDeleteSession ? Screen::session_seed_list : Screen::vault_list;
+      }
       focusIndex = 0; drawScreen();
     } else if (kAction.contains(x, y)) {
-      if (SD.remove(pendingDeletePath)) {
+      if (pendingDeleteTx) {
+        bool ok = true;
+        if (deleteAllTx) {
+          for (uint8_t i = 0; i < txFileCount; ++i) if (!SD.remove(txFiles[i])) ok = false;
+        } else {
+          ok = SD.remove(pendingDeletePath);
+        }
+        if (ok) {
+          memset(pendingDeletePath, 0, sizeof(pendingDeletePath));
+          deleteFailed = false; deleteAllTx = false; pendingDeleteTx = false;
+          scanTxFiles(); screen = Screen::tx_history; focusIndex = 0; drawScreen();
+        } else { deleteFailed = true; focusIndex = 0; drawScreen(); }
+      } else if (SD.remove(pendingDeletePath)) {
         Serial.printf("Archivo Vault eliminado: %s\n", pendingDeletePath);
         memset(pendingDeletePath, 0, sizeof(pendingDeletePath)); deleteFailed = false;
         if (pendingDeleteSession) { scanSessionSeeds(); screen = Screen::session_seed_list; }
@@ -5698,11 +5861,24 @@ void click(int x, int y) {
   } else if (screen == Screen::tx_history) {
     for (uint8_t i = 0; i < txFileCount; ++i) {
       if (kVaultFiles[i].contains(x, y)) {
-        loadPsbtFromFile(txFiles[i]);
+        if (txDeleteMode) {
+          strncpy(pendingDeletePath, txFiles[i], sizeof(pendingDeletePath) - 1);
+          pendingDeleteTx = true; deleteAllTx = false; deleteFailed = false;
+          screen = Screen::delete_confirm; focusIndex = 0; drawScreen();
+        } else {
+          loadPsbtFromFile(txFiles[i]);
+        }
         return;
       }
     }
-    if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 4; drawScreen(); }
+    if (kBack.contains(x, y)) { txDeleteMode = false; screen = Screen::menu; focusIndex = 4; drawScreen(); }
+    else if (kDetail.contains(x, y) && txFileCount) {
+      txDeleteMode = !txDeleteMode; focusIndex = 0; drawScreen();
+    } else if (kFirmar.contains(x, y) && txFileCount) {
+      pendingDeletePath[0] = '\0';
+      pendingDeleteTx = true; deleteAllTx = true; deleteFailed = false;
+      screen = Screen::delete_confirm; focusIndex = 0; drawScreen();
+    }
   } else if (screen == Screen::ble_key_menu) {
     if (kMenu[0].contains(x, y)) { startBleKeyPairing(); }
     else if (kMenu[1].contains(x, y)) {
@@ -5815,6 +5991,9 @@ void activateFocus() {
   } else if (screen == Screen::security_warning) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::radio_permission) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::vault_password) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
@@ -5922,7 +6101,9 @@ void activateFocus() {
     const Rect& r = focusIndex == 0 ? kBack : kFirmar;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::tx_history) {
-    const Rect& r = focusIndex < txFileCount ? kVaultFiles[focusIndex] : kBack;
+    const Rect& r = focusIndex < txFileCount ? kVaultFiles[focusIndex] :
+                    focusIndex == txFileCount ? kBack :
+                    focusIndex == txFileCount + 1 ? kDetail : kFirmar;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::signed_tx) {
     click(kAction.x + 5, kAction.y + 5);
