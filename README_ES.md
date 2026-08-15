@@ -211,6 +211,20 @@ y `NimBLE-Arduino@^1.4.0`.
 
 Flasheo fiable en USB marginal: `esptool.py --no-stub --baud 115200 write_flash 0x10000 firmware.bin`.
 
+### Tests unitarios (host, sin hardware)
+
+La lógica de cripto/parsing/vault vive en `lib/seedworkstation_core` y está
+cubierta por tests unitarios en host (PlatformIO `native` + Unity):
+
+```bash
+~/.platformio/penv/bin/pio test -e host
+```
+
+Requiere mbedtls en el host (`brew install mbedtls@2` en macOS,
+`apt-get install libmbedtls-dev` en Debian/Ubuntu). Los mocks (`Arduino.h`,
+`SD.h`, `Preferences.h`, `mbedtls_compat.h`) están en `test/mocks/`; cada módulo
+tiene su suite en `test/<módulo>/`. CI ejecuta el mismo comando en cada push/PR.
+
 ---
 
 ## 7. Diseño de seguridad

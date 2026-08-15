@@ -209,6 +209,21 @@ board `m5stack-fire`, `M5EPD` from `~/Documents/Arduino/libraries/M5EPD` and
 
 Reliable flashing over marginal USB: `esptool.py --no-stub --baud 115200 write_flash 0x10000 firmware.bin`.
 
+### Unit tests (host, no hardware)
+
+The crypto/parsing/vault logic lives in `lib/seedworkstation_core` and is covered
+by host unit tests (PlatformIO `native` + Unity):
+
+```bash
+~/.platformio/penv/bin/pio test -e host
+```
+
+Requires mbedtls on the host (`brew install mbedtls@2` on macOS,
+`apt-get install libmbedtls-dev` on Debian/Ubuntu). Test mocks (`Arduino.h`,
+`SD.h`, `Preferences.h`, `mbedtls_compat.h`) live in `test/mocks/`; each module
+has its own test suite under `test/<module>/`. CI runs the same command on every
+push/PR.
+
 ---
 
 ## 7. Security design
