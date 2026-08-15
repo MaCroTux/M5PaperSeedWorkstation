@@ -92,6 +92,28 @@ inline bool derive(const uint16_t* words, size_t count, uint32_t purpose,
   return ok;
 }
 
+// Deriva una direccion a partir de un nodo de cuenta ya calculado (evita
+// repetir el PBKDF2 de la semilla por cada direccion).
+inline bool derive_from_account(const bitcoin_hd::Node& account, uint32_t purpose,
+                                uint8_t change, uint32_t index, String& address) {
+  if (change > 1 || index >= 0x80000000UL) return false;
+  bitcoin_hd::Node branch = {}, child = {};
+  uint8_t pub[33] = {}, keyHash[20] = {};
+  bool ok = bitcoin_hd::derive_normal(account, change, branch) &&
+      bitcoin_hd::derive_normal(branch, index, child) && bitcoin_hd::public_key(child, pub);
+  if (ok && purpose == 44) { hash160(pub, 33, keyHash); address = base58_address(0, keyHash); }
+  else if (ok && purpose == 49) {
+    hash160(pub, 33, keyHash); uint8_t redeem[22] = {0, 20}; memcpy(redeem + 2, keyHash, 20);
+    hash160(redeem, sizeof(redeem), keyHash); address = base58_address(5, keyHash);
+    bitcoin_hd::wipe(redeem, sizeof(redeem));
+  } else if (ok && purpose == 84) { hash160(pub, 33, keyHash); address = segwit_address(0, keyHash, 20); }
+  else ok = false;
+  ok = ok && address.length();
+  bitcoin_hd::wipe(&branch, sizeof(branch)); bitcoin_hd::wipe(&child, sizeof(child));
+  bitcoin_hd::wipe(pub, sizeof(pub)); bitcoin_hd::wipe(keyHash, sizeof(keyHash));
+  return ok;
+}
+
 inline bool test_words(uint16_t words[12]) {
   const uint16_t abandon = bip39::find_exact("abandon");
   const uint16_t about = bip39::find_exact("about");

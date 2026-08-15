@@ -51,6 +51,45 @@ esptool.py --chip esp32 --port /dev/cu.usbserial-XXX --baud 115200 --no-stub \
   write_flash 0x10000 .pio/build/native/firmware.bin
 ```
 
+### Recuperación cuando el flasheo da "Operation timed out"
+
+Si el flasheo empieza a fallar con `Failed to write to target Flash ... (result
+was 01073332: Operation timed out)` o `Serial data stream stopped` (típico tras
+un borrado/flasheo **interrumpido** que deja la flash en mal estado), usar la
+**versión nueva de esptool (v4.9.0)** en lugar de la v3.3 que usa PlatformIO:
+
+```bash
+ESPTOOL=~/.platformio/packages/tool-esptoolpy/esptool.py   # v4.9.0
+
+# 1. Borrar la flash por completo (limpia el estado corrupto)
+~/.platformio/penv/bin/python "$ESPTOOL" --chip esp32 --port /dev/cu.usbserial-XXX \
+  --baud 115200 --before default_reset --after hard_reset erase_flash
+
+# 2. Firmware (969 KB comprimidos, ~85 s a 115200)
+~/.platformio/penv/bin/python "$ESPTOOL" --chip esp32 --port /dev/cu.usbserial-XXX \
+  --baud 115200 --before default_reset --after hard_reset write_flash \
+  --flash_mode dio --flash_freq 40m --flash_size 16MB \
+  0x10000 .pio/build/native/firmware.bin
+
+# 3. Bootloader + particiones + boot_app0 (el erase los borra)
+~/.platformio/penv/bin/python "$ESPTOOL" --chip esp32 --port /dev/cu.usbserial-XXX \
+  --baud 115200 --before default_reset --after hard_reset write_flash \
+  --flash_mode dio --flash_freq 40m --flash_size 16MB \
+  0x1000 ~/.platformio/packages/framework-arduinoespressif32@3.20003.220626/tools/sdk/esp32/bin/bootloader_dio_40m.bin \
+  0x8000 .pio/build/native/partitions.bin \
+  0xe000 ~/.platformio/packages/framework-arduinoespressif32@3.20003.220626/tools/partitions/boot_app0.bin
+```
+
+Claves:
+
+- **`erase_flash` con el stub a 115200** funciona incluso con USB marginal
+  (es un solo comando + borrado autónomo ~25 s). Si el borrado queda a medias,
+  la flash queda corrupta y los `write_flash` posteriores dan timeout.
+- **esptool v4.9.0** maneja la flash XMC de 16 MB del M5Paper sin el
+  `01073332` que produce la v3.3 (timeout de escritura del ROM/stub).
+- Si solo se regeneró el firmware (bootloader/particiones intactos), basta con
+  el paso 2. Si hiciste `erase_flash`, ejecuta también el paso 3.
+
 ---
 
 ## 3. Arquitectura de ficheros

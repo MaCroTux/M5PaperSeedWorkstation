@@ -23,6 +23,8 @@
 #include "ble_provision.hpp"
 #include "ble_provision_client.hpp"
 #include "qr_cam_client.hpp"
+#include "wifi_sta.hpp"
+#include "mempool_balance.hpp"
 
 // Migracion nativa M5EPD. Solo datos de prueba; no usar fondos reales.
 
@@ -45,10 +47,13 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
                      wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
                      animated_qr, settings, settings_lang, settings_timeout,
-                     settings_clean, settings_derivation, settings_radio,
+                     settings_clean, settings_derivation, settings_balance, settings_radio,
+                     settings_online, online_consent,
                      multisig_confirm, tx_history, ble_key_menu, ble_key_test,
                      twofa_list, twofa_migrate_list, settings_screen,
-                     provision_test, scan_cam_qr };
+                     provision_test, scan_cam_qr,
+                     balance_consent, wifi_select, wifi_password,
+                     balance_checking, balance_result };
 
 struct Rect {
   int x, y, w, h;
@@ -716,27 +721,36 @@ const char* menuHint(uint8_t index) {
     case 3: return fingerprintValid ? "Recibe un PSBT o una semilla por WiFi desde tu movil"
                                     : "Recibe una semilla BIP39 por texto desde tu movil";
     case 4: return "Transacciones guardadas para revisar o volver a firmar";
-    case 5: return "Idioma, bloqueo, derivacion y estado de la radio";
+    case 5: return "Idioma, bloqueo, derivacion y billetera online";
     case 7: return "Escanea un QR con la camara externa por BLE";
     default: return "Bloquea el dispositivo y muestra la portada";
   }
 }
 
+// ---- Modo online (billetera fria por defecto) ----
+// El item logico 3 del menu principal (RECIBIR POR WIFI) esta oculto en modo frio.
+uint8_t menuCount() { return gSettings.onlineEnabled ? 8 : 7; }
+uint8_t menuLogical(uint8_t display) {
+  if (gSettings.onlineEnabled) return display;
+  return display < 3 ? display : display + 1;
+}
+// Menu de semilla activa: saldo=5 y wifi=6 (solo online); cam/ajustes/volver se desplazan.
+uint8_t activeCamIndex() { return static_cast<uint8_t>(5 + (gSettings.onlineEnabled ? 2 : 0)); }
+uint8_t activeSettingsIndex() { return static_cast<uint8_t>(6 + (gSettings.onlineEnabled ? 2 : 0)); }
+uint8_t activeMenuIndex() { return static_cast<uint8_t>(7 + (gSettings.onlineEnabled ? 2 : 0)); }
+
 const char* activeHint(uint8_t index) {
-  switch (index) {
-    case 0: return "Deriva la clave publica (xpub/zpub) para ver solo direcciones";
-    case 1: return "Copia y comprueba la semilla (palabras, QR o SEEDQR)";
-    case 2: return "Anade una passphrase BIP39 (cambia todas las direcciones)";
-    case 3: return "Deriva direcciones concretas para recibir o para cambio";
-    case 4: return sessionUnlocked ? "Gestiona las semillas del vault de sesion"
-                                    : "Borra la semilla de la memoria RAM";
-    case 5: return "Recibe un PSBT o archivo por WiFi para firmar";
-    case 6: return "Escanea un QR con la camara externa por BLE";
-    case 7: return sessionUnlocked ? "Cierra el vault y borra la clave maestra de RAM"
-                                    : "Ajustes del dispositivo";
-    case 8: return sessionUnlocked ? "Ajustes del dispositivo" : "Vuelve al menu general";
-    default: return "Vuelve al menu general";
-  }
+  if (index == 0) return "Deriva la clave publica (xpub/zpub) para ver solo direcciones";
+  if (index == 1) return "Copia y comprueba la semilla (palabras, QR o SEEDQR)";
+  if (index == 2) return "Anade una passphrase BIP39 (cambia todas las direcciones)";
+  if (index == 3) return "Deriva direcciones concretas para recibir o para cambio";
+  if (index == 4) return sessionUnlocked ? "Gestiona las semillas del vault de sesion"
+                                          : "Borra la semilla de la memoria RAM";
+  if (gSettings.onlineEnabled && index == 5) return "Consulta el saldo online (mempool.space)";
+  if (gSettings.onlineEnabled && index == 6) return "Recibe un PSBT o archivo por WiFi para firmar";
+  if (index == activeCamIndex()) return "Escanea un QR con la camara externa por BLE";
+  if (index == activeSettingsIndex()) return "Ajustes del dispositivo";
+  return "Vuelve al menu general";
 }
 
 void drawMenu() {
@@ -746,11 +760,13 @@ void drawMenu() {
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
                                     Icon::wifi, Icon::list, Icon::wrench, Icon::lock,
                                     Icon::qr};
-  for (uint8_t i = 0; i < 8; ++i) {
-    buttonOn(page, kMenu[i], menuLabel(i), menuEnabled(i), focusIndex == i, kMenuIcons[i]);
+  const uint8_t count = menuCount();
+  for (uint8_t i = 0; i < count; ++i) {
+    const uint8_t logical = menuLogical(i);
+    buttonOn(page, kMenu[i], menuLabel(logical), menuEnabled(logical), focusIndex == i, kMenuIcons[logical]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
-  page.drawString(lang::tr(menuHint(focusIndex)), 270, 670);
+  page.drawString(lang::tr(menuHint(menuLogical(focusIndex))), 270, 670);
   // Icono de ayuda (opcion secundaria, abajo a la derecha).
   page.fillCircle(kHelpIcon.x + 32, kHelpIcon.y + 32, 30, kBlack);
   textStyle(page, 3, kWhite, kBlack);
@@ -1944,20 +1960,16 @@ void drawActiveSeed() {
     if (sessionUnlocked && i == 4) { label = "ACCIONES EN VAULT"; icon = Icon::folder; }
     buttonOn(page, kActiveMenu[i], label, true, focusIndex == i, icon);
   }
-  buttonOn(page, kActiveMenu[5], "RECIBIR POR WIFI", true, focusIndex == 5,
-           Icon::wifi);
-  buttonOn(page, kActiveMenu[6], "ESCANEAR QR (CAMARA)", true, focusIndex == 6,
-           Icon::qr);
-  if (sessionUnlocked) {
-    buttonOn(page, kActiveMenu[7], "CERRAR VAULT", true, focusIndex == 7,
-             Icon::lock);
+  if (gSettings.onlineEnabled) {
+    buttonOn(page, kActiveMenu[5], "CONSULTAR SALDO", true, focusIndex == 5, Icon::eye);
+    buttonOn(page, kActiveMenu[6], "RECIBIR POR WIFI", true, focusIndex == 6, Icon::wifi);
   }
-  const uint8_t settingsIdx = sessionUnlocked ? 8 : 7;
-  const uint8_t menuIdx = sessionUnlocked ? 9 : 8;
-  buttonOn(page, kActiveMenu[settingsIdx], "AJUSTES", true,
-           focusIndex == settingsIdx, Icon::wrench);
-  buttonOn(page, kActiveMenu[menuIdx], "VOLVER AL MENU", true,
-           focusIndex == menuIdx, Icon::home);
+  buttonOn(page, kActiveMenu[activeCamIndex()], "ESCANEAR QR (CAMARA)", true,
+           focusIndex == activeCamIndex(), Icon::qr);
+  buttonOn(page, kActiveMenu[activeSettingsIndex()], "AJUSTES", true,
+           focusIndex == activeSettingsIndex(), Icon::wrench);
+  buttonOn(page, kActiveMenu[activeMenuIndex()], "VOLVER AL MENU", true,
+           focusIndex == activeMenuIndex(), Icon::home);
   textStyle(page, 2);
   page.setTextDatum(MC_DATUM);
   int footerY = 800;
@@ -2020,7 +2032,7 @@ void drawVaultActions() {
            Icon::folder);
   buttonOn(page, kActiveMenu[1], "GUARDAR SEMILLA ACTIVA", fingerprintValid,
            focusIndex == 1, Icon::save);
-  buttonOn(page, kActiveMenu[2], "BLOQUEAR VAULT", true, focusIndex == 2,
+  buttonOn(page, kActiveMenu[2], "CERRAR VAULT", true, focusIndex == 2,
            Icon::lock);
   buttonOn(page, kActiveMenu[3], "VOLVER", true, focusIndex == 3);
   fullRefresh();
@@ -2861,7 +2873,25 @@ bool wifiResultShown = false;
 Screen wifiModeReturnScreen = Screen::menu;
 uint8_t wifiModeReturnFocus = 4;
 
+// ---- Consultar saldo (modo online, mempool.space) ----
+constexpr uint8_t kBalanceMaxPerSide = 100;   // maximo soportado por lado
+String balanceAddrs[kBalanceMaxPerSide * 2];  // [0..N]=recibir, [N..2N]=cambio
+int64_t balanceSats[kBalanceMaxPerSide * 2];
+uint8_t balanceTotal = 0;      // direcciones consultadas
+uint8_t balanceReceiveCount = 0;  // cuantas eran de recibir (para el CSV)
+int64_t balanceTotalSats = 0;  // saldo acumulado
+uint8_t balanceFundedCount = 0;
+bool balanceFailed = false;
+String balanceFilePath;
+char wifiPasswordEntry[64] = {};
+uint8_t wifiKeyboardMode = 0;
+bool wifiReveal = false;
+String wifiSelectedSsid = "";
+uint8_t wifiNetCount = 0;
+
 bool wifiActive() {
+  // Radio WiFi encendido en modo estacion (CONSULTAR SALDO) o en AP (recibir).
+  if (WiFi.getMode() != WIFI_OFF) return true;
   const auto p = wifiServer.phase();
   return p == qr_wifi::Phase::Starting || p == qr_wifi::Phase::Waiting ||
          p == qr_wifi::Phase::Received;
@@ -2906,6 +2936,306 @@ void statusBar() {
   page.drawString(wf, right - btW - 14, 18);
   page.setTextDatum(TL_DATUM);
   textStyle(page);
+}
+
+// ---- Consultar saldo (modo online) ----
+
+const char* wifiKeyboardRows(uint8_t row) {
+  static const char* lower[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+  static const char* upper[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
+  static const char* symbols[] = {"1234567890", "!@#$%&*()", "-_=+[]{}?"};
+  static const char* extra[] = {"`~^\\|/<>", ";:'\",.", ""};
+  return wifiKeyboardMode == 0 ? lower[row] :
+         wifiKeyboardMode == 1 ? upper[row] :
+         wifiKeyboardMode == 2 ? symbols[row] : extra[row];
+}
+
+char wifiKeyAt(int x, int y) {
+  for (uint8_t r = 0; r < 3; ++r) {
+    const char* keys = wifiKeyboardRows(r); const int width = r == 2 ? 60 : 52;
+    const int start = r == 0 ? 10 : r == 1 ? 34 : 60;
+    const int top = 265 + r * 80;
+    if (y < top || y >= top + 64 || x < start) continue;
+    const int index = (x - start) / width;
+    if (index >= 0 && index < static_cast<int>(strlen(keys))) return keys[index];
+  }
+  return '\0';
+}
+
+void drawWifiKeys() {
+  for (uint8_t r = 0; r < 3; ++r) {
+    const char* keys = wifiKeyboardRows(r); const int width = r == 2 ? 60 : 52;
+    const int start = r == 0 ? 10 : r == 1 ? 34 : 60;
+    const int top = 265 + r * 80;
+    for (size_t i = 0; keys[i]; ++i) {
+      char label[2] = {keys[i], '\0'};
+      buttonOn(page, Rect{start + static_cast<int>(i) * width, top, width - 4, 64}, label);
+    }
+  }
+}
+
+void drawBalanceConsent() {
+  blankPage();
+  title("CONSULTAR SALDO", "Requiere conexion a internet");
+  warningIcon(page, 270, 175);
+  centeredFit(page, "Vas a pasar de cartera fria a", 380);
+  centeredFit(page, "cartera caliente.", 425);
+  centeredFit(page, "Extrema las precauciones.", 470);
+  centeredFit(page, "¿Estas seguro?", 515);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, "SI, CONTINUAR", true, focusIndex == 1, Icon::wifi);
+  fullRefresh();
+}
+
+// Entradas seleccionables en wifi_select: la AP guardada (si existe) + escaneadas.
+uint8_t wifiSelectCount() {
+  uint8_t n = wifi_sta::hasSaved() ? 1 : 0;
+  n += wifiNetCount;
+  if (n > 6) n = 6;
+  return n;
+}
+
+bool wifiSelectIsSaved(uint8_t index) {
+  return wifi_sta::hasSaved() && index == 0;
+}
+
+String wifiSelectSsid(uint8_t index) {
+  if (wifi_sta::hasSaved()) {
+    if (index == 0) return wifi_sta::savedSsid();
+    return wifi_sta::ssidAt(index - 1);
+  }
+  return wifi_sta::ssidAt(index);
+}
+
+String wifiSelectLabel(uint8_t index) {
+  if (wifiSelectIsSaved(index))
+    return String(lang::tr("CONECTAR A")) + " " + wifi_sta::savedSsid();
+  const uint8_t si = wifi_sta::hasSaved() ? index - 1 : index;
+  return wifi_sta::ssidAt(si) + "  (" + String(wifi_sta::rssiAt(si)) + " dBm)";
+}
+
+uint8_t wifiSelectBackIndex() { return wifiSelectCount(); }
+uint8_t wifiSelectForgetIndex() { return wifiSelectCount() + 1; }
+
+void drawWifiSelect() {
+  blankPage();
+  title("RED WIFI", "Elige un punto de acceso");
+  const uint8_t count = wifiSelectCount();
+  for (uint8_t i = 0; i < count; ++i)
+    buttonOn(page, kVaultFiles[i], wifiSelectLabel(i).c_str(), true, focusIndex == i, Icon::wifi);
+  if (!count) {
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString(lang::tr("NO SE ENCONTRARON REDES"), 270, 350);
+    page.setTextDatum(TL_DATUM);
+  }
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == wifiSelectBackIndex());
+  if (wifi_sta::hasSaved())
+    buttonOn(page, kAction, "OLVIDAR RED", true, focusIndex == wifiSelectForgetIndex(), Icon::trash);
+  fullRefresh();
+}
+
+void drawWifiPassword() {
+  blankPage();
+  title("CONTRASENA WIFI", wifiSelectedSsid.c_str());
+  const size_t length = strlen(wifiPasswordEntry);
+  page.setCursor(20, 150);
+  page.println(wifiSelectedSsid);
+  page.drawRoundRect(20, 195, 500, 52, 8, kBlack); page.setCursor(35, 204);
+  if (wifiReveal) page.print(wifiPasswordEntry);
+  else for (size_t i = 0; i < length; ++i) page.print('*');
+  drawWifiKeys();
+  buttonOn(page, kDelete, "BORRAR", length > 0, false, Icon::x);
+  buttonOn(page, kPassMode, wifiKeyboardMode == 0 ? "abc" :
+           wifiKeyboardMode == 1 ? "ABC" :
+           wifiKeyboardMode == 2 ? "123 / SIMB" : "SIMB 2");
+  buttonOn(page, kPassSpace, "ESPACIO");
+  buttonOn(page, kPassReveal, wifiReveal ? "OCULTAR" : "MOSTRAR",
+           length > 0, false, Icon::eye);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, "CONECTAR", length > 0, focusIndex == 1, Icon::wifi);
+  fullRefresh();
+}
+
+// Refresco parcial rapido solo de la linea de la clave (evita el GL16 completo
+// en cada tecla, que es muy lento en e-ink).
+void redrawWifiPasswordLine() {
+  M5EPD_Canvas c(&M5.EPD);
+  if (!c.createCanvas(500, 52)) return;
+  c.fillCanvas(kWhite);
+  c.drawRoundRect(0, 0, 500, 52, 8, kBlack);
+  textStyle(c, 2); c.setCursor(15, 9);
+  const size_t length = strlen(wifiPasswordEntry);
+  if (wifiReveal) c.print(wifiPasswordEntry);
+  else for (size_t i = 0; i < length; ++i) c.print('*');
+  c.pushCanvas(20, 195, UPDATE_MODE_A2);
+  c.deleteCanvas();
+}
+
+String balanceStatus = "";
+
+void updateBalanceProgress(uint8_t done, uint8_t total) {
+  const uint8_t pct = total ? static_cast<uint8_t>((done * 100) / total) : 100;
+  M5EPD_Canvas c(&M5.EPD);
+  if (!c.createCanvas(500, 170)) return;
+  c.fillCanvas(kWhite);
+  textStyle(c, 2); c.setTextDatum(MC_DATUM);
+  c.drawString(lang::tr(balanceStatus.c_str()), 250, 30);
+  c.drawString(String(done) + " / " + String(total), 250, 70);
+  c.drawRoundRect(0, 105, 500, 34, 8, kBlack);
+  const int w = (pct * 496) / 100;
+  if (w > 4) c.fillRoundRect(2, 107, w - 4, 30, 6, kBlack);
+  c.pushCanvas(20, 220, UPDATE_MODE_A2);
+  c.deleteCanvas();
+}
+
+void drawBalanceChecking() {
+  blankPage();
+  title("CONSULTAR SALDO", "Modo online (mempool.space)");
+  balanceStatus = "Conectando...";
+  fullRefresh(UPDATE_MODE_DU4);
+  updateBalanceProgress(0, static_cast<uint8_t>(gSettings.balanceAddrPerSide * 2));
+}
+
+void drawBalanceResult() {
+  blankPage();
+  title("CONSULTAR SALDO", balanceFailed ? "Consulta fallida" : "Consulta completada");
+  if (balanceFailed) {
+    centeredFit(page, "No se pudo completar la consulta.", 340);
+    centeredFit(page, "Comprueba la conexion y reintenta.", 390);
+  } else {
+    centeredFit(page, "Saldo total (confirmado)", 290);
+    textStyle(page, 3); page.setTextDatum(MC_DATUM);
+    page.drawString(String(psbt::formatSats(static_cast<uint64_t>(balanceTotalSats))) + " BTC", 270, 350);
+    page.setTextDatum(TL_DATUM);
+    textStyle(page, 2); page.setTextDatum(MC_DATUM);
+    page.drawString(String(balanceFundedCount) + " " + lang::tr("direcciones con fondos"), 270, 430);
+    if (balanceFilePath.length())
+      page.drawString(String(lang::tr("Guardado en")) + " " + balanceFilePath, 270, 490);
+    else
+      page.drawString(lang::tr("SD no detectada"), 270, 490);
+    page.setTextDatum(TL_DATUM);
+  }
+  buttonOn(page, kAction, "VOLVER", true, true);
+  fullRefresh();
+}
+
+void openBalanceConsent() {
+  screen = Screen::balance_consent;
+  focusIndex = 0;
+  drawBalanceConsent();
+}
+
+void openWifiSelect() {
+  wifiNetCount = static_cast<uint8_t>(wifi_sta::scan());
+  if (wifiNetCount > 6) wifiNetCount = 6;
+  screen = Screen::wifi_select;
+  focusIndex = 0;
+  drawWifiSelect();
+}
+
+void openWifiPassword() {
+  encrypted_seed_store::wipe(wifiPasswordEntry, sizeof(wifiPasswordEntry));
+  wifiKeyboardMode = 0; wifiReveal = false;
+  screen = Screen::wifi_password;
+  focusIndex = 0;
+  drawWifiPassword();
+}
+
+void beginBalanceCheck() {
+  lastUserActivity = millis();  // la consulta de saldo cuenta como actividad
+  screen = Screen::balance_checking;
+  focusIndex = 0;
+  drawBalanceChecking();
+
+  // 1. Conectar al AP guardado si aun no estamos conectados.
+  if (WiFi.status() != WL_CONNECTED) {
+    const String ssid = wifi_sta::savedSsid();
+    const String pass = wifi_sta::savedPass();
+    Serial.printf("[BALANCE] conectando a '%s'...\n", ssid.c_str());
+    if (!wifi_sta::connect(ssid, pass, 20000)) {
+      wifi_sta::disconnect();
+      balanceFailed = false;
+      openWifiSelect();
+      return;
+    }
+    Serial.printf("[BALANCE] conectado. IP=%s\n", WiFi.localIP().toString().c_str());
+  }
+
+  // 2. Nodo de cuenta (PBKDF2 una sola vez).
+  const PublicProfile& p = kPublicProfiles[gSettings.defaultProfile % kPublicProfileCount];
+  bitcoin_hd::Node account = {};
+  if (!bitcoin_hd::account_node(words, targetWords, p.purpose, account,
+                                passphraseActive ? activePassphrase : "")) {
+    bitcoin_hd::wipe(&account, sizeof(account));
+    balanceFailed = true;
+    wifi_sta::disconnect();
+    screen = Screen::balance_result; focusIndex = 0; drawBalanceResult();
+    return;
+  }
+
+  // 3. Consultar direccion a direccion con gap limit.
+  balanceStatus = "Consultando mempool.space...";
+  WiFiClientSecure client;
+  client.setCACert(mempool_balance::rootCA());
+  balanceTotalSats = 0; balanceFundedCount = 0;
+  balanceTotal = 0; balanceReceiveCount = 0;
+  const uint8_t perSide = gSettings.balanceAddrPerSide;
+  const uint8_t gapLimit = gSettings.balanceGapLimit;
+  const uint8_t totalMax = static_cast<uint8_t>(perSide * 2);
+  bool anyError = false;
+
+  for (uint8_t side = 0; side < 2; ++side) {
+    uint8_t emptyRun = 0;
+    for (uint32_t i = 0; i < perSide && balanceTotal < kBalanceMaxPerSide * 2; ++i) {
+      String addr;
+      bitcoin_address::derive_from_account(account, p.purpose, side, i, addr);
+      const uint8_t pos = balanceTotal;
+      balanceAddrs[pos] = addr;
+      uint32_t txCount = 0;
+      const int64_t sats = mempool_balance::addressBalance(client, addr, &txCount);
+      if (sats < 0) { balanceSats[pos] = -1; anyError = true; }
+      else {
+        balanceSats[pos] = sats;
+        if (sats > 0) { balanceTotalSats += sats; ++balanceFundedCount; }
+        if (txCount == 0) ++emptyRun; else emptyRun = 0;  // gap limit
+      }
+      ++balanceTotal;
+      if (side == 0) ++balanceReceiveCount;
+      updateBalanceProgress(balanceTotal, totalMax);
+      delay(120);
+      yield();
+      if (emptyRun >= gapLimit) break;
+    }
+  }
+  bitcoin_hd::wipe(&account, sizeof(account));
+  Serial.printf("[BALANCE] fin consulta: %u direcciones, total=%lld sats, %u con fondos, anyError=%d\n",
+                balanceTotal, static_cast<long long>(balanceTotalSats),
+                balanceFundedCount, anyError ? 1 : 0);
+
+  // 4. Guardar CSV en la SD.
+  balanceFilePath = "";
+  if (SD.cardType() != CARD_NONE) {
+    balanceFilePath = "/balance-" + String(activeFingerprint + 5) + ".csv";
+    File f = SD.open(balanceFilePath, FILE_WRITE);
+    if (f) {
+      f.println("change,index,address,satoshi");
+      for (uint8_t i = 0; i < balanceTotal; ++i) {
+        const uint8_t side = i < balanceReceiveCount ? 0 : 1;
+        const uint32_t idx = i < balanceReceiveCount ? i : i - balanceReceiveCount;
+        f.printf("%u,%lu,%s,%lld\n", side, static_cast<unsigned long>(idx),
+                 balanceAddrs[i].c_str(), static_cast<long long>(balanceSats[i]));
+      }
+      f.close();
+      Serial.printf("[BALANCE] guardado en %s\n", balanceFilePath.c_str());
+    } else {
+      balanceFilePath = "";
+    }
+  }
+
+  wifi_sta::disconnect();
+  balanceFailed = anyError && !balanceFundedCount;
+  screen = Screen::balance_result; focusIndex = 0;
+  drawBalanceResult();
 }
 psbt::ParsedTx parsedTx;
 bool txIsPsbt = false;
@@ -4286,9 +4616,18 @@ String settingsCleanLabel() {
       cleanLabel(gSettings.seedCleanTimeoutMs);
 }
 
+String settingsBalanceLabel() {
+  return String(lang::tr("Saldo"));
+}
+
 void cleanScreen() {
   M5.EPD.Clear(true);
   drawScreen();
+}
+
+String settingsOnlineLabel() {
+  return String(lang::tr("Billetera online")) + ": " +
+      (gSettings.onlineEnabled ? lang::tr("SI") : lang::tr("NO"));
 }
 
 void drawSettings() {
@@ -4298,10 +4637,15 @@ void drawSettings() {
   buttonOn(page, kMenu[1], settingsTimeoutLabel().c_str(), true, focusIndex == 1, Icon::lock);
   buttonOn(page, kMenu[2], settingsCleanLabel().c_str(), true, focusIndex == 2, Icon::trash);
   buttonOn(page, kMenu[3], settingsDerivLabel().c_str(), true, focusIndex == 3, Icon::key);
-  buttonOn(page, kMenu[4], lang::tr("Estado de la radio"), true, focusIndex == 4, Icon::wifi);
+  buttonOn(page, kMenu[4], settingsOnlineLabel().c_str(), true, focusIndex == 4, Icon::wifi);
   buttonOn(page, kMenu[5], "BLE KEY", true, focusIndex == 5, Icon::shield);
   buttonOn(page, kMenu[6], "PANTALLA", true, focusIndex == 6, Icon::reset);
-  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 7);
+  if (gSettings.onlineEnabled) {
+    buttonOn(page, kMenu[7], settingsBalanceLabel().c_str(), true, focusIndex == 7, Icon::eye);
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 8);
+  } else {
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 7);
+  }
   fullRefresh();
 }
 
@@ -4373,6 +4717,27 @@ void drawSettingsDerivation() {
   fullRefresh();
 }
 
+void drawSettingsBalance() {
+  blankPage();
+  title(lang::tr("Saldo"), lang::tr("Direcciones por lado y gap"));
+  for (uint8_t i = 0; i < device_settings::kBalanceAddrOptionCount; ++i) {
+    const uint8_t n = device_settings::kBalanceAddrOptions[i];
+    const String label = String(n) + " + " + String(n);
+    buttonOn(page, kMenu[i], label.c_str(), true,
+             gSettings.balanceAddrPerSide == n && focusIndex == i, Icon::eye);
+  }
+  for (uint8_t i = 0; i < device_settings::kGapOptionCount; ++i) {
+    const uint8_t g = device_settings::kGapOptions[i];
+    const String label = String(lang::tr("GAP")) + " " + String(g);
+    buttonOn(page, kMenu[i + device_settings::kBalanceAddrOptionCount], label.c_str(), true,
+             gSettings.balanceGapLimit == g &&
+                 focusIndex == i + device_settings::kBalanceAddrOptionCount, Icon::shield);
+  }
+  buttonOn(page, kBack, lang::tr("VOLVER"), true,
+           focusIndex == device_settings::kBalanceAddrOptionCount + device_settings::kGapOptionCount);
+  fullRefresh();
+}
+
 void drawSettingsRadio() {
   blankPage();
   title(lang::tr("Estado de la radio"), lang::tr("Radios y energia"));
@@ -4404,6 +4769,52 @@ void drawSettingsRadio() {
   page.setCursor(300, y);
   page.print(String(M5.getBatteryVoltage()) + " mV");
   buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 0);
+  fullRefresh();
+}
+
+// ---- Billetera online / fria ----
+
+void drawSettingsOnline() {
+  blankPage();
+  title(lang::tr("Billetera online"), gSettings.onlineEnabled
+        ? lang::tr("Modo online activo") : lang::tr("Modo frio (sin conexion)"));
+  const bool bleOn = scanQrActive();
+  const auto wp = wifiServer.phase();
+  const bool wifiOn = wp == qr_wifi::Phase::Starting || wp == qr_wifi::Phase::Waiting ||
+                      wp == qr_wifi::Phase::Received;
+  const bool sdOk = SD.cardType() != CARD_NONE;
+  textStyle(page, 2);
+  int y = 175;
+  page.setCursor(20, y); page.print(lang::tr("Bluetooth"));
+  page.setCursor(300, y); page.print(bleOn ? lang::tr("ESCANEANDO") : lang::tr("APAGADO"));
+  y += 40;
+  page.setCursor(20, y); page.print(lang::tr("WiFi"));
+  page.setCursor(300, y); page.print(wifiOn ? lang::tr("PUNTO DE ACCESO") : lang::tr("APAGADO"));
+  y += 40;
+  page.setCursor(20, y); page.print(lang::tr("microSD"));
+  page.setCursor(300, y); page.print(sdOk ? lang::tr("OK") : lang::tr("NO DETECTADA"));
+  y += 40;
+  page.setCursor(20, y); page.print(lang::tr("Bateria"));
+  page.setCursor(300, y); page.print(String(M5.getBatteryVoltage()) + " mV");
+
+  buttonOn(page, kAction, gSettings.onlineEnabled ? "DESACTIVAR MODO ONLINE" : "ACTIVAR MODO ONLINE",
+           true, focusIndex == 0, Icon::wifi);
+  buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 1);
+  fullRefresh();
+}
+
+void drawOnlineConsent() {
+  blankPage();
+  title("BILLETERA ONLINE", "Advertencia de seguridad");
+  warningIcon(page, 270, 165);
+  centeredFit(page, "El dispositivo se conectara a redes WiFi.", 375);
+  centeredFit(page, "Tu IP y tus direcciones publicas", 420);
+  centeredFit(page, "se enviaran a mempool.space.", 462);
+  centeredFit(page, "La semilla y las claves privadas", 507);
+  centeredFit(page, "nunca salen del dispositivo.", 549);
+  centeredFit(page, "¿Activar billetera online?", 606);
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  buttonOn(page, kAction, "SI, ACTIVAR", true, focusIndex == 1, Icon::wifi);
   fullRefresh();
 }
 
@@ -4731,7 +5142,10 @@ void drawScreen() {
     case Screen::settings_timeout: drawSettingsTimeout(); break;
     case Screen::settings_clean: drawSettingsClean(); break;
     case Screen::settings_derivation: drawSettingsDerivation(); break;
+    case Screen::settings_balance: drawSettingsBalance(); break;
     case Screen::settings_radio: drawSettingsRadio(); break;
+    case Screen::settings_online: drawSettingsOnline(); break;
+    case Screen::online_consent: drawOnlineConsent(); break;
     case Screen::settings_screen: drawSettingsScreen(); break;
     case Screen::multisig_confirm: drawMultisigConfirm(); break;
     case Screen::tx_history: drawTxHistory(); break;
@@ -4741,6 +5155,11 @@ void drawScreen() {
     case Screen::scan_cam_qr: drawScanCamQr(); break;
     case Screen::twofa_list: drawTwoFaList(); break;
     case Screen::twofa_migrate_list: drawTwoFaMigrateList(); break;
+    case Screen::balance_consent: drawBalanceConsent(); break;
+    case Screen::wifi_select: drawWifiSelect(); break;
+    case Screen::wifi_password: drawWifiPassword(); break;
+    case Screen::balance_checking: drawBalanceChecking(); break;
+    case Screen::balance_result: drawBalanceResult(); break;
   }
 }
 
@@ -4750,25 +5169,26 @@ void updateFocusButton(uint8_t index) {
       static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
                                         Icon::wifi, Icon::list, Icon::wrench,
                                         Icon::lock, Icon::qr};
-      updateButton(kMenu[index], menuLabel(index), menuEnabled(index),
-                   index == focusIndex, kMenuIcons[index]); break;
+      const uint8_t logical = menuLogical(index);
+      updateButton(kMenu[index], menuLabel(logical), menuEnabled(logical),
+                   index == focusIndex, kMenuIcons[logical]); break;
     }
     case Screen::active_seed: {
       static const Icon kActiveIcons[] = {Icon::key, Icon::shield, Icon::lock,
                                           Icon::eye, Icon::trash};
-      if (index == 5) {
+      if (gSettings.onlineEnabled && index == 5) {
+        updateButton(kActiveMenu[index], "CONSULTAR SALDO", true,
+                     index == focusIndex, Icon::eye);
+      } else if (gSettings.onlineEnabled && index == 6) {
         updateButton(kActiveMenu[index], "RECIBIR POR WIFI", true,
                      index == focusIndex, Icon::wifi);
-      } else if (index == 6) {
+      } else if (index == activeCamIndex()) {
         updateButton(kActiveMenu[index], "ESCANEAR QR (CAMARA)", true,
                      index == focusIndex, Icon::qr);
-      } else if (sessionUnlocked && index == 7) {
-        updateButton(kActiveMenu[index], "CERRAR VAULT", true,
-                     index == focusIndex, Icon::lock);
-      } else if (index == (sessionUnlocked ? 8 : 7)) {
+      } else if (index == activeSettingsIndex()) {
         updateButton(kActiveMenu[index], "AJUSTES", true,
                      index == focusIndex, Icon::wrench);
-      } else if (index == (sessionUnlocked ? 9 : 8)) {
+      } else if (index == activeMenuIndex()) {
         updateButton(kActiveMenu[index], "VOLVER AL MENU", true,
                      index == focusIndex, Icon::home);
       } else {
@@ -4798,7 +5218,7 @@ void updateFocusButton(uint8_t index) {
     case Screen::vault_actions:
       if (index == 0) updateButton(kActiveMenu[0], "CARGAR SEMILLA", true, index == focusIndex, Icon::folder);
       else if (index == 1) updateButton(kActiveMenu[1], "GUARDAR SEMILLA ACTIVA", fingerprintValid, index == focusIndex, Icon::save);
-      else if (index == 2) updateButton(kActiveMenu[2], "BLOQUEAR VAULT", true, index == focusIndex, Icon::lock);
+      else if (index == 2) updateButton(kActiveMenu[2], "CERRAR VAULT", true, index == focusIndex, Icon::lock);
       else updateButton(kActiveMenu[3], "VOLVER", true, index == focusIndex);
       break;
     case Screen::passphrase_input: {
@@ -5021,12 +5441,24 @@ void updateFocusButton(uint8_t index) {
       else if (index == 1) updateButton(kMenu[1], settingsTimeoutLabel().c_str(), true, index == focusIndex, Icon::lock);
       else if (index == 2) updateButton(kMenu[2], settingsCleanLabel().c_str(), true, index == focusIndex, Icon::trash);
       else if (index == 3) updateButton(kMenu[3], settingsDerivLabel().c_str(), true, index == focusIndex, Icon::key);
-      else if (index == 4) updateButton(kMenu[4], "Estado de la radio", true, index == focusIndex, Icon::wifi);
+      else if (index == 4) updateButton(kMenu[4], settingsOnlineLabel().c_str(), true, index == focusIndex, Icon::wifi);
       else if (index == 5) updateButton(kMenu[5], "BLE KEY", true, index == focusIndex, Icon::shield);
       else if (index == 6) updateButton(kMenu[6], "PANTALLA", true, index == focusIndex, Icon::reset);
+      else if (gSettings.onlineEnabled && index == 7)
+        updateButton(kMenu[7], settingsBalanceLabel().c_str(), true, index == focusIndex, Icon::eye);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     }
+    case Screen::settings_online:
+      if (index == 0)
+        updateButton(kAction, gSettings.onlineEnabled ? "DESACTIVAR MODO ONLINE" : "ACTIVAR MODO ONLINE",
+                     true, index == focusIndex, Icon::wifi);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::online_consent:
+      updateButton(index == 0 ? kBack : kAction,
+                   index == 0 ? "CANCELAR" : "SI, ACTIVAR", true, index == focusIndex,
+                   index == 0 ? Icon::none : Icon::wifi); break;
     case Screen::settings_screen: {
       if (index < device_settings::kScreenCleanOptionCount) {
         const uint8_t n = device_settings::kScreenCleanOptions[index];
@@ -5059,6 +5491,20 @@ void updateFocusButton(uint8_t index) {
         updateButton(kMenu[index], profileLabel(index), true,
                      index == focusIndex && gSettings.defaultProfile == index, Icon::key);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::settings_balance:
+      if (index < device_settings::kBalanceAddrOptionCount) {
+        const uint8_t n = device_settings::kBalanceAddrOptions[index];
+        const String label = String(n) + " + " + String(n);
+        updateButton(kMenu[index], label.c_str(), true,
+                     index == focusIndex && gSettings.balanceAddrPerSide == n, Icon::eye);
+      } else if (index < device_settings::kBalanceAddrOptionCount + device_settings::kGapOptionCount) {
+        const uint8_t gi = index - device_settings::kBalanceAddrOptionCount;
+        const uint8_t g = device_settings::kGapOptions[gi];
+        const String label = String(lang::tr("GAP")) + " " + String(g);
+        updateButton(kMenu[index], label.c_str(), true,
+                     index == focusIndex && gSettings.balanceGapLimit == g, Icon::shield);
+      } else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     case Screen::settings_radio:
       updateButton(kBack, "VOLVER", true, index == focusIndex);
@@ -5169,18 +5615,39 @@ void updateFocusButton(uint8_t index) {
         updateButton(kVaultFiles[index], label.c_str(), true, index == focusIndex);
       } else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
+    case Screen::balance_consent:
+      updateButton(index == 0 ? kBack : kAction,
+                   index == 0 ? "CANCELAR" : "SI, CONTINUAR", true, index == focusIndex,
+                   index == 0 ? Icon::none : Icon::wifi); break;
+    case Screen::wifi_select:
+      if (index < wifiSelectCount())
+        updateButton(kVaultFiles[index], wifiSelectLabel(index).c_str(),
+                     true, index == focusIndex, Icon::wifi);
+      else if (index == wifiSelectBackIndex())
+        updateButton(kBack, "VOLVER", true, index == focusIndex);
+      else
+        updateButton(kAction, "OLVIDAR RED", true, index == focusIndex, Icon::trash);
+      break;
+    case Screen::wifi_password: {
+      const size_t len = strlen(wifiPasswordEntry);
+      if (index == 0) updateButton(kBack, "CANCELAR", true, index == focusIndex);
+      else updateButton(kAction, "CONECTAR", len > 0, index == focusIndex, Icon::wifi);
+      break;
+    }
+    case Screen::balance_result:
+      updateButton(kAction, "VOLVER", true, true); break;
   }
 }
 
 void moveFocus(int direction) {
   const uint8_t previous = focusIndex;
   uint8_t count = 1;
-  if (screen == Screen::active_seed) count = sessionUnlocked ? 10 : 9;
+  if (screen == Screen::active_seed) count = static_cast<uint8_t>(activeMenuIndex() + 1);
   else if (screen == Screen::seed_switcher) count = loadedSeedCount + 1;
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 5 : 6;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
-  else if (screen == Screen::menu) count = 8;
+  else if (screen == Screen::menu) count = menuCount();
   else if (screen == Screen::scan_qr)
     count = qrClient.phase() == qr_ble::Phase::Failed ? 2 : 1;
   else if (screen == Screen::wifi_receive) {
@@ -5192,13 +5659,17 @@ void moveFocus(int direction) {
     else count = 1;
   }
   else if (screen == Screen::wifi_mode) count = 4;
-  else if (screen == Screen::settings) count = 8;
+  else if (screen == Screen::settings) count = gSettings.onlineEnabled ? 9 : 8;
   else if (screen == Screen::settings_screen) count = device_settings::kScreenCleanOptionCount + 2;
   else if (screen == Screen::settings_lang) count = 3;
   else if (screen == Screen::settings_timeout) count = device_settings::kTimeoutOptionCount + 1;
   else if (screen == Screen::settings_clean) count = device_settings::kCleanOptionCount + 1;
   else if (screen == Screen::settings_derivation) count = kPublicProfileCount + 1;
+  else if (screen == Screen::settings_balance)
+    count = device_settings::kBalanceAddrOptionCount + device_settings::kGapOptionCount + 1;
   else if (screen == Screen::settings_radio) count = 1;
+  else if (screen == Screen::settings_online) count = 2;
+  else if (screen == Screen::online_consent) count = 2;
   else if (screen == Screen::multisig_confirm) count = 2;
   else if (screen == Screen::tx_history) count = txFileCount + 3;
   else if (screen == Screen::ble_key_menu) count = 4;
@@ -5212,6 +5683,12 @@ void moveFocus(int direction) {
     count = (p == ble_provision::BleProvisionClient::Phase::Denied ||
              p == ble_provision::BleProvisionClient::Phase::Failed) ? 2 : 1;
   }
+  else if (screen == Screen::balance_consent) count = 2;
+  else if (screen == Screen::wifi_select)
+    count = wifiSelectCount() + 1 + (wifi_sta::hasSaved() ? 1 : 0);
+  else if (screen == Screen::wifi_password) count = 2;
+  else if (screen == Screen::balance_result) count = 1;
+  else if (screen == Screen::balance_checking) count = 1;
   else if (screen == Screen::scan_cam_qr) {
     const auto p = camClient.phase();
     count = (p == qr_cam::Phase::Error) ? 2 : 1;
@@ -5296,18 +5773,24 @@ void click(int x, int y) {
     return;
   }
   if (screen == Screen::menu) {
-    if (kMenu[0].contains(x, y)) {
-      if (fingerprintValid) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
-      else { newSeedIntent = NewSeedIntent::none; screen = Screen::length; focusIndex = 0; drawScreen(); }
-    } else if (kMenu[1].contains(x, y)) {
-      if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
-    }     else if (kMenu[2].contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
-    else if (kMenu[3].contains(x, y)) { requestRadioPermission(RadioAction::wifi, Screen::menu, 3); }
-    else if (kMenu[4].contains(x, y)) { openTxHistory(); }
-    else if (kMenu[5].contains(x, y)) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
-    else if (kMenu[6].contains(x, y)) { lockDevice(); }
-    else if (kMenu[7].contains(x, y)) { requestRadioPermission(RadioAction::cam, Screen::menu, 7); }
-    else if (kHelpIcon.contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
+    const uint8_t count = menuCount();
+    for (uint8_t i = 0; i < count; ++i) {
+      if (!kMenu[i].contains(x, y)) continue;
+      const uint8_t logical = menuLogical(i);
+      if (logical == 0) {
+        if (fingerprintValid) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
+        else { newSeedIntent = NewSeedIntent::none; screen = Screen::length; focusIndex = 0; drawScreen(); }
+      } else if (logical == 1) {
+        if (!fingerprintValid) { newSeedIntent = NewSeedIntent::none; screen = Screen::entropy_length; focusIndex = 0; drawScreen(); }
+      } else if (logical == 2) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
+      else if (logical == 3) { requestRadioPermission(RadioAction::wifi, Screen::menu, i); }
+      else if (logical == 4) { openTxHistory(); }
+      else if (logical == 5) { screen = Screen::settings; focusIndex = 0; drawScreen(); }
+      else if (logical == 6) { lockDevice(); }
+      else if (logical == 7) { requestRadioPermission(RadioAction::cam, Screen::menu, i); }
+      return;
+    }
+    if (kHelpIcon.contains(x, y)) { screen = Screen::help; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::active_seed) {
     if (kActiveMenu[0].contains(x, y)) { openPublicKey(gSettings.defaultProfile); }
     else if (kActiveMenu[1].contains(x, y)) {
@@ -5319,13 +5802,15 @@ void click(int x, int y) {
       if (sessionUnlocked) { screen = Screen::vault_actions; focusIndex = 0; drawScreen(); }
       else { screen = Screen::discard_confirm; focusIndex = 0; drawScreen(); }
     }
-    else if (kActiveMenu[5].contains(x, y)) { requestRadioPermission(RadioAction::wifi, Screen::active_seed, 5); }
-    else if (kActiveMenu[6].contains(x, y)) { requestRadioPermission(RadioAction::cam, Screen::active_seed, 6); }
-    else if (sessionUnlocked && kActiveMenu[7].contains(x, y)) lockSessionVault();
-    else if (kActiveMenu[sessionUnlocked ? 8 : 7].contains(x, y)) {
+    else if (gSettings.onlineEnabled && kActiveMenu[5].contains(x, y)) { openBalanceConsent(); }
+    else if (gSettings.onlineEnabled && kActiveMenu[6].contains(x, y))
+      requestRadioPermission(RadioAction::wifi, Screen::active_seed, 6);
+    else if (kActiveMenu[activeCamIndex()].contains(x, y))
+      requestRadioPermission(RadioAction::cam, Screen::active_seed, activeCamIndex());
+    else if (kActiveMenu[activeSettingsIndex()].contains(x, y)) {
       screen = Screen::settings; focusIndex = 0; drawScreen();
     }
-    else if (kActiveMenu[sessionUnlocked ? 9 : 8].contains(x, y)) {
+    else if (kActiveMenu[activeMenuIndex()].contains(x, y)) {
       screen = Screen::menu; focusIndex = 0; drawScreen();
     }
   } else if (screen == Screen::seed_switcher) {
@@ -5681,6 +6166,51 @@ void click(int x, int y) {
       return;
     }
     if (kBack.contains(x, y)) { twoFaMigrating = false; screen = Screen::ble_key_menu; focusIndex = 1; drawScreen(); }
+  } else if (screen == Screen::balance_consent) {
+    if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = 5; drawScreen(); }
+    else if (kAction.contains(x, y)) { openWifiSelect(); }
+  } else if (screen == Screen::wifi_select) {
+    const uint8_t count = wifiSelectCount();
+    for (uint8_t i = 0; i < count; ++i) if (kVaultFiles[i].contains(x, y)) {
+      if (wifiSelectIsSaved(i)) {
+        beginBalanceCheck();
+      } else {
+        wifiSelectedSsid = wifiSelectSsid(i);
+        openWifiPassword();
+      }
+      return;
+    }
+    if (kAction.contains(x, y) && wifi_sta::hasSaved()) {
+      wifi_sta::erase();
+      openWifiSelect();
+      return;
+    }
+    if (kBack.contains(x, y)) { screen = Screen::balance_consent; focusIndex = 0; drawScreen(); }
+  } else if (screen == Screen::wifi_password) {
+    const size_t length = strlen(wifiPasswordEntry);
+    const char key = wifiKeyAt(x, y);
+    if (key && length < sizeof(wifiPasswordEntry) - 1) {
+      wifiPasswordEntry[length] = key; wifiPasswordEntry[length + 1] = '\0';
+      if (length == 0) drawWifiPassword(); else redrawWifiPasswordLine();
+    } else if (kPassSpace.contains(x, y) && length < sizeof(wifiPasswordEntry) - 1) {
+      wifiPasswordEntry[length] = ' '; wifiPasswordEntry[length + 1] = '\0';
+      if (length == 0) drawWifiPassword(); else redrawWifiPasswordLine();
+    } else if (kDelete.contains(x, y) && length) {
+      wifiPasswordEntry[length - 1] = '\0';
+      if (length == 1) drawWifiPassword(); else redrawWifiPasswordLine();
+    } else if (kPassMode.contains(x, y)) {
+      wifiKeyboardMode = (wifiKeyboardMode + 1) % 4; drawWifiPassword();
+    } else if (kPassReveal.contains(x, y) && length) {
+      wifiReveal = !wifiReveal; drawWifiPassword();
+    } else if (kBack.contains(x, y)) {
+      openWifiSelect();
+    } else if (kAction.contains(x, y) && length) {
+      wifi_sta::save(wifiSelectedSsid, String(wifiPasswordEntry));
+      encrypted_seed_store::wipe(wifiPasswordEntry, sizeof(wifiPasswordEntry));
+      beginBalanceCheck();
+    }
+  } else if (screen == Screen::balance_result) {
+    if (kAction.contains(x, y)) { screen = Screen::active_seed; focusIndex = 5; drawScreen(); }
   } else if (screen == Screen::session_meta_list) {
     for (uint8_t i = 0; i < sessionMetaCount; ++i) if (kVaultFiles[i].contains(x, y)) {
       selectedSessionFile = i; vaultFlow = VaultFlow::session_unlock;
@@ -5851,10 +6381,44 @@ void click(int x, int y) {
     else if (kMenu[1].contains(x, y)) { screen = Screen::settings_timeout; focusIndex = 0; drawScreen(); }
     else if (kMenu[2].contains(x, y)) { screen = Screen::settings_clean; focusIndex = 0; drawScreen(); }
     else if (kMenu[3].contains(x, y)) { screen = Screen::settings_derivation; focusIndex = 0; drawScreen(); }
-    else if (kMenu[4].contains(x, y)) { screen = Screen::settings_radio; focusIndex = 0; drawScreen(); }
+    else if (kMenu[4].contains(x, y)) { screen = Screen::settings_online; focusIndex = 0; drawScreen(); }
     else if (kMenu[5].contains(x, y)) { screen = Screen::ble_key_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[6].contains(x, y)) { screen = Screen::settings_screen; focusIndex = 0; drawScreen(); }
+    else if (gSettings.onlineEnabled && kMenu[7].contains(x, y)) {
+      screen = Screen::settings_balance; focusIndex = 0; drawScreen();
+    }
     else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 5; drawScreen(); }
+  } else if (screen == Screen::settings_online) {
+    if (kAction.contains(x, y)) {
+      if (gSettings.onlineEnabled) {
+        gSettings.onlineEnabled = 0; device_settings::save(gSettings);
+        drawSettingsOnline();
+      } else {
+        screen = Screen::online_consent; focusIndex = 0; drawScreen();
+      }
+    } else if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 4; drawScreen(); }
+  } else if (screen == Screen::online_consent) {
+    if (kBack.contains(x, y)) { screen = Screen::settings_online; focusIndex = 0; drawScreen(); }
+    else if (kAction.contains(x, y)) {
+      gSettings.onlineEnabled = 1; device_settings::save(gSettings);
+      screen = Screen::settings_online; focusIndex = 0; drawScreen();
+    }
+  } else if (screen == Screen::settings_balance) {
+    for (uint8_t i = 0; i < device_settings::kBalanceAddrOptionCount; ++i)
+      if (kMenu[i].contains(x, y)) {
+        gSettings.balanceAddrPerSide = device_settings::kBalanceAddrOptions[i];
+        device_settings::save(gSettings);
+        drawSettingsBalance();
+        return;
+      }
+    for (uint8_t i = 0; i < device_settings::kGapOptionCount; ++i)
+      if (kMenu[i + device_settings::kBalanceAddrOptionCount].contains(x, y)) {
+        gSettings.balanceGapLimit = device_settings::kGapOptions[i];
+        device_settings::save(gSettings);
+        drawSettingsBalance();
+        return;
+      }
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 7; drawScreen(); }
   } else if (screen == Screen::settings_screen) {
     for (uint8_t i = 0; i < device_settings::kScreenCleanOptionCount; ++i)
       if (kMenu[i].contains(x, y)) {
@@ -6107,7 +6671,18 @@ void activateFocus() {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
                     focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] :
                     focusIndex == 4 ? kMenu[4] : focusIndex == 5 ? kMenu[5] :
-                    focusIndex == 6 ? kMenu[6] : kBack;
+                    focusIndex == 6 ? kMenu[6] :
+                    (gSettings.onlineEnabled && focusIndex == 7) ? kMenu[7] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_online) {
+    const Rect& r = focusIndex == 0 ? kAction : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::online_consent) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_balance) {
+    const uint8_t total = device_settings::kBalanceAddrOptionCount + device_settings::kGapOptionCount;
+    const Rect& r = focusIndex < total ? kMenu[focusIndex] : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::settings_screen) {
     const Rect& r = focusIndex < device_settings::kScreenCleanOptionCount
@@ -6175,6 +6750,18 @@ void activateFocus() {
   } else if (screen == Screen::twofa_migrate_list) {
     const Rect& r = focusIndex < sessionMetaCount ? kVaultFiles[focusIndex] : kBack;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::balance_consent) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::wifi_select) {
+    const Rect& r = focusIndex < wifiSelectCount() ? kVaultFiles[focusIndex] :
+                    focusIndex == wifiSelectBackIndex() ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::wifi_password) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::balance_result) {
+    click(kAction.x + 5, kAction.y + 5);
   } else if (screen == Screen::diagnostics) click(kBack.x + 5, kBack.y + 5);
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }

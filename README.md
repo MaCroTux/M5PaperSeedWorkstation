@@ -218,6 +218,11 @@ board `m5stack-fire`, `M5EPD` from `~/Documents/Arduino/libraries/M5EPD` and
 
 Reliable flashing over marginal USB: `esptool.py --no-stub --baud 115200 write_flash 0x10000 firmware.bin`.
 
+If flashing starts failing with `Operation timed out` / `Serial data stream stopped`
+(usually after an interrupted erase left the flash in a bad state), use
+**esptool v4.9.0** + `erase_flash` first — full recovery steps in
+[`TECHNICAL.md`](TECHNICAL.md).
+
 ### Unit tests (host, no hardware)
 
 The crypto/parsing/vault logic lives in `lib/seedworkstation_core` and is covered

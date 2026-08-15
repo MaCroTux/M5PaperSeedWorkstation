@@ -221,6 +221,11 @@ y `NimBLE-Arduino@^1.4.0`.
 
 Flasheo fiable en USB marginal: `esptool.py --no-stub --baud 115200 write_flash 0x10000 firmware.bin`.
 
+Si el flasheo empieza a fallar con `Operation timed out` / `Serial data stream
+stopped` (normalmente tras un borrado interrumpido que dejó la flash en mal
+estado), usa **esptool v4.9.0** + `erase_flash` primero — pasos completos de
+recuperación en [`TECHNICAL.md`](TECHNICAL.md).
+
 ### Tests unitarios (host, sin hardware)
 
 La lógica de cripto/parsing/vault vive en `lib/seedworkstation_core` y está
