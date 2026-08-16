@@ -1,5 +1,6 @@
 #include <unity.h>
 #include "bitcoin_fingerprint.hpp"
+#include "bip39_wordlist.h"
 #include "helpers.hpp"
 
 void setUp(void) { host::seedRandom(0x12345678u); }

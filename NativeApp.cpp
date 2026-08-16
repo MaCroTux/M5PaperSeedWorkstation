@@ -43,10 +43,10 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                     seedqr, public_key, public_key_qr, entropy_length, entropy, dice,
                     security_warning, radio_permission, vault_password, vault_result,
                     vault_label, address_explorer, address_index_input, address_qr,
-                     vault_list, vault_unlock, vault_loaded,
+                     vault_unlock, vault_loaded,
                      session_menu, session_meta_list, session_seed_list,
                      delete_confirm, discard_confirm, session_lock_warning,
-                     help, unlock_confirm, diagnostics, scan_qr, wifi_receive,
+                     help, diagnostics, scan_qr, wifi_receive,
                      wifi_mode, signed_tx, locked, screensaver, tx_review, utxo_detail, signed_mode,
                      animated_qr, settings, settings_lang, settings_timeout,
                      settings_clean, settings_derivation, settings_balance, settings_radio,
@@ -122,7 +122,8 @@ constexpr Rect kDigitKey[10] = {{40, 235, 145, 80}, {200, 235, 145, 80},
                                 {40, 425, 145, 80}, {200, 425, 145, 80},
                                 {360, 425, 145, 80}, {200, 520, 145, 80}};
 constexpr Rect kDigitDelete{40, 520, 145, 80};
-constexpr Rect kVaultReveal{120, 620, 300, 75};
+constexpr Rect kVaultReveal{185, 600, 335, 70};
+constexpr Rect kVaultMode{20, 600, 150, 70};
 constexpr Rect kPassMode{20, 600, 150, 70};
 constexpr Rect kPassSpace{185, 600, 170, 70};
 constexpr Rect kPassReveal{370, 600, 150, 70};
@@ -135,6 +136,8 @@ constexpr Rect kSessionNewEntropy{30, 782, 480, 44};
 constexpr Rect kSessionNewRam{30, 834, 480, 44};
 constexpr Rect kSessionBack{30, 886, 225, 40};
 constexpr Rect kSessionAction{265, 886, 245, 40};
+constexpr Rect kSwitcherBack{30, 878, 235, 62};
+constexpr Rect kSwitcherAction{275, 878, 235, 62};
 
 struct KeyRow { const char* letters; int x, y, width; };
 constexpr KeyRow kRows[] = {{"QWERTYUIOP", 10, 265, 52},
@@ -146,6 +149,8 @@ M5EPD_Canvas entropyCanvas(&M5.EPD);
 Screen screen = Screen::menu;
 Screen securityWarningReturn = Screen::review;
 Screen securityWarningTarget = Screen::review;
+Screen discardReturnScreen = Screen::active_seed;
+uint8_t discardReturnFocus = 4;
 enum class RadioAction : uint8_t { none, wifi, cam };
 RadioAction radioAction = RadioAction::none;
 Screen radioReturn = Screen::menu;
@@ -209,7 +214,6 @@ char vaultFiles[6][64] = {};
 uint8_t vaultFileCount = 0;
 char txFiles[6][64] = {};
 uint8_t txFileCount = 0;
-uint8_t selectedVaultFile = 0;
 bool vaultUnlockError = false;
 uint8_t vaultFailCount = 0;      // S-6: intentos fallidos de desbloqueo
 uint32_t vaultLockoutUntil = 0;  // bloqueo temporal (ms) tras N fallos
@@ -221,14 +225,13 @@ bool passphraseConfirmPhase = false;
 bool passphraseMismatch = false;
 bool passphraseReveal = false;
 uint8_t passphraseKeyboardMode = 0;
-bool vaultDeleteMode = false;
+uint8_t vaultKeyboardMode = 0;
 bool sessionDeleteMode = false;
 bool txDeleteMode = false;
 bool deleteFailed = false;
 bool pendingDeleteSession = false;
 bool pendingDeleteTx = false;
 bool deleteAllTx = false;
-bool unlockConfirmIsSession = false;
 char pendingDeletePath[64] = {};
 enum class VaultFlow { individual, session_create, session_unlock, session_save_seed,
                       twofa_migrate };
@@ -257,6 +260,7 @@ uint8_t selectedSessionFile = 0;
 uint32_t lastUserActivity = 0;
 constexpr uint32_t kSessionTimeoutWarnMs = 15000;
 uint32_t lastWarnSecond = 0;
+uint32_t lastCleanUnit = 0xFFFFFFFF;
 Screen sessionLockReturn = Screen::menu;
 device_settings::Settings gSettings = device_settings::defaults();
 Screen screensaverReturn = Screen::menu;
@@ -350,6 +354,12 @@ int8_t findLoadedSeed(const char* fingerprint) {
   return -1;
 }
 
+bool activeSeedIsRam() {
+  return activeLoadedSeed >= 0 &&
+      activeLoadedSeed < static_cast<int8_t>(loadedSeedCount) &&
+      loadedSeeds[activeLoadedSeed].used && !loadedSeeds[activeLoadedSeed].inVault;
+}
+
 bool cacheCurrentSeed(const char* label = nullptr, bool markInVault = false) {
   if (!fingerprintValid) return false;
   uint8_t rawBase[4] = {}; char baseFingerprint[9] = {};
@@ -357,10 +367,14 @@ bool cacheCurrentSeed(const char* label = nullptr, bool markInVault = false) {
   snprintf(baseFingerprint, sizeof(baseFingerprint), "%02X%02X%02X%02X",
            rawBase[0], rawBase[1], rawBase[2], rawBase[3]);
   encrypted_seed_store::wipe(rawBase, sizeof(rawBase));
-  int8_t slot = activeLoadedSeed >= 0 ? activeLoadedSeed : findLoadedSeed(baseFingerprint);
+  int8_t slot = findLoadedSeed(baseFingerprint);
+  if (slot < 0 && activeLoadedSeed >= 0 &&
+      !strcmp(loadedSeeds[activeLoadedSeed].fingerprint, baseFingerprint))
+    slot = activeLoadedSeed;
   if (slot < 0) {
     if (loadedSeedCount >= kMaxLoadedSeeds) return false;
     slot = loadedSeedCount++;
+    encrypted_seed_store::wipe(&loadedSeeds[slot], sizeof(LoadedSeed));
   }
   LoadedSeed& item = loadedSeeds[slot];
   encrypted_seed_store::wipe(item.indices, sizeof(item.indices));
@@ -435,6 +449,75 @@ void subtitleFit(const char* text) {
   page.print(s + "...");
 }
 
+uint32_t seedCleanRemainingMs() {
+  const uint32_t cleanMs = gSettings.seedCleanTimeoutMs;
+  if (cleanMs == 0 || !(fingerprintValid || sessionUnlocked)) return 0;
+  const uint32_t elapsed = static_cast<uint32_t>(millis() - lastUserActivity);
+  return elapsed >= cleanMs ? 0 : cleanMs - elapsed;
+}
+
+void cleanCountdownLabel(char* out, size_t outSize, uint32_t remaining) {
+  if (remaining >= 60000) {
+    const uint32_t mins = (remaining + 59999) / 60000;
+    snprintf(out, outSize, "LIMPIEZA %lum", static_cast<unsigned long>(mins));
+  } else {
+    const uint32_t secs = (remaining + 999) / 1000;
+    snprintf(out, outSize, "LIMPIEZA 0:%02lu", static_cast<unsigned long>(secs));
+  }
+}
+
+void cleanCountdownBadge() {
+  const uint32_t remaining = seedCleanRemainingMs();
+  if (remaining == 0) return;
+  char label[24];
+  cleanCountdownLabel(label, sizeof(label), remaining);
+  textStyle(page, 2);
+  page.setTextDatum(MR_DATUM);
+  const int x = kWidth - 20 - 6;
+  if (remaining < 60000) {
+    const int w = page.textWidth(label);
+    page.fillRoundRect(x - w - 8, 42, w + 16, 26, 6, kBlack);
+    page.setTextColor(kWhite, kBlack);
+  } else {
+    page.setTextColor(kBlack, kWhite);
+  }
+  page.drawString(label, x, 55);
+  page.setTextDatum(TL_DATUM);
+  textStyle(page);
+}
+
+uint32_t cleanCountdownUnit() {
+  const uint32_t remaining = seedCleanRemainingMs();
+  if (remaining == 0) return 0xFFFFFFFF;
+  if (remaining >= 60000) return (remaining + 59999) / 60000;
+  return (remaining + 999) / 1000;
+}
+
+void updateCleanCountdownBadge() {
+  const uint32_t remaining = seedCleanRemainingMs();
+  M5EPD_Canvas c(&M5.EPD);
+  if (!c.createCanvas(300, 30)) return;
+  c.fillCanvas(kWhite);
+  if (remaining) {
+    char label[24];
+    cleanCountdownLabel(label, sizeof(label), remaining);
+    textStyle(c, 2);
+    c.setTextDatum(MR_DATUM);
+    const int x = 300 - 6;
+    if (remaining < 60000) {
+      const int w = c.textWidth(label);
+      c.fillRoundRect(x - w - 8, 0, w + 16, 26, 6, kBlack);
+      c.setTextColor(kWhite, kBlack);
+    } else {
+      c.setTextColor(kBlack, kWhite);
+    }
+    c.drawString(label, x, 13);
+    c.setTextDatum(TL_DATUM);
+  }
+  c.pushCanvas(kWidth - 20 - 300, 42, UPDATE_MODE_A2);
+  c.deleteCanvas();
+}
+
 void title(const char* heading, const char* subtitle) {
   textStyle(page, 3);
   page.setCursor(20, 20);
@@ -442,6 +525,7 @@ void title(const char* heading, const char* subtitle) {
   subtitleFit(subtitle);
   statusBar();
   fingerprintBadge();
+  cleanCountdownBadge();
   page.drawFastHLine(20, 140, kWidth - 40, kBlack);
 }
 
@@ -1174,6 +1258,46 @@ void drawPassphraseKeys() {
   }
 }
 
+const char* vaultKeyboardRows(uint8_t row) {
+  static const char* lower[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+  static const char* upper[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
+  static const char* symbols[] = {"1234567890", "!@#$%&*()", "-_=+[]{}?"};
+  static const char* extra[] = {"`~^\\|/<>", ";:'\",.", ""};
+  return vaultKeyboardMode == 0 ? lower[row] :
+         vaultKeyboardMode == 1 ? upper[row] :
+         vaultKeyboardMode == 2 ? symbols[row] : extra[row];
+}
+
+char vaultKeyAt(int x, int y) {
+  for (uint8_t r = 0; r < 3; ++r) {
+    const char* keys = vaultKeyboardRows(r); const int width = r == 2 ? 60 : 52;
+    const int start = r == 0 ? 10 : r == 1 ? 34 : 60;
+    const int top = 265 + r * 80;
+    if (y < top || y >= top + 64 || x < start) continue;
+    const int index = (x - start) / width;
+    if (index >= 0 && index < static_cast<int>(strlen(keys))) return keys[index];
+  }
+  return '\0';
+}
+
+void drawVaultKeyboardKeys() {
+  for (uint8_t r = 0; r < 3; ++r) {
+    const char* keys = vaultKeyboardRows(r); const int width = r == 2 ? 60 : 52;
+    const int start = r == 0 ? 10 : r == 1 ? 34 : 60;
+    const int top = 265 + r * 80;
+    for (size_t i = 0; keys[i]; ++i) {
+      char label[2] = {keys[i], '\0'};
+      buttonOn(page, Rect{start + static_cast<int>(i) * width, top, width - 4, 64}, label);
+    }
+  }
+}
+
+void drawVaultModeButton() {
+  buttonOn(page, kVaultMode, vaultKeyboardMode == 0 ? "abc" :
+           vaultKeyboardMode == 1 ? "ABC" :
+           vaultKeyboardMode == 2 ? "123 / SIMB" : "SIMB 2");
+}
+
 char* currentPassphraseEntry() {
   return passphraseConfirmPhase ? passphraseConfirmation : passphraseEntry;
 }
@@ -1227,26 +1351,24 @@ char* activeVaultPassword() {
 void drawVaultLabel() {
   blankPage();
   const bool sessionSeed = vaultFlow == VaultFlow::session_save_seed;
-  const bool sessionCreate = vaultFlow == VaultFlow::session_create;
-  title(sessionSeed ? "ETIQUETA SEMILLA" : sessionCreate ? "NUEVO VAULT" : "ETIQUETA VAULT",
-        sessionSeed ? "Nombre de la semilla" :
-        sessionCreate ? "Nombre del Vault" : "Nombre de la copia");
+  title(sessionSeed ? "ETIQUETA SEMILLA" : "NUEVO VAULT",
+        sessionSeed ? "Nombre de la semilla" : "Nombre del Vault");
   textStyle(page, 2); page.setCursor(20, 155);
   page.println(lang::tr("1-16 letras. Ejemplos:"));
   page.setCursor(20, 180); page.println(lang::tr("ahorro, viajes o casa"));
   page.drawRoundRect(20, 205, 500, 52, 8, kBlack);
   page.setCursor(35, 214); page.print(vaultLabel[0] ? vaultLabel : "_");
-  drawKeyboardKeys();
+  drawVaultKeyboardKeys();
   buttonOn(page, kDelete, "BORRAR", true, false, Icon::back);
   buttonOn(page, kAdd, "CONTINUAR", vaultLabel[0], false, Icon::check);
+  drawVaultModeButton();
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, "CONTINUAR", vaultLabel[0], focusIndex == 1, Icon::check);
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
   String preview = sessionSeed ? String(activeFingerprint + 5) + "-" +
       (vaultLabel[0] ? vaultLabel : "label") + ".svs" :
-      sessionCreate ? String("SESSION-") + (vaultLabel[0] ? vaultLabel : "label") + ".svm" :
-      String(activeFingerprint + 5) + "-" + (vaultLabel[0] ? vaultLabel : "label") + ".vlt";
-  page.drawString(preview, 270, 650); page.setTextDatum(TL_DATUM);
+      String("SESSION-") + (vaultLabel[0] ? vaultLabel : "label") + ".svm";
+  page.drawString(preview, 270, 715); page.setTextDatum(TL_DATUM);
   fullRefresh();
 }
 
@@ -1263,10 +1385,8 @@ void updateVaultLabelDynamic(bool updateActions = false) {
     preview.fillCanvas(kWhite); textStyle(preview, 1); preview.setTextDatum(MC_DATUM);
     String name = vaultFlow == VaultFlow::session_save_seed ?
         String(activeFingerprint + 5) + "-" + (vaultLabel[0] ? vaultLabel : "label") + ".svs" :
-        vaultFlow == VaultFlow::session_create ? String("SESSION-") +
-        (vaultLabel[0] ? vaultLabel : "label") + ".svm" : String(activeFingerprint + 5) + "-" +
-        (vaultLabel[0] ? vaultLabel : "label") + ".vlt";
-    preview.drawString(name, 250, 20); preview.pushCanvas(20, 630, UPDATE_MODE_A2);
+        String("SESSION-") + (vaultLabel[0] ? vaultLabel : "label") + ".svm";
+    preview.drawString(name, 250, 20); preview.pushCanvas(20, 695, UPDATE_MODE_A2);
     preview.deleteCanvas();
   }
   if (updateActions) {
@@ -1290,15 +1410,16 @@ void drawVaultPassword() {
       static_cast<int32_t>(vaultRevealUntil - millis()) > 0;
   if (revealed) page.print(value);
   else for (size_t i = 0; i < length; ++i) page.print('*');
-  drawKeyboardKeys();
+  drawVaultKeyboardKeys();
   buttonOn(page, kDelete, "BORRAR", true, false, Icon::back);
   buttonOn(page, kAdd, vaultConfirmPhase ? "GUARDAR CIFRADO" : "CONTINUAR",
            length >= 12, false, vaultConfirmPhase ? Icon::lock : Icon::check);
+  drawVaultModeButton();
+  buttonOn(page, kVaultReveal, revealed ? "VISIBLE 3 SEG." : "MOSTRAR 3 SEG.",
+           length > 0, revealed, Icon::eye);
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, vaultConfirmPhase ? "GUARDAR" : "CONTINUAR",
            length >= 12, focusIndex == 1, vaultConfirmPhase ? Icon::lock : Icon::check);
-  buttonOn(page, kVaultReveal, revealed ? "VISIBLE 3 SEG." : "MOSTRAR 3 SEG.",
-           length > 0, revealed, Icon::eye);
   fullRefresh();
 }
 
@@ -1342,13 +1463,11 @@ const char* vaultResultText(encrypted_seed_store::Result result) {
 
 void drawVaultResult() {
   blankPage();
-  const bool sessionRecord = vaultFlow == VaultFlow::session_save_seed;
-  title(sessionRecord ? "VAULT DE SESION" : "VAULT SEGURO",
+  title("VAULT DE SESION",
         vaultResult == encrypted_seed_store::Result::ok ? "Copia cifrada terminada" : "Operacion no completada");
   centeredFit(page, vaultResultText(vaultResult), 290, 500, 3);
   if (vaultResult == encrypted_seed_store::Result::ok) {
-    centeredFit(page, sessionRecord ? "AES-256-GCM / clave de sesion"
-                                    : "AES-256-GCM + PBKDF2 (600.000)", 390);
+    centeredFit(page, "AES-256-GCM / clave de sesion", 390);
     textStyle(page, 2); page.setTextDatum(MC_DATUM);
     page.drawString(String(lang::tr("Archivo: ")) + vaultPath, 270, 445);
     centeredFit(page, "La semilla sigue activa en memoria.", 510);
@@ -1358,57 +1477,6 @@ void drawVaultResult() {
   }
   buttonOn(page, kAction, "VOLVER AL MENU SEED", true, true);
   fullRefresh();
-}
-
-void saveVault() {
-  if (strcmp(vaultPassword, vaultConfirmation) != 0) {
-    encrypted_seed_store::wipe(vaultConfirmation, sizeof(vaultConfirmation));
-    vaultConfirmPhase = true;
-    vaultMismatch = true;
-    vaultRevealUntil = 0;
-    drawVaultPassword();
-    return;
-  }
-  snprintf(vaultPath, sizeof(vaultPath), "/%s-%s.vlt",
-           activeFingerprint + 5, vaultLabel);
-  blankPage();
-  title("VAULT SEGURO", "Cifrando la tarjeta SD...");
-  textStyle(page, 2); page.setCursor(30, 260);
-  page.println(lang::tr("Puede tardar. No retires la tarjeta."));
-  page.setCursor(30, 300);
-  page.println(lang::tr("Derivando clave (PBKDF2)..."));
-  fullRefresh(UPDATE_MODE_DU4);
-  drawProgressBar(340, 0); progressPercent = 0;
-  vaultResult = encrypted_seed_store::save(vaultPath, vaultPassword, words, targetWords, storeProgress);
-  if (vaultResult == encrypted_seed_store::Result::ok) {
-    uint16_t verifiedWords[24] = {}; uint8_t verifiedCount = 0;
-    progressPercent = 0;
-    const encrypted_seed_store::Result check = encrypted_seed_store::load(
-        vaultPath, vaultPassword, verifiedWords, verifiedCount, storeProgress);
-    if (check != encrypted_seed_store::Result::ok || verifiedCount != targetWords ||
-        memcmp(verifiedWords, words, targetWords * sizeof(uint16_t)) != 0) {
-      SD.remove(vaultPath);
-      vaultResult = encrypted_seed_store::Result::wrong_password_or_tampered;
-    }
-    encrypted_seed_store::wipe(verifiedWords, sizeof(verifiedWords));
-  }
-  encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
-  encrypted_seed_store::wipe(vaultConfirmation, sizeof(vaultConfirmation));
-  vaultConfirmPhase = false;
-  vaultMismatch = false;
-  vaultRevealUntil = 0;
-  screen = Screen::vault_result; focusIndex = 0; drawVaultResult();
-}
-
-void beginVault() {
-  vaultFlow = VaultFlow::individual;
-  encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
-  encrypted_seed_store::wipe(vaultConfirmation, sizeof(vaultConfirmation));
-  memset(vaultLabel, 0, sizeof(vaultLabel));
-  vaultConfirmPhase = false;
-  vaultMismatch = false;
-  vaultRevealUntil = 0;
-  screen = Screen::vault_label; focusIndex = 0; drawVaultLabel();
 }
 
 void beginSessionCreate() {
@@ -1455,35 +1523,6 @@ void scanVaultFiles() {
     entry.close(); entry = root.openNextFile();
   }
   if (entry) entry.close(); root.close();
-}
-
-const char* vaultDisplayName(uint8_t index) {
-  if (index >= vaultFileCount) return "";
-  return vaultFiles[index][0] == '/' ? vaultFiles[index] + 1 : vaultFiles[index];
-}
-
-void drawVaultList() {
-  blankPage(); title(vaultDeleteMode ? "ELIMINAR VAULT" : "ABRIR VAULT",
-                     vaultDeleteMode ? "Elige el archivo a borrar" :
-                     "Elige una copia cifrada");
-  if (SD.cardType() == CARD_NONE) {
-    textStyle(page, 3); page.setTextDatum(MC_DATUM);
-    page.drawString(lang::tr("SD NO DETECTADA"), 270, 350); page.setTextDatum(TL_DATUM);
-  } else if (!vaultFileCount) {
-    textStyle(page, 3); page.setTextDatum(MC_DATUM);
-    page.drawString(lang::tr("NO HAY ARCHIVOS .VLT"), 270, 350); page.setTextDatum(TL_DATUM);
-  } else {
-    for (uint8_t i = 0; i < vaultFileCount; ++i)
-      buttonOn(page, kVaultFiles[i], vaultDisplayName(i), true, focusIndex == i);
-  }
-  buttonOn(page, kBack, "VOLVER", true, focusIndex == vaultFileCount);
-  buttonOn(page, kAction, vaultDeleteMode ? "CANCELAR ELIMINACION" : "MODO ELIMINAR",
-           vaultFileCount > 0, focusIndex == vaultFileCount + 1, Icon::trash);
-  fullRefresh();
-}
-
-void openVaultList() {
-  vaultDeleteMode = false; scanVaultFiles(); screen = Screen::vault_list; focusIndex = 0; drawVaultList();
 }
 
 void scanTxFiles() {
@@ -1539,9 +1578,7 @@ void openTxHistory() {
 }
 
 void drawVaultUnlock() {
-  const char* name = (vaultFlow == VaultFlow::session_unlock ||
-                      vaultFlow == VaultFlow::twofa_migrate) ?
-      sessionMetaFiles[selectedSessionFile] + 1 : vaultDisplayName(selectedVaultFile);
+  const char* name = sessionMetaFiles[selectedSessionFile] + 1;
   blankPage(); title("DESBLOQUEAR VAULT", name);
   const size_t length = strlen(vaultPassword);
   textStyle(page, 2); page.setCursor(20, 155);
@@ -1552,9 +1589,10 @@ void drawVaultUnlock() {
       static_cast<int32_t>(vaultRevealUntil - millis()) > 0;
   if (revealed) page.print(vaultPassword);
   else for (size_t i = 0; i < length; ++i) page.print('*');
-  drawKeyboardKeys();
+  drawVaultKeyboardKeys();
   buttonOn(page, kDelete, "BORRAR", true, false, Icon::back);
   buttonOn(page, kAdd, "DESBLOQUEAR", length >= 1, false, Icon::unlock);
+  drawVaultModeButton();
   buttonOn(page, kVaultReveal, revealed ? "VISIBLE 3 SEG." : "MOSTRAR 3 SEG.",
            length > 0, revealed, Icon::eye);
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
@@ -1585,35 +1623,6 @@ bool vaultUnlockBlocked() {
 void vaultUnlockFailed() {
   vaultUnlockError = true;
   if (++vaultFailCount >= 5) { vaultLockoutUntil = millis() + 60000; vaultFailCount = 0; }
-}
-
-void loadSelectedVault() {
-  if (vaultUnlockBlocked()) return;
-  blankPage(); title("ABRIR VAULT", "Descifrando y verificando");
-  textStyle(page, 2); page.setCursor(30, 260); page.println(lang::tr("No retires la tarjeta SD."));
-  page.setCursor(30, 300); page.println(lang::tr("Derivando clave (PBKDF2)..."));
-  fullRefresh(UPDATE_MODE_DU4);
-  drawProgressBar(340, 0); progressPercent = 0;
-  uint16_t recovered[24] = {}; uint8_t recoveredCount = 0;
-  const encrypted_seed_store::Result result = encrypted_seed_store::load(
-      vaultFiles[selectedVaultFile], vaultPassword, recovered, recoveredCount, storeProgress);
-  bool valid = result == encrypted_seed_store::Result::ok &&
-      bip39::checksum_valid(recovered, recoveredCount);
-  if (valid) {
-    memset(words, 0, sizeof(words)); memcpy(words, recovered, recoveredCount * sizeof(uint16_t));
-    targetWords = recoveredCount; wordCount = recoveredCount; prefix = ""; editingWord = -1;
-    valid = updateFingerprint();
-  }
-  encrypted_seed_store::wipe(recovered, sizeof(recovered));
-  encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
-  vaultRevealUntil = 0;
-  if (!valid) {
-    vaultUnlockFailed(); screen = Screen::vault_unlock; focusIndex = 0; drawVaultUnlock();
-    return;
-  }
-  vaultUnlockError = false; vaultFailCount = 0; vaultLockoutUntil = 0;
-  screen = Screen::vault_loaded; focusIndex = 0;
-  drawVaultLoaded();
 }
 
 void scanSessionMeta() {
@@ -1674,9 +1683,23 @@ uint8_t loadAllSessionSeeds() {
     encrypted_seed_store::wipe(calculated, sizeof(calculated));
   }
   if (stagedCount) {
+    // Asegurar que la semilla activa (aunque no estuviera cacheada) se conserve en RAM.
+    if (fingerprintValid) cacheCurrentSeed();
+    // Conservar las semillas que estaban solo en RAM (inVault == false) para no
+    // perderlas al abrir el vault; las del vault se cargan delante.
+    LoadedSeed ramOnly[kMaxLoadedSeeds] = {};
+    uint8_t ramCount = 0;
+    for (uint8_t i = 0; i < loadedSeedCount && ramCount < kMaxLoadedSeeds; ++i)
+      if (loadedSeeds[i].used && !loadedSeeds[i].inVault)
+        ramOnly[ramCount++] = loadedSeeds[i];
     encrypted_seed_store::wipe(loadedSeeds, sizeof(loadedSeeds));
-    memcpy(loadedSeeds, staged, stagedCount * sizeof(LoadedSeed));
-    loadedSeedCount = stagedCount; activeLoadedSeed = -1;
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < stagedCount && n < kMaxLoadedSeeds; ++i)
+      loadedSeeds[n++] = staged[i];
+    for (uint8_t i = 0; i < ramCount && n < kMaxLoadedSeeds; ++i)
+      loadedSeeds[n++] = ramOnly[i];
+    loadedSeedCount = n; activeLoadedSeed = -1;
+    encrypted_seed_store::wipe(ramOnly, sizeof(ramOnly));
     encrypted_seed_store::wipe(words, sizeof(words)); clearDerivedData();
     prefix = ""; wordCount = 0; editingWord = -1; clearFingerprint();
     activateLoadedSeed(0);
@@ -1769,6 +1792,34 @@ void drawDeleteConfirm() {
   fullRefresh();
 }
 
+void discardVaultSeeds() {
+  // Conserva solo las semillas cargadas en RAM (inVault == false); borra las del
+  // vault. La semilla activa, si era del vault, se sustituye por la primera RAM
+  // restante (o se queda sin semilla si no hay ninguna).
+  const bool activeIsVault = activeLoadedSeed >= 0 &&
+      activeLoadedSeed < static_cast<int8_t>(loadedSeedCount) &&
+      loadedSeeds[activeLoadedSeed].used && loadedSeeds[activeLoadedSeed].inVault;
+  uint8_t write = 0;
+  int8_t newActive = -1;
+  for (uint8_t i = 0; i < loadedSeedCount; ++i) {
+    if (!loadedSeeds[i].used || loadedSeeds[i].inVault) continue;
+    if (activeLoadedSeed == static_cast<int8_t>(i)) newActive = write;
+    if (write != i) loadedSeeds[write] = loadedSeeds[i];
+    ++write;
+  }
+  for (uint8_t i = write; i < loadedSeedCount; ++i)
+    encrypted_seed_store::wipe(&loadedSeeds[i], sizeof(LoadedSeed));
+  loadedSeedCount = write;
+  if (activeIsVault) {
+    encrypted_seed_store::wipe(words, sizeof(words)); clearDerivedData();
+    clearPassphrase(); prefix = ""; wordCount = 0; editingWord = -1;
+    clearFingerprint(); activeLoadedSeed = -1;
+    if (loadedSeedCount) activateLoadedSeed(0);
+  } else if (newActive >= 0) {
+    activeLoadedSeed = newActive;
+  }
+}
+
 void wipeSessionState() {
   if (entropySourceActive) { bootloader_random_disable(); entropySourceActive = false; }
   encrypted_seed_store::wipe(sessionMasterKey, sizeof(sessionMasterKey));
@@ -1779,7 +1830,10 @@ void wipeSessionState() {
   memset(sessionMetaFiles, 0, sizeof(sessionMetaFiles));
   memset(sessionSeedFiles, 0, sizeof(sessionSeedFiles));
   sessionMetaCount = sessionSeedCount = 0;
-  sessionUnlocked = false; clearPassphrase(); discardActiveSeed();
+  sessionUnlocked = false;
+  clearPassphrase();
+  if (fingerprintValid) { updateFingerprint(); cacheCurrentSeed(); }
+  discardVaultSeeds();
 }
 
 void lockSessionVault() {
@@ -2021,7 +2075,7 @@ void drawActiveSeed() {
 }
 
 void drawSeedSwitcher() {
-  blankPage(); title("SEMILLAS EN MEMORIA", "Selecciona la semilla activa");
+  blankPage(); title("SEMILLAS EN MEMORIA", "Selecciona o gestiona");
   for (uint8_t i = 0; i < loadedSeedCount; ++i) {
     String name = loadedSeeds[i].fingerprint;
     name += "  ";
@@ -2031,7 +2085,17 @@ void drawSeedSwitcher() {
     buttonOn(page, kVaultFiles[i], name.c_str(), true,
              activeLoadedSeed == static_cast<int8_t>(i) || focusIndex == i);
   }
-  buttonOn(page, kBack, "VOLVER", true, focusIndex == loadedSeedCount);
+  const bool ramActive = activeSeedIsRam();
+  buttonOn(page, kSessionNewVault, "GUARDAR EN VAULT", ramActive && sessionUnlocked,
+           focusIndex == loadedSeedCount, Icon::save);
+  buttonOn(page, kSessionNewEntropy, "DESCARTAR SEED", ramActive,
+           focusIndex == loadedSeedCount + 1, Icon::trash);
+  buttonOn(page, kSessionNewRam, sessionUnlocked ? "CARGAR DESDE VAULT" : "ABRIR VAULT",
+           true, focusIndex == loadedSeedCount + 2,
+           sessionUnlocked ? Icon::folder : Icon::lock);
+  buttonOn(page, kSwitcherBack, "VOLVER", true, focusIndex == loadedSeedCount + 3);
+  buttonOn(page, kSwitcherAction, "ACTIVAR", loadedSeedCount > 0,
+           focusIndex == loadedSeedCount + 4, Icon::check);
   fullRefresh();
 }
 
@@ -2479,20 +2543,6 @@ void drawDiscardConfirm() {
   page.setCursor(30, 320); page.println(lang::tr("No se puede deshacer."));
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, "CONFIRMAR DESCARTE", true, focusIndex == 1, Icon::trash);
-  fullRefresh();
-}
-
-void drawUnlockConfirm() {
-  blankPage();
-  title("ABRIR VAULT", "Semilla activa en RAM");
-  warningIcon(page, 270, 200);
-  textStyle(page, 2); page.setTextDatum(MC_DATUM);
-  page.drawString(lang::tr("Al abrir el vault se descartara"), 270, 360);
-  page.drawString(lang::tr("la semilla que esta activa ahora."), 270, 405);
-  page.drawString(lang::tr("Si no esta guardada, se perdera."), 270, 460);
-  page.setTextDatum(TL_DATUM);
-  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
-  buttonOn(page, kAction, "CONTINUAR", true, focusIndex == 1, Icon::folder);
   fullRefresh();
 }
 
@@ -2993,6 +3043,8 @@ void useBip85Result() {
   char label[16];
   snprintf(label, sizeof(label), "BIP85-%u", bip85Index);
   cacheCurrentSeed(label, false);  // añadir la semilla hija al listado en RAM
+  encrypted_seed_store::wipe(bip85Result, sizeof(bip85Result));
+  memset(bip85Fpr, 0, sizeof(bip85Fpr));
   screen = Screen::active_seed; focusIndex = 0; drawScreen();
 }
 
@@ -4054,8 +4106,8 @@ void drawScreensaver(bool hardLock) {
 }
 
 void lockDevice() {
-  if (sessionUnlocked) lockSessionVault();
-  else if (fingerprintValid) discardActiveSeed();
+  if (sessionUnlocked) wipeSessionState();
+  discardActiveSeed();
   screensaverHardLock = true;
   screen = Screen::locked;
   focusIndex = 0;
@@ -4748,14 +4800,16 @@ bool applySeedIndices(uint16_t indices[24], uint8_t count) {
   if (count != 12 && count != 24) return false;
   if (!bip39::checksum_valid(indices, count)) return false;
 
-  if (fingerprintValid) discardActiveSeed();
+  if (fingerprintValid) cacheCurrentSeed();  // preservar la semilla activa
   resetPhrase(count);
   memcpy(words, indices, count * sizeof(uint16_t));
   wordCount = count;
   targetWords = count;
   prefix = "";
   editingWord = -1;
-  return updateFingerprint();
+  if (!updateFingerprint()) return false;
+  cacheCurrentSeed(nullptr, false);  // añadir la semilla importada como RAM
+  return true;
 }
 
 bool loadSeedText(const std::vector<uint8_t>& data) {
@@ -5369,7 +5423,6 @@ void drawScreen() {
     case Screen::vault_password: drawVaultPassword(); break;
     case Screen::vault_result: drawVaultResult(); break;
     case Screen::vault_label: drawVaultLabel(); break;
-    case Screen::vault_list: drawVaultList(); break;
     case Screen::vault_unlock: drawVaultUnlock(); break;
     case Screen::vault_loaded: drawVaultLoaded(); break;
     case Screen::session_menu: drawSessionMenu(); break;
@@ -5380,7 +5433,6 @@ void drawScreen() {
     case Screen::address_index_input: drawAddressIndexInput(); break;
     case Screen::address_qr: drawAddressQr(); break;
     case Screen::discard_confirm: drawDiscardConfirm(); break;
-    case Screen::unlock_confirm: drawUnlockConfirm(); break;
     case Screen::session_lock_warning: drawSessionLockWarning(); break;
     case Screen::help: drawHelp(); break;
     case Screen::diagnostics: drawDiagnostics(); break;
@@ -5480,6 +5532,33 @@ void updateFocusButton(uint8_t index) {
                      index == focusIndex, kBackupIcons[index]);
       }
       break;
+    case Screen::seed_switcher: {
+      const bool ramActive = activeSeedIsRam();
+      if (index < loadedSeedCount) {
+        String name = loadedSeeds[index].fingerprint;
+        name += "  ";
+        if (loadedSeeds[index].inVault)
+          name += loadedSeeds[index].label[0] ? loadedSeeds[index].label : "SIN ETIQUETA";
+        else name += "[RAM]";
+        updateButton(kVaultFiles[index], name.c_str(), true,
+                     activeLoadedSeed == static_cast<int8_t>(index) || index == focusIndex);
+      } else if (index == loadedSeedCount) {
+        updateButton(kSessionNewVault, "GUARDAR EN VAULT", ramActive && sessionUnlocked,
+                     index == focusIndex, Icon::save);
+      } else if (index == loadedSeedCount + 1) {
+        updateButton(kSessionNewEntropy, "DESCARTAR SEED", ramActive,
+                     index == focusIndex, Icon::trash);
+      } else if (index == loadedSeedCount + 2) {
+        updateButton(kSessionNewRam, sessionUnlocked ? "CARGAR DESDE VAULT" : "ABRIR VAULT",
+                     true, index == focusIndex, sessionUnlocked ? Icon::folder : Icon::lock);
+      } else if (index == loadedSeedCount + 3) {
+        updateButton(kSwitcherBack, "VOLVER", true, index == focusIndex);
+      } else {
+        updateButton(kSwitcherAction, "ACTIVAR", loadedSeedCount > 0,
+                     index == focusIndex, Icon::check);
+      }
+      break;
+    }
     case Screen::vault_actions:
       if (index == 0) updateButton(kActiveMenu[0], "CARGAR SEMILLA", true, index == focusIndex, Icon::folder);
       else if (index == 1) updateButton(kActiveMenu[1], "GUARDAR SEMILLA ACTIVA", fingerprintValid, index == focusIndex, Icon::save);
@@ -5572,13 +5651,6 @@ void updateFocusButton(uint8_t index) {
           index == 0 ? "CANCELAR" : "CONTINUAR",
           index == 0 || vaultLabel[0], index == focusIndex,
           index == 0 ? Icon::none : Icon::check); break;
-    case Screen::vault_list:
-      if (index < vaultFileCount)
-        updateButton(kVaultFiles[index], vaultDisplayName(index), true, index == focusIndex);
-      else if (index == vaultFileCount) updateButton(kBack, "VOLVER", true, index == focusIndex);
-      else updateButton(kAction, vaultDeleteMode ? "CANCELAR ELIMINACION" : "MODO ELIMINAR",
-                        vaultFileCount > 0, index == focusIndex, Icon::trash);
-      break;
     case Screen::vault_unlock:
       updateButton(index == 0 ? kBack : kAction,
           index == 0 ? "VOLVER" : "DESBLOQUEAR",
@@ -5648,12 +5720,7 @@ void updateFocusButton(uint8_t index) {
       updateButton(index == 0 ? kBack : kAction,
                    index == 0 ? "CANCELAR" : "CONFIRMAR DESCARTE",
                    true, index == focusIndex,
-                   index == 0 ? Icon::none : Icon::trash); break;
-    case Screen::unlock_confirm:
-      updateButton(index == 0 ? kBack : kAction,
-                   index == 0 ? "CANCELAR" : "CONTINUAR",
-                   true, index == focusIndex,
-                   index == 0 ? Icon::none : Icon::folder); break;
+                    index == 0 ? Icon::none : Icon::trash); break;
     case Screen::diagnostics: break;
     case Screen::scan_qr: {
       const auto p = qrClient.phase();
@@ -5942,7 +6009,7 @@ void moveFocus(int direction) {
   const uint8_t previous = focusIndex;
   uint8_t count = 1;
   if (screen == Screen::active_seed) count = static_cast<uint8_t>(activeMenuIndex() + 1);
-  else if (screen == Screen::seed_switcher) count = loadedSeedCount + 1;
+  else if (screen == Screen::seed_switcher) count = loadedSeedCount + 5;
   else if (screen == Screen::backup_seed) count = sessionUnlocked ? 5 : 6;
   else if (screen == Screen::vault_actions) count = 4;
   else if (screen == Screen::public_key) count = 4;
@@ -6004,7 +6071,6 @@ void moveFocus(int direction) {
   else if (screen == Screen::animated_qr) count = 1;
   else if (screen == Screen::tx_review) count = fingerprintValid ? 3 : 2;
   else if (screen == Screen::utxo_detail) count = 1;
-  else if (screen == Screen::vault_list) count = vaultFileCount + 2;
   else if (screen == Screen::session_menu) count = 4;
   else if (screen == Screen::session_meta_list) count = sessionMetaCount + 1;
   else if (screen == Screen::session_seed_list) count = sessionDeleteMode ? sessionSeedCount + 2 : sessionSeedCount + 5;
@@ -6018,8 +6084,7 @@ void moveFocus(int direction) {
            screen == Screen::vault_label || screen == Screen::vault_unlock ||
            screen == Screen::passphrase_input ||
            screen == Screen::address_index_input ||
-           screen == Screen::delete_confirm || screen == Screen::discard_confirm ||
-           screen == Screen::unlock_confirm) count = 2;
+           screen == Screen::delete_confirm || screen == Screen::discard_confirm) count = 2;
   else if (screen == Screen::address_explorer) count = 7;
   focusIndex = static_cast<uint8_t>((focusIndex + direction + count) % count);
   if (screen == Screen::menu) {
@@ -6043,6 +6108,10 @@ void discardActiveSeed() {
   encrypted_seed_store::wipe(vaultConfirmation, sizeof(vaultConfirmation));
   memset(vaultLabel, 0, sizeof(vaultLabel));
   encrypted_seed_store::wipe(loadedSeeds, sizeof(loadedSeeds));
+  encrypted_seed_store::wipe(bip85Result, sizeof(bip85Result));
+  memset(bip85Fpr, 0, sizeof(bip85Fpr));
+  for (uint8_t i = 0; i < 16; ++i) slip39Shares[i] = "";
+  slip39ShareCount = 0;
   loadedSeedCount = 0; activeLoadedSeed = -1;
   prefix = ""; wordCount = 0; editingWord = -1;
   clearFingerprint();
@@ -6067,13 +6136,10 @@ void click(int x, int y) {
       screen != Screen::passphrase_input &&
       screen != Screen::scan_qr &&
       kFingerprintBadge.contains(x, y)) {
-    if (sessionUnlocked) {
-      cacheCurrentSeed();
-      screen = Screen::seed_switcher;
-      focusIndex = activeLoadedSeed >= 0 ? static_cast<uint8_t>(activeLoadedSeed) : 0;
-      drawScreen();
-    }
-    else openPublicKey(gSettings.defaultProfile);
+    cacheCurrentSeed();
+    screen = Screen::seed_switcher;
+    focusIndex = activeLoadedSeed >= 0 ? static_cast<uint8_t>(activeLoadedSeed) : 0;
+    drawScreen();
     return;
   }
   if (screen == Screen::menu) {
@@ -6104,7 +6170,10 @@ void click(int x, int y) {
     else if (kActiveMenu[3].contains(x, y)) { openAddressExplorer(); }
     else if (kActiveMenu[4].contains(x, y)) {
       if (sessionUnlocked) { screen = Screen::vault_actions; focusIndex = 0; drawScreen(); }
-      else { screen = Screen::discard_confirm; focusIndex = 0; drawScreen(); }
+      else {
+        discardReturnScreen = Screen::active_seed; discardReturnFocus = 4;
+        screen = Screen::discard_confirm; focusIndex = 0; drawScreen();
+      }
     }
     else if (gSettings.onlineEnabled && kActiveMenu[5].contains(x, y)) { openBalanceConsent(); }
     else if (gSettings.onlineEnabled && kActiveMenu[6].contains(x, y))
@@ -6125,7 +6194,23 @@ void click(int x, int y) {
       if (activateLoadedSeed(i)) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
       return;
     }
-    if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
+    if (kSessionNewVault.contains(x, y)) {
+      if (sessionUnlocked && activeSeedIsRam()) beginSessionSave();
+    } else if (kSessionNewEntropy.contains(x, y)) {
+      if (activeSeedIsRam()) {
+        discardReturnScreen = Screen::seed_switcher; discardReturnFocus = 0;
+        screen = Screen::discard_confirm; focusIndex = 0; drawScreen();
+      }
+    } else if (kSessionNewRam.contains(x, y)) {
+      if (sessionUnlocked) { screen = Screen::session_seed_list; focusIndex = 0; drawScreen(); }
+      else { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
+    } else if (kSwitcherBack.contains(x, y)) {
+      screen = Screen::active_seed; focusIndex = 0; drawScreen();
+    } else if (kSwitcherAction.contains(x, y)) {
+      if (focusIndex < loadedSeedCount && activateLoadedSeed(focusIndex)) {
+        screen = Screen::active_seed; focusIndex = 0; drawScreen();
+      }
+    }
   } else if (screen == Screen::passphrase_input) {
     char* value = currentPassphraseEntry(); size_t length = strlen(value);
     const char key = passphraseKeyAt(x, y);
@@ -6349,81 +6434,62 @@ void click(int x, int y) {
     }
   } else if (screen == Screen::vault_label) {
     const size_t length = strlen(vaultLabel);
-    const char key = keyAt(x, y);
+    const char key = vaultKeyAt(x, y);
     if (key && length < 16) {
       vaultLabel[length] = key; vaultLabel[length + 1] = '\0';
       updateVaultLabelDynamic(length == 0);
     } else if (kDelete.contains(x, y) && length) {
       vaultLabel[length - 1] = '\0'; updateVaultLabelDynamic(length == 1);
+    } else if (kVaultMode.contains(x, y)) {
+      vaultKeyboardMode = (vaultKeyboardMode + 1) % 4; drawVaultLabel();
     } else if ((kAdd.contains(x, y) || kAction.contains(x, y)) && vaultLabel[0]) {
       if (vaultFlow == VaultFlow::session_save_seed) saveSeedToSession();
       else { screen = Screen::vault_password; focusIndex = 0; drawVaultPassword(); }
     } else if (kBack.contains(x, y)) {
       memset(vaultLabel, 0, sizeof(vaultLabel));
-      if (vaultFlow == VaultFlow::individual) { screen = Screen::backup_seed; focusIndex = 4; }
-      else { screen = Screen::session_menu; focusIndex = 0; }
+      screen = Screen::session_menu; focusIndex = 0;
       drawScreen();
     }
-  } else if (screen == Screen::vault_list) {
-    for (uint8_t i = 0; i < vaultFileCount; ++i) {
-      if (kVaultFiles[i].contains(x, y)) {
-        if (vaultDeleteMode) {
-          strncpy(pendingDeletePath, vaultFiles[i], sizeof(pendingDeletePath) - 1);
-          pendingDeleteSession = false; deleteFailed = false;
-          screen = Screen::delete_confirm; focusIndex = 0; drawScreen(); return;
-        }
-        selectedVaultFile = i; memset(vaultPassword, 0, sizeof(vaultPassword));
-        vaultUnlockError = false; vaultRevealUntil = 0;
-        screen = Screen::vault_unlock; focusIndex = 0; drawVaultUnlock(); return;
-      }
-    }
-    if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 2; drawScreen(); }
-    else if (kAction.contains(x, y) && vaultFileCount) {
-      vaultDeleteMode = !vaultDeleteMode; focusIndex = 0; drawScreen();
-    }
   } else if (screen == Screen::vault_unlock) {
-    const size_t length = strlen(vaultPassword); const char key = keyAt(x, y);
+    const size_t length = strlen(vaultPassword); const char key = vaultKeyAt(x, y);
     if (key && length < 24) {
       vaultPassword[length] = key; vaultPassword[length + 1] = '\0';
       vaultUnlockError = false; updateVaultPasswordDynamic(length == 0);
     } else if (kDelete.contains(x, y) && length) {
       vaultPassword[length - 1] = '\0'; updateVaultPasswordDynamic(length == 1);
+    } else if (kVaultMode.contains(x, y)) {
+      vaultKeyboardMode = (vaultKeyboardMode + 1) % 4; drawVaultUnlock();
     } else if ((kAdd.contains(x, y) || kAction.contains(x, y)) && length) {
-      if (fingerprintValid) {
-        unlockConfirmIsSession = (vaultFlow == VaultFlow::session_unlock ||
-                                  vaultFlow == VaultFlow::twofa_migrate);
-        screen = Screen::unlock_confirm; focusIndex = 0; drawScreen();
-      } else if (vaultFlow == VaultFlow::session_unlock ||
-                 vaultFlow == VaultFlow::twofa_migrate) unlockSessionVault();
-      else loadSelectedVault();
+      unlockSessionVault();
     } else if (kVaultReveal.contains(x, y) && length) {
       vaultRevealUntil = millis() + 3000; updateVaultPasswordDynamic();
       updateButton(kVaultReveal, "VISIBLE 3 SEG.", true, true, Icon::eye, UPDATE_MODE_A2);
     } else if (kBack.contains(x, y)) {
       encrypted_seed_store::wipe(vaultPassword, sizeof(vaultPassword));
-      if (vaultFlow == VaultFlow::session_unlock) {
-        screen = Screen::session_meta_list; focusIndex = selectedSessionFile;
-      } else if (vaultFlow == VaultFlow::twofa_migrate) {
+      if (vaultFlow == VaultFlow::twofa_migrate) {
         twoFaMigrating = false;
         screen = Screen::twofa_migrate_list; focusIndex = selectedSessionFile;
-      } else { screen = Screen::vault_list; focusIndex = selectedVaultFile; }
+      } else {
+        screen = Screen::session_meta_list; focusIndex = selectedSessionFile;
+      }
       drawScreen();
     }
   } else if (screen == Screen::vault_password) {
     char* value = activeVaultPassword();
     size_t length = strlen(value);
-    const char key = keyAt(x, y);
+    const char key = vaultKeyAt(x, y);
     if (key && length < 24) {
       value[length] = key; value[length + 1] = '\0';
       updateVaultPasswordDynamic(length == 11);
     } else if (kDelete.contains(x, y) && length) {
       value[length - 1] = '\0'; updateVaultPasswordDynamic(length == 12);
+    } else if (kVaultMode.contains(x, y)) {
+      vaultKeyboardMode = (vaultKeyboardMode + 1) % 4; drawVaultPassword();
     } else if ((kAdd.contains(x, y) || kAction.contains(x, y)) && length >= 12) {
       if (!vaultConfirmPhase) {
         vaultConfirmPhase = true; vaultRevealUntil = 0;
         focusIndex = 0; drawVaultPassword();
-      } else if (vaultFlow == VaultFlow::session_create) createSessionVault();
-      else saveVault();
+      } else createSessionVault();
     } else if (kVaultReveal.contains(x, y) && length) {
       vaultRevealUntil = millis() + 3000;
       updateVaultPasswordDynamic();
@@ -6435,12 +6501,7 @@ void click(int x, int y) {
       screen = Screen::vault_label; focusIndex = 1; drawScreen();
     }
   } else if (screen == Screen::vault_result) {
-    if (kAction.contains(x, y)) {
-      if (vaultFlow == VaultFlow::session_save_seed || vaultFlow == VaultFlow::session_create) {
-        screen = Screen::session_menu; focusIndex = 0;
-      } else { screen = Screen::backup_seed; focusIndex = 4; }
-      drawScreen();
-    }
+    if (kAction.contains(x, y)) { screen = Screen::session_menu; focusIndex = 0; drawScreen(); }
   } else if (screen == Screen::vault_loaded) {
     if (kAction.contains(x, y)) {
       screen = Screen::active_seed; focusIndex = 0; drawScreen();
@@ -6557,7 +6618,7 @@ void click(int x, int y) {
       if (pendingDeleteTx) {
         pendingDeleteTx = false; deleteAllTx = false; screen = Screen::tx_history;
       } else {
-        screen = pendingDeleteSession ? Screen::session_seed_list : Screen::vault_list;
+        screen = Screen::session_seed_list;
       }
       focusIndex = 0; drawScreen();
     } else if (kAction.contains(x, y)) {
@@ -6574,10 +6635,9 @@ void click(int x, int y) {
           scanTxFiles(); screen = Screen::tx_history; focusIndex = 0; drawScreen();
         } else { deleteFailed = true; focusIndex = 0; drawScreen(); }
       } else if (SD.remove(pendingDeletePath)) {
-        Serial.printf("Archivo Vault eliminado: %s\n", pendingDeletePath);
+        Serial.printf("Registro de sesion eliminado: %s\n", pendingDeletePath);
         memset(pendingDeletePath, 0, sizeof(pendingDeletePath)); deleteFailed = false;
-        if (pendingDeleteSession) { scanSessionSeeds(); screen = Screen::session_seed_list; }
-        else { scanVaultFiles(); screen = Screen::vault_list; }
+        scanSessionSeeds(); screen = Screen::session_seed_list;
         focusIndex = 0; drawScreen();
       } else { deleteFailed = true; focusIndex = 0; drawScreen(); }
     }
@@ -6622,17 +6682,15 @@ void click(int x, int y) {
       screen = Screen::address_explorer; focusIndex = 3; drawScreen();
     }
   } else if (screen == Screen::discard_confirm) {
-    if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = 4; drawScreen(); }
+    if (kBack.contains(x, y)) { screen = discardReturnScreen; focusIndex = discardReturnFocus; drawScreen(); }
     else if (kAction.contains(x, y)) {
       const bool anotherActive = discardCurrentSeed();
-      screen = anotherActive ? Screen::active_seed : Screen::menu;
-      focusIndex = 0; drawScreen();
-    }
-  } else if (screen == Screen::unlock_confirm) {
-    if (kBack.contains(x, y)) { screen = Screen::vault_unlock; focusIndex = 1; drawScreen(); }
-    else if (kAction.contains(x, y)) {
-      if (unlockConfirmIsSession) unlockSessionVault();
-      else loadSelectedVault();
+      if (discardReturnScreen == Screen::seed_switcher) {
+        focusIndex = 0; screen = Screen::seed_switcher; drawScreen();
+      } else {
+        screen = anotherActive ? Screen::active_seed : Screen::menu;
+        focusIndex = 0; drawScreen();
+      }
     }
   } else if (screen == Screen::scan_qr) {
     const auto p = qrClient.phase();
@@ -6868,7 +6926,11 @@ void click(int x, int y) {
       screen = Screen::tools_menu; focusIndex = 2; drawScreen();
     }
   } else if (screen == Screen::bip85_result) {
-    if (kBack.contains(x, y)) { screen = Screen::tools_menu; focusIndex = 0; drawScreen(); }
+    if (kBack.contains(x, y)) {
+      encrypted_seed_store::wipe(bip85Result, sizeof(bip85Result));
+      memset(bip85Fpr, 0, sizeof(bip85Fpr));
+      screen = Screen::tools_menu; focusIndex = 0; drawScreen();
+    }
     else if (kAction.contains(x, y)) useBip85Result();
   } else if (screen == Screen::slip39_split) {
     if (kActiveMenu[0].contains(x, y)) {
@@ -6881,12 +6943,18 @@ void click(int x, int y) {
       drawSlip39Split();
     }
     else if (kActiveMenu[2].contains(x, y)) generateSlip39();
-    else if (kBack.contains(x, y)) { screen = Screen::tools_menu; focusIndex = 1; drawScreen(); }
+    else if (kBack.contains(x, y)) {
+      for (uint8_t i = 0; i < 16; ++i) slip39Shares[i] = "";
+      slip39ShareCount = 0;
+      screen = Screen::tools_menu; focusIndex = 1; drawScreen();
+    }
   } else if (screen == Screen::slip39_shares) {
     if (kAction.contains(x, y)) {
       slip39Current = (slip39Current + 1) % slip39ShareCount;
       drawSlip39Shares();
     } else if (kBack.contains(x, y)) {
+      for (uint8_t i = 0; i < 16; ++i) slip39Shares[i] = "";
+      slip39ShareCount = 0;
       screen = Screen::slip39_split; focusIndex = 2; drawScreen();
     }
   }
@@ -6897,7 +6965,13 @@ void activateFocus() {
   else if (screen == Screen::active_seed) click(kActiveMenu[focusIndex].x + 5, kActiveMenu[focusIndex].y + 5);
   else if (screen == Screen::vault_actions) click(kActiveMenu[focusIndex].x + 5, kActiveMenu[focusIndex].y + 5);
   else if (screen == Screen::seed_switcher) {
-    const Rect& r = focusIndex < loadedSeedCount ? kVaultFiles[focusIndex] : kBack;
+    Rect r = kSwitcherBack;
+    if (focusIndex < loadedSeedCount) r = kVaultFiles[focusIndex];
+    else if (focusIndex == loadedSeedCount) r = kSessionNewVault;
+    else if (focusIndex == loadedSeedCount + 1) r = kSessionNewEntropy;
+    else if (focusIndex == loadedSeedCount + 2) r = kSessionNewRam;
+    else if (focusIndex == loadedSeedCount + 3) r = kSwitcherBack;
+    else r = kSwitcherAction;
     click(r.x + 5, r.y + 5);
   }
   else if (screen == Screen::passphrase_input) {
@@ -6946,10 +7020,6 @@ void activateFocus() {
   } else if (screen == Screen::vault_label) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
-  } else if (screen == Screen::vault_list) {
-    const Rect& r = focusIndex < vaultFileCount ? kVaultFiles[focusIndex] :
-                    focusIndex == vaultFileCount ? kBack : kAction;
-    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::vault_unlock) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
@@ -6989,9 +7059,6 @@ void activateFocus() {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::discard_confirm) {
-    const Rect& r = focusIndex == 0 ? kBack : kAction;
-    click(r.x + 5, r.y + 5);
-  } else if (screen == Screen::unlock_confirm) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::scan_qr) {
@@ -7187,6 +7254,14 @@ void loop() {
     return;
   }
 
+  if (screen != Screen::session_lock_warning) {
+    const uint32_t unit = cleanCountdownUnit();
+    if (unit != lastCleanUnit) {
+      lastCleanUnit = unit;
+      updateCleanCountdownBadge();
+    }
+  }
+
   if (screen == Screen::animated_qr && bbqrTotalParts > 1 &&
       static_cast<uint32_t>(millis() - bbqrLastFrameMs) >= 1000) {
     bbqrLastFrameMs = millis();
@@ -7323,8 +7398,8 @@ void loop() {
       static_cast<uint32_t>(millis() - lastUserActivity) >= cleanMs) {
     Serial.println("Limpieza de seed por inactividad");
     lastWarnSecond = 0;
-    if (sessionUnlocked) lockSessionVault();
-    else discardActiveSeed();
+    if (sessionUnlocked) wipeSessionState();
+    discardActiveSeed();
     screen = Screen::menu; focusIndex = 0; drawScreen();
     return;
   }

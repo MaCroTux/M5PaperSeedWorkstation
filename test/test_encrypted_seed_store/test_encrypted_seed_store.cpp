@@ -2,6 +2,7 @@
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
 #include "bip39_support.hpp"
+#include "bip39_wordlist.h"
 #include "encrypted_seed_store.hpp"
 #include "helpers.hpp"
 

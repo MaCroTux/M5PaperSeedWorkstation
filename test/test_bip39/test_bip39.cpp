@@ -1,5 +1,6 @@
 #include <unity.h>
 #include "bip39_support.hpp"
+#include "bip39_wordlist.h"
 #include "helpers.hpp"
 
 void setUp(void) {}
