@@ -1,6 +1,8 @@
 #include <unity.h>
 #include "bip39_support.hpp"
 #include "bip39_wordlist.h"
+#include "bitcoin_hd.hpp"
+#include "bip39_vectors.h"
 #include "helpers.hpp"
 
 void setUp(void) {}
@@ -82,6 +84,46 @@ void test_from_entropy(void) {
 
 void test_self_test(void) { TEST_ASSERT_TRUE(bip39::self_test()); }
 
+static void buildMnemonic(const uint16_t* indices, uint8_t count, String& out) {
+  out = "";
+  for (uint8_t i = 0; i < count; ++i) {
+    if (i) out += ' ';
+    out += bip39::word_at(indices[i]);
+  }
+}
+
+// Validacion completa de creacion/restauracion de semilla contra embit:
+// entropia -> mnemonic (from_entropy), checksum, roundtrip to_entropy y
+// mnemonic -> seed (PBKDF2).
+void test_bip39_vectors(void) {
+  for (size_t v = 0; v < kBip39VectorCount; ++v) {
+    const Bip39Vector& vec = kBip39Vectors[v];
+    const std::vector<uint8_t> entropy = testutil::hex(vec.entropyHex);
+    const uint8_t wc = vec.wordCount;
+    const uint8_t entropyBytes = wc == 12 ? 16 : 32;
+
+    uint16_t indices[24] = {};
+    TEST_ASSERT_TRUE(bip39::from_entropy(entropy.data(), entropyBytes, indices, wc));
+
+    String mnemonic;
+    buildMnemonic(indices, wc, mnemonic);
+    TEST_ASSERT_TRUE(mnemonic.equals(vec.mnemonic));
+
+    TEST_ASSERT_TRUE(bip39::checksum_valid(indices, wc));
+
+    uint8_t back[32] = {};
+    TEST_ASSERT_TRUE(bip39::to_entropy(indices, wc, back));
+    TEST_ASSERT_TRUE(testutil::eq(back, entropy.data(), entropyBytes));
+
+    uint8_t seed[64] = {};
+    TEST_ASSERT_TRUE(bitcoin_hd::mnemonic_seed(indices, wc, seed, ""));
+    const std::vector<uint8_t> expSeed = testutil::hex(vec.seedHex);
+    TEST_ASSERT_TRUE(testutil::eq(seed, expSeed.data(), 64));
+    bitcoin_hd::wipe(seed, 64);
+    bitcoin_hd::wipe(back, 32);
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_word_at);
@@ -91,5 +133,6 @@ int main(void) {
   RUN_TEST(test_checksum_valid);
   RUN_TEST(test_from_entropy);
   RUN_TEST(test_self_test);
+  RUN_TEST(test_bip39_vectors);
   return UNITY_END();
 }
