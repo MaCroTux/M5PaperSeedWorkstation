@@ -265,6 +265,10 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
           tx.inputs[inIdx].amount = o.value;
           tx.inputs[inIdx].amountKnown = true;
           tx.inputs[inIdx].address = o.address;
+          if (o.scriptLen <= sizeof(tx.inputs[inIdx].utxoScript)) {
+            memcpy(tx.inputs[inIdx].utxoScript, o.script, o.scriptLen);
+            tx.inputs[inIdx].utxoScriptLen = o.scriptLen;
+          }
         }
       } else if (keyLen >= 1 && key[0] == 0x06 && valLen >= 4) {
         // BIP32 derivation: key = {0x06}|{pubkey(33)}, value = {fpr(4)}|{path}.

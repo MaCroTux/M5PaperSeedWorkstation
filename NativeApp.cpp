@@ -4088,7 +4088,7 @@ void beginSignTx() {
   signedPsbtBase64 = "";
   signedTxBytes.clear();
   std::vector<uint8_t> finalizedPsbt;
-  if (tx_sign::signSegwitP2wpkh(parsedTx, words, targetWords,
+  if (tx_sign::signSingleSig(parsedTx, words, targetWords,
         passphraseActive ? activePassphrase : "", signedTxBytes, &finalizedPsbt)) {
     signedTxHex = hexEncode(signedTxBytes);
     signedPsbtBase64 = base64Encode(finalizedPsbt);
@@ -4561,7 +4561,7 @@ void handleTxSign() {
                     res.totalSigs, res.needed, b64.c_str());
     }
   } else {
-    const bool ok = tx_sign::signSegwitP2wpkh(parsedTx, words, targetWords,
+    const bool ok = tx_sign::signSingleSig(parsedTx, words, targetWords,
         passphraseActive ? activePassphrase : "", signedTx, &finalizedPsbt);
     if (ok) {
       const String hex = hexEncode(signedTx);

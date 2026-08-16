@@ -2,6 +2,7 @@
 #include "tx_sign.hpp"
 #include "helpers.hpp"
 #include "krux_vectors.h"
+#include "krux_p2pkh.h"
 
 void setUp(void) { host::seedRandom(0x12345678u); }
 
@@ -126,6 +127,33 @@ void test_krux_p2wpkh(void) {
   signAndCheck(P2WPKH_PSBT_HEX, P2WPKH_PUB_HEX, P2WPKH_SIGHASH_HEX, false, nullptr);
 }
 
+void test_krux_p2pkh(void) {
+  const std::vector<uint8_t> raw = testutil::hex(P2PKH_PSBT_HEX);
+  psbt::ParsedTx tx;
+  TEST_ASSERT_TRUE(psbt::tryParsePsbt(raw, tx));
+  TEST_ASSERT_TRUE(tx.inputs.size() == 3);
+
+  std::vector<uint8_t> signedTx;
+  std::vector<tx_sign::InputSig> sigs;
+  TEST_ASSERT_TRUE(tx_sign::signLegacyP2pkh(tx, KRUX_WORDS, 12, "", signedTx, nullptr, &sigs));
+  TEST_ASSERT_TRUE(sigs.size() == 3);
+
+  // Los sighash legacy y la pubkey deben coincidir con embit.
+  const char* expSh[3] = {P2PKH_SIGHASH0_HEX, P2PKH_SIGHASH1_HEX, P2PKH_SIGHASH2_HEX};
+  for (int i = 0; i < 3; ++i) {
+    const auto sh = testutil::hex(expSh[i]);
+    TEST_ASSERT_TRUE(testutil::eq(sigs[i].sighash, sh.data(), 32));
+  }
+  const auto pub = testutil::hex(P2PKH_PUB_HEX);
+  for (int i = 0; i < 3; ++i) {
+    TEST_ASSERT_TRUE(testutil::eq(sigs[i].pub, pub.data(), 33));
+    // scriptSig = push(sig) || push(pubkey): byte 0 = len(sig), luego sig, 0x21, pub.
+    TEST_ASSERT_TRUE(sigs[i].scriptSig[0] == sigs[i].derLen);
+    TEST_ASSERT_TRUE(sigs[i].scriptSig[1 + sigs[i].derLen] == 0x21);
+    TEST_ASSERT_TRUE(sigs[i].scriptSigLen == 1 + sigs[i].derLen + 1 + 33);
+  }
+}
+
 void test_krux_p2sh_p2wpkh(void) {
   signAndCheck(P2SH_P2WPKH_PSBT_HEX, P2SH_P2WPKH_PUB_HEX, P2SH_P2WPKH_SIGHASH_HEX,
                true, P2SH_P2WPKH_REDEEM_HEX);
@@ -141,5 +169,6 @@ int main(void) {
   RUN_TEST(test_self_test);
   RUN_TEST(test_krux_p2wpkh);
   RUN_TEST(test_krux_p2sh_p2wpkh);
+  RUN_TEST(test_krux_p2pkh);
   return UNITY_END();
 }

@@ -370,6 +370,42 @@ inline bool sighashSegwit(const psbt::ParsedTx& tx, size_t inputIndex,
   return true;
 }
 
+// Sighash legacy (pre-SegWit) con SIGHASH_ALL, para P2PKH. El scriptCode es el
+// scriptPubKey del UTXO gastado (76a914{20}88ac).
+inline bool sighashLegacy(const psbt::ParsedTx& tx, size_t inputIndex,
+                          const uint8_t* scriptCode, size_t scriptCodeLen,
+                          uint8_t out[32]) {
+  if (inputIndex >= tx.inputs.size()) return false;
+  std::vector<uint8_t> buf;
+  buf.reserve(tx.inputs.size() * 80 + tx.outputs.size() * 100 + 200);
+
+  for (int b = 0; b < 4; ++b) buf.push_back((tx.version >> (8 * b)) & 0xff);
+  buf.push_back(static_cast<uint8_t>(tx.inputs.size()));
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    const auto& in = tx.inputs[i];
+    buf.insert(buf.end(), in.prevTxid, in.prevTxid + 32);
+    for (int b = 0; b < 4; ++b) buf.push_back((in.prevVout >> (8 * b)) & 0xff);
+    if (i == inputIndex) {
+      buf.push_back(static_cast<uint8_t>(scriptCodeLen));
+      buf.insert(buf.end(), scriptCode, scriptCode + scriptCodeLen);
+    } else {
+      buf.push_back(0x00);  // scriptSig vacio en el resto de inputs
+    }
+    for (int b = 0; b < 4; ++b) buf.push_back((in.sequence >> (8 * b)) & 0xff);
+  }
+  buf.push_back(static_cast<uint8_t>(tx.outputs.size()));
+  for (const auto& o : tx.outputs) {
+    for (int b = 0; b < 8; ++b) buf.push_back((o.value >> (8 * b)) & 0xff);
+    if (o.scriptLen < 0xfd) buf.push_back(o.scriptLen);
+    else { buf.push_back(0xfd); buf.push_back(o.scriptLen & 0xff); buf.push_back(o.scriptLen >> 8); }
+    buf.insert(buf.end(), o.script, o.script + o.scriptLen);
+  }
+  for (int b = 0; b < 4; ++b) buf.push_back((tx.locktime >> (8 * b)) & 0xff);
+  buf.push_back(0x01); buf.push_back(0x00); buf.push_back(0x00); buf.push_back(0x00);
+  sha256d(buf.data(), buf.size(), out);
+  return true;
+}
+
 // Determina el proposito (44/49/84/86) a partir del scriptPubKey.
 inline bool scriptPurpose(const uint8_t* script, size_t len, uint32_t& purpose) {
   if (len == 22 && script[0] == 0x00 && script[1] == 0x14) { purpose = 84; return true; }  // P2WPKH
@@ -493,8 +529,8 @@ struct InputSig {
   uint8_t der[73] = {};
   size_t derLen = 0;
   uint8_t pub[33] = {};
-  uint8_t sighash[32] = {};     // BIP143 sighash firmado (para validacion)
-  uint8_t scriptSig[40] = {};   // solo para P2SH-P2WPKH (push del redeemScript)
+  uint8_t sighash[32] = {};     // BIP143/legacy sighash firmado (para validacion)
+  uint8_t scriptSig[120] = {};  // P2SH-P2WPKH (push redeemScript) o P2PKH (push sig + pub)
   size_t scriptSigLen = 0;
 };
 
@@ -524,6 +560,30 @@ inline void serializeSignedTx(const psbt::ParsedTx& tx, const std::vector<InputS
     out.insert(out.end(), s.der, s.der + s.derLen);
     pushVarint(out, 33);
     out.insert(out.end(), s.pub, s.pub + 33);
+  }
+  for (int b = 0; b < 4; ++b) out.push_back((tx.locktime >> (8 * b)) & 0xff);
+}
+
+// Serializa la transaccion firmada legacy (P2PKH): SIN marker/flag ni witness.
+inline void serializeSignedLegacyTx(const psbt::ParsedTx& tx,
+                                    const std::vector<InputSig>& sigs,
+                                    std::vector<uint8_t>& out) {
+  out.clear();
+  for (int b = 0; b < 4; ++b) out.push_back((tx.version >> (8 * b)) & 0xff);
+  pushVarint(out, tx.inputs.size());
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    const auto& in = tx.inputs[i];
+    out.insert(out.end(), in.prevTxid, in.prevTxid + 32);
+    for (int b = 0; b < 4; ++b) out.push_back((in.prevVout >> (8 * b)) & 0xff);
+    pushVarint(out, sigs[i].scriptSigLen);
+    out.insert(out.end(), sigs[i].scriptSig, sigs[i].scriptSig + sigs[i].scriptSigLen);
+    for (int b = 0; b < 4; ++b) out.push_back((in.sequence >> (8 * b)) & 0xff);
+  }
+  pushVarint(out, tx.outputs.size());
+  for (const auto& o : tx.outputs) {
+    for (int b = 0; b < 8; ++b) out.push_back((o.value >> (8 * b)) & 0xff);
+    pushVarint(out, o.scriptLen);
+    out.insert(out.end(), o.script, o.script + o.scriptLen);
   }
   for (int b = 0; b < 4; ++b) out.push_back((tx.locktime >> (8 * b)) & 0xff);
 }
@@ -580,6 +640,29 @@ inline void buildFinalizedPsbt(const psbt::ParsedTx& tx, const std::vector<Input
     out.push_back(0x00);
   }
   for (size_t i = 0; i < tx.outputs.size(); ++i) out.push_back(0x00);  // output maps vacios
+}
+
+// Construye un PSBT finalizado legacy (P2PKH): solo final_scriptSig (0x07),
+// sin witness.
+inline void buildFinalizedLegacyPsbt(const psbt::ParsedTx& tx,
+                                     const std::vector<InputSig>& sigs,
+                                     std::vector<uint8_t>& out) {
+  std::vector<uint8_t> unsignedTx;
+  serializeUnsignedTx(tx, unsignedTx);
+  out.clear();
+  const uint8_t magic[5] = {0x70, 0x73, 0x62, 0x74, 0xff};
+  out.insert(out.end(), magic, magic + 5);
+  out.push_back(0x01); out.push_back(0x00);
+  pushVarint(out, unsignedTx.size());
+  out.insert(out.end(), unsignedTx.begin(), unsignedTx.end());
+  out.push_back(0x00);
+  for (const auto& s : sigs) {
+    out.push_back(0x01); out.push_back(0x07);  // final_scriptSig
+    pushVarint(out, s.scriptSigLen);
+    out.insert(out.end(), s.scriptSig, s.scriptSig + s.scriptSigLen);
+    out.push_back(0x00);
+  }
+  for (size_t i = 0; i < tx.outputs.size(); ++i) out.push_back(0x00);
 }
 
 // Busca la clave privada cuya direccion coincide con pubkeyHash20 recorriendo el
@@ -750,6 +833,84 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
   if (outSigs) *outSigs = sigs;
   for (auto& s : sigs) bitcoin_hd::wipe(&s, sizeof(s));
   return !signedTx.empty();
+}
+
+// Firma todos los inputs legacy P2PKH (purpose 44, sighash legacy, SIGHASH_ALL).
+// La firma va en el scriptSig (push sig + push pubkey); la TX no es segwit.
+inline bool signLegacyP2pkh(psbt::ParsedTx& tx, const uint16_t* words, size_t count,
+                            const char* passphrase, std::vector<uint8_t>& signedTx,
+                            std::vector<uint8_t>* finalizedPsbt = nullptr,
+                            std::vector<InputSig>* outSigs = nullptr) {
+  std::vector<InputSig> sigs(tx.inputs.size());
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    const auto& in = tx.inputs[i];
+    const bool p2pkh = (in.utxoScriptLen == 25 && in.utxoScript[0] == 0x76 &&
+                        in.utxoScript[1] == 0xa9 && in.utxoScript[2] == 0x14 &&
+                        in.utxoScript[23] == 0x88 && in.utxoScript[24] == 0xac);
+    if (!p2pkh || !in.amountKnown) return false;
+
+    uint8_t key[32] = {}, pub[33] = {};
+    bool haveKey = false;
+    if (in.hasDerivation) {
+      haveKey = deriveKey(words, count, in.derivFpr, in.derivPath, passphrase, key, pub);
+    } else {
+      haveKey = findKeyByAddress(words, count, 44, in.utxoScript + 3, passphrase, key, pub);
+    }
+    if (!haveKey) { bitcoin_hd::wipe(key, 32); return false; }
+
+    uint8_t sighash[32] = {};
+    if (!sighashLegacy(tx, i, in.utxoScript, in.utxoScriptLen, sighash)) {
+      bitcoin_hd::wipe(key, 32); return false;
+    }
+    memcpy(sigs[i].sighash, sighash, 32);
+
+    uint8_t rs[64] = {};
+    if (!sign(key, sighash, rs)) {
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+      return false;
+    }
+    const bool nativeVerify = verify(pub, sighash, rs);
+    sigs[i].derLen = derEncode(rs, rs + 32, sigs[i].der);
+    uint8_t rs2[64] = {};
+    const bool derVerify = derDecode(sigs[i].der, sigs[i].derLen, rs2) &&
+                           verify(pub, sighash, rs2);
+    bitcoin_hd::wipe(rs2, 64);
+    if (!nativeVerify || !derVerify) {
+      bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+      return false;
+    }
+    sigs[i].der[sigs[i].derLen++] = kSighashAll;
+    memcpy(sigs[i].pub, pub, 33);
+
+    // scriptSig = push(sig) || push(pubkey).
+    sigs[i].scriptSig[0] = static_cast<uint8_t>(sigs[i].derLen);
+    memcpy(sigs[i].scriptSig + 1, sigs[i].der, sigs[i].derLen);
+    sigs[i].scriptSig[1 + sigs[i].derLen] = 0x21;  // push 33 bytes (pubkey)
+    memcpy(sigs[i].scriptSig + 2 + sigs[i].derLen, pub, 33);
+    sigs[i].scriptSigLen = 1 + sigs[i].derLen + 1 + 33;
+
+    bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
+  }
+  serializeSignedLegacyTx(tx, sigs, signedTx);
+  if (finalizedPsbt) buildFinalizedLegacyPsbt(tx, sigs, *finalizedPsbt);
+  if (outSigs) *outSigs = sigs;
+  for (auto& s : sigs) bitcoin_hd::wipe(&s, sizeof(s));
+  return !signedTx.empty();
+}
+
+// Firma single-sig: enruta segun el tipo de input (P2WPKH/P2SH-P2WPKH -> BIP143,
+// P2PKH -> legacy).
+inline bool signSingleSig(psbt::ParsedTx& tx, const uint16_t* words, size_t count,
+                          const char* passphrase, std::vector<uint8_t>& signedTx,
+                          std::vector<uint8_t>* finalizedPsbt = nullptr) {
+  if (tx.inputs.empty()) return false;
+  const auto& in = tx.inputs[0];
+  const bool p2pkh = (in.utxoScriptLen == 25 && in.utxoScript[0] == 0x76 &&
+                      in.utxoScript[1] == 0xa9 && in.utxoScript[2] == 0x14 &&
+                      in.utxoScript[23] == 0x88 && in.utxoScript[24] == 0xac);
+  if (p2pkh)
+    return signLegacyP2pkh(tx, words, count, passphrase, signedTx, finalizedPsbt);
+  return signSegwitP2wpkh(tx, words, count, passphrase, signedTx, finalizedPsbt);
 }
 
 // Self-test: RFC6979 + ECDSA secp256k1 con el vector del RFC 6979 (SHA-256,
