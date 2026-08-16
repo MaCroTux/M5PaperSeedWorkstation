@@ -923,6 +923,8 @@ void drawEntropyLength() {
   fullRefresh();
 }
 
+void mixSensorNoise();
+
 void initEntropy() {
   if (entropySourceActive) bootloader_random_disable();
   bootloader_random_enable();
@@ -937,6 +939,7 @@ void initEntropy() {
   mbedtls_sha256_ret(initialInput, sizeof(initialInput), entropyState, 0);
   encrypted_seed_store::wipe(initialMaterial, sizeof(initialMaterial));
   encrypted_seed_store::wipe(initialInput, sizeof(initialInput));
+  mixSensorNoise();  // añadir ruido de sensores al pool inicial
   entropySamples = 0;
   entropyLastX = entropyLastY = -1;
   if (!entropyCanvasReady) {
@@ -1019,12 +1022,37 @@ void entropyTouch(int screenX, int screenY) {
   }
 }
 
+// Mezcla ruido de sensores de hardware en el pool de entropía:
+// SHT30 (temperatura/humedad, I2C), batería (ADC1) y jitter temporal.
+// Complementa al TRNG del ESP32 (ruido de RF del ADC) y al trazo del usuario.
+void mixSensorNoise() {
+  uint32_t tBits = 0, hBits = 0;
+  if (M5.SHT30.UpdateData() == 0) {
+    const float t = M5.SHT30.GetTemperature();
+    const float h = M5.SHT30.GetRelHumidity();
+    memcpy(&tBits, &t, sizeof(tBits));
+    memcpy(&hBits, &h, sizeof(hBits));
+  }
+  const uint32_t batRaw = M5.getBatteryRaw();
+
+  uint8_t material[96] = {};
+  memcpy(material, entropyState, 32);
+  memcpy(material + 32, "M5PAPER-ENTROPY-V2-SENSOR", 25);
+  const uint32_t values[6] = {tBits, hBits, batRaw,
+                              static_cast<uint32_t>(micros()), esp_random(),
+                              entropySamples};
+  memcpy(material + 60, values, sizeof(values));
+  mbedtls_sha256_ret(material, sizeof(material), entropyState, 0);
+  encrypted_seed_store::wipe(material, sizeof(material));
+}
+
 void drawReview();
 
 void finishEntropy() {
   if (entropySamples < kEntropyTarget || !entropyHealthOk || !entropySourceActive) return;
   uint8_t finalRandom[64] = {}, finalInput[128] = {}, finalEntropy[32] = {};
   esp_fill_random(finalRandom, sizeof(finalRandom));
+  mixSensorNoise();  // último aporte de los sensores antes del hash final
   memcpy(finalInput, entropyState, sizeof(entropyState));
   memcpy(finalInput + 32, "M5PAPER-ENTROPY-V2-FINAL", 24);
   memcpy(finalInput + 64, finalRandom, sizeof(finalRandom));
@@ -7532,6 +7560,7 @@ void drawBootStatus(uint8_t pct, const char* label, const char* detail) {
 void setup() {
   Serial.begin(115200);
   M5.begin();
+  M5.SHT30.Begin();  // sensor de temperatura/humedad (entropia adicional)
   M5.EPD.SetRotation(M5EPD_Driver::ROTATE_90);
   M5.TP.SetRotation(GT911::ROTATE_90);
   pinMode(kRockerLeftPin, INPUT);

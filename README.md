@@ -50,8 +50,9 @@ Documentación en español: [`README_ES.md`](README_ES.md).
   (file or text) or BIP39 seed as text (the latter works with no seed in RAM).
 - **SeedQR import**: recover a seed by scanning with the camera (or pasting via
   WiFi/serial) the same **SeedQR** the backup produces, plus plain-text seeds.
-- **Sign PSBT** (ECDSA RFC6979 + BIP143) and broadcast:
-  - **Single-sig** P2WPKH.
+- **Sign PSBT** (ECDSA RFC6979; BIP143 sighash for segwit, legacy for P2PKH)
+  and broadcast:
+  - **Single-sig**: P2WPKH, P2SH-P2WPKH (nested segwit) and P2PKH (legacy).
   - **Multisig** P2WSH `sortedmulti` (BIP48), 2-of-2 / 2-of-3 / 3-of-3, with
     Sparrow interop; signs with all available Vault seeds in one step.
   - **Sparrow**: static QR (hex of the signed transaction).
@@ -96,7 +97,7 @@ M5Paper decodes and shows the transaction
    ↓
 [ DETAILS ] → list of UTXOs (inputs)
    ↓
-[ SIGN ]    → signs each input (segwit P2WPKH)
+[ SIGN ]    → signs each input (P2WPKH / P2SH-P2WPKH / P2PKH)
    ↓
 [ BROADCAST ] → SPARROW (static hex QR)  |  BLUEWALLET (BBQr QR)
    ↓
@@ -361,7 +362,11 @@ as this section). It's the practical solution for users who prefer not to use Wi
 - [x] WiFi AP reception (captive portal + connection QR) with 3 modes.
 - [x] USB serial reception (`M5PSBT` protocol + SHA256).
 - [x] `UR:CRYPTO-PSBT` decoding (Sparrow QR).
-- [x] PSBT signing (single-sig P2WPKH + multisig P2WSH sortedmulti) + QR (Sparrow/BlueWallet).
+- [x] PSBT signing (single-sig P2WPKH/P2SH-P2WPKH/P2PKH + multisig P2WSH sortedmulti) + QR (Sparrow/BlueWallet).
+- [x] Spanish BIP39 wordlist + seed tools (BIP85, SLIP-39 split/recover).
+- [x] Crypto validated against embit/Krux (BIP32 derivation, BIP143/legacy sighash, BIP39).
+- [ ] Taproot signing (P2TR, BIP340/BIP341).
+- [ ] PSBT v2 (BIP370).
 - [x] SD-persisted settings (language, lock, derivation, radio).
 - [x] Transaction history (save and re-sign received PSBTs).
 - [x] Full EN/ES translation.

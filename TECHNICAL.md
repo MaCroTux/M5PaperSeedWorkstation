@@ -132,9 +132,11 @@ Claves:
 
 ### 4.1 Generación y manejo de la semilla
 
-- **Entropía**: mezcla de entropía física (trazos táctiles o dados) con
-  `esp_fill_random`/`bootloader_random_enable`; el material se acumula mediante
-  SHA-256 y se condensa en `bip39::from_entropy` (16 B → 12 palabras, 32 B → 24).
+- **Entropía**: mezcla de entropía física (trazos táctiles o dados), el TRNG del
+  ESP32 (`esp_fill_random`/`bootloader_random_enable`, ruido de RF) y **sensores
+  de hardware** — SHT30 (temperatura/humedad, I2C), ADC de batería (ADC1) y jitter
+  temporal (`micros()`) —; el material se acumula mediante SHA-256 y se condensa en
+  `bip39::from_entropy` (16 B → 12 palabras, 32 B → 24).
 - **Checksum BIP39**: `bip39::checksum_valid` recalcula los bits de checksum y los
   compara (detecta semillas mal copiadas).
 - **Fingerprint BIP32**: `bitcoin_fingerprint::calculate` (HASH160 de la clave
@@ -148,6 +150,18 @@ Claves:
 - Perfiles soportados: BIP44 (P2PKH), BIP49 (P2SH-SegWit), **BIP84 (native SegWit,
   por defecto)**.
 
+### 4.2 bis Utilidades de semilla (Herramientas)
+
+- **Wordlist BIP39 en español** (`bip39_spanish.h`, 2048 palabras UTF-8 NFC): la
+  semilla se introduce y muestra en el idioma elegido. La coincidencia es
+  insensible a acentos (`abaco` casa con `ábaco`). El idioma se guarda en
+  `device_settings` (v7) y fija `bip39::g_wordlist`.
+- **BIP85** (`bip85.hpp`): semillas hijas deterministas `m/83696968'/39'/lang'/words'/index'`
+  + HMAC `"bip-entropy-from-k"`. Self-test con el vector oficial de BIP85.
+- **SLIP-39** (`slip39.hpp`): Shamir M-de-N (GF(256) + RS1024 + Feistel/PBKDF2) para
+  partir y recuperar la semilla en shares interoperables con Trezor. Self-test con
+  vectores oficiales de SLIP-39.
+
 ### 4.3 Vaults (cifrado en reposo)
 
 - **PBKDF2-HMAC-SHA256 con 600.000 iteraciones**, sal aleatoria de 16 bytes por
@@ -159,16 +173,24 @@ Claves:
   darlo por bueno.
 - Limpieza con `wipe()` (`volatile`) sobre claves, plaintext, buffers y tags.
 
-### 4.4 Firma (segwit v0 / P2WPKH)
+### 4.4 Firma (P2WPKH / P2SH-P2WPKH / P2PKH)
 
 - **Nonce determinista RFC6979** (HMAC-SHA256 sobre el mensaje + clave) + **low-S**
   (BIP62).
-- **Sighash BIP143** para entradas segwit v0.
+- **Sighash**: **BIP143** para entradas segwit v0 (P2WPKH y P2SH-P2WPKH) y
+  **legacy** (pre-SegWit) para P2PKH. El dispatcher `signSingleSig` enruta según el
+  tipo de input.
+- **P2SH-P2WPKH**: `scriptCode` = redeemScript (`0x0014{h}`), `scriptSig` =
+  `push(redeemScript)`, witness = `sig ‖ pub`.
+- **P2PKH**: `scriptCode` = scriptPubKey (`76a914{h}88ac`), `scriptSig` =
+  `push(sig) ‖ push(pub)`, sin witness.
 - Localización de la clave: por derivación (fingerprint maestra + ruta BIP32) o
-  por búsqueda de la dirección en la rama de cambio (para PSBT de BlueWallet que no
-  traen ruta).
-- Finalización del PSBT (se añade `final_scriptSig`/`final_scriptWitness`) y
-  serialización de la transacción.
+  por búsqueda de la dirección en la rama de cambio (para PSBT que no traen ruta).
+- Finalización del PSBT (`final_scriptSig`/`final_scriptWitness`) y serialización
+  de la transacción (segwit o legacy según el caso).
+- **Validada contra embit/Krux**: derivación BIP32, sighash BIP143/legacy y
+  firma ECDSA coinciden byte a byte (la firma puede diferir solo por el
+  *low-R grinding* que embit aplica por defecto; ambas firmas son válidas).
 
 ### 4.5 Self-tests al arranque
 
@@ -355,8 +377,9 @@ automáticamente; los textos dibujados directamente con `page.*` usan `lang::tr(
 ## 10. Problemas conocidos / pendientes
 
 - BBQr sin compresión Base32/zlib (optimización futura).
-- El soporte Taproot (BIP86) fue **eliminado** temporalmente porque su
-  self-test fallaba; queda como trabajo futuro.
+- **Taproot (P2TR)**: firma BIP340/BIP341 aún no implementada (direcciones bech32m
+  ya soportadas). Es el siguiente paso de firma.
+- **PSBT v2 (BIP370)**: parser aún limitado a PSBT v0.
 - Soporte Ethereum (v2.0) — ver [`ETH_v2.0.md`](ETH_v2.0.md), sin implementar.
 - Provisioning M5Stick: el lado **servidor** (firmware del M5Stick) es un proyecto
   aparte; el M5Paper solo implementa el cliente.

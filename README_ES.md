@@ -30,6 +30,14 @@ Documentación en inglés: [`README.md`](README.md).
 - **Explorador de direcciones**: derivar direcciones P2PKH, P2SH y native segwit
   (BIP84), para recepción y cambio, con salto directo a un índice.
 - **Passphrase BIP39** (cambia todas las direcciones derivadas).
+- **Wordlist BIP39 en español** (además del inglés, con plegado de acentos): la
+  semilla se introduce y se muestra en el idioma elegido.
+- **Herramientas de semilla** (menú *Herramientas* dentro de *Semilla activa*):
+  - **BIP85**: derivar semillas hijas deterministas (`m/83696968'/39'/…`) con
+    índice configurable por palanca, mostrando su fingerprint; se añaden al
+    listado de semillas en RAM.
+  - **SLIP-39**: partir la semilla en **M-de-N** shares (Shamir + Feistel/PBKDF2,
+    interop con Trezor) y **recuperarla** desde las shares.
 - **Vault individual**: una semilla cifrada con su propia contraseña (archivo `.vlt`).
 - **Vault de sesión**: varias semillas cifradas bajo una contraseña maestra.
 - **Llave BLE (M5Core2)**: llave criptográfica física que desbloquea el vault de
@@ -52,8 +60,9 @@ Documentación en inglés: [`README.md`](README.md).
 - **Importar SeedQR**: la semilla se puede recuperar escaneando con la cámara (o
   pegando por WiFi/serial) el mismo **SeedQR** que genera el backup, además de una
   semilla en texto plano.
-- **Firmar PSBT** (ECDSA RFC6979 + BIP143) y emitir la transacción:
-  - **Single-sig** P2WPKH.
+- **Firmar PSBT** (ECDSA RFC6979, sighash BIP143 para segwit y legacy para P2PKH)
+  y emitir la transacción:
+  - **Single-sig**: P2WPKH, P2SH-P2WPKH (nested segwit) y P2PKH (legacy).
   - **Multisig** P2WSH `sortedmulti` (BIP48), 2-de-2 / 2-de-3 / 3-de-3, con
     interoperabilidad Sparrow; firma con todas las seeds del Vault en un solo paso.
   - **Sparrow**: QR estático (hex de la transacción firmada).
@@ -99,7 +108,7 @@ M5Paper decodifica y muestra la transacción
    ↓
 [ DETALLE ] → lista de UTXOs (entradas)
    ↓
-[ FIRMAR ]  → firma cada entrada (segwit P2WPKH)
+[ FIRMAR ]  → firma cada entrada (P2WPKH / P2SH-P2WPKH / P2PKH según el tipo)
    ↓
 [ EMITIR ]  → SPARROW (QR estático hex)  |  BLUEWALLET (QR BBQr)
    ↓
@@ -364,13 +373,17 @@ de esta sección). Es la solución práctica para usuarios que prefieren no usar
 - [x] Recepción por WiFi AP (portal cautivo + QR de conexión) con 3 modos.
 - [x] Recepción por serial USB (protocolo `M5PSBT` + SHA256).
 - [x] Decodificación de PSBT `UR:CRYPTO-PSBT` (QR de Sparrow).
-- [x] Firma de PSBT (single-sig P2WPKH + multisig P2WSH sortedmulti) + QR (Sparrow/BlueWallet).
+- [x] Firma de PSBT (single-sig P2WPKH/P2SH-P2WPKH/P2PKH + multisig P2WSH sortedmulti) + QR (Sparrow/BlueWallet).
+- [x] Wordlist BIP39 en español + herramientas de semilla (BIP85, SLIP-39 split/recover).
+- [x] Criptografía validada contra embit/Krux (derivación BIP32, sighash BIP143/legacy, BIP39).
 - [x] Ajustes persistentes en SD (idioma, bloqueo, derivación, radio).
 - [x] Historial de transacciones (guardar y volver a firmar PSBT recibidas).
 - [x] Traducción completa EN/ES.
 - [x] Llave BLE (M5Core2) + PIN como segundo método de desbloqueo del vault de sesión.
 - [x] Provisioning BLE de la semilla al M5Stick (cliente con cifrado ECIES en tránsito).
 - [x] Escaneo de QR con cámara externa ESP32-CAM (cliente BLE + reconstrucción fragmentada).
+- [ ] Firma Taproot (P2TR, BIP340/BIP341).
+- [ ] PSBT v2 (BIP370).
 - [ ] Base32 y zlib en BBQr (optimización futura).
 - [ ] Lado servidor del provisioning en el M5Stick (firmware del M5Stick, proyecto aparte).
 - [ ] Firmware del ESP32-CAM (lado servidor del protocolo de cámara, proyecto aparte).
