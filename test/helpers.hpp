@@ -4,6 +4,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include "bip39_wordlist.h"
 
 namespace testutil {
 

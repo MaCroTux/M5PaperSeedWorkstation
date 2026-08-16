@@ -1,6 +1,7 @@
 #include <unity.h>
 #include "tx_sign.hpp"
 #include "helpers.hpp"
+#include "krux_vectors.h"
 
 void setUp(void) { host::seedRandom(0x12345678u); }
 
@@ -89,6 +90,47 @@ void test_sign_deterministic(void) {
 
 void test_self_test(void) { TEST_ASSERT_TRUE(tx_sign::self_test()); }
 
+// Valida la firma completa contra los vectores de Krux (embit): P2WPKH y
+// P2SH-P2WPKH con la semilla "abandon x11 + about" (sin passphrase).
+static void signAndCheck(const char* psbtHex, const char* expectedPubHex,
+                         const char* expectedSighashHex, bool checkScriptSig,
+                         const char* redeemHex) {
+  const std::vector<uint8_t> raw = testutil::hex(psbtHex);
+  psbt::ParsedTx tx;
+  TEST_ASSERT_TRUE(psbt::tryParsePsbt(raw, tx));
+
+  std::vector<uint8_t> signedTx;
+  std::vector<tx_sign::InputSig> sigs;
+  const bool ok = tx_sign::signSegwitP2wpkh(tx, KRUX_WORDS, 12, "", signedTx,
+                                            nullptr, &sigs);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_TRUE(sigs.size() == tx.inputs.size());
+
+  // La pubkey derivada y el sighash BIP143 deben coincidir byte a byte con embit.
+  const std::vector<uint8_t> expPub = testutil::hex(expectedPubHex);
+  const std::vector<uint8_t> expSighash = testutil::hex(expectedSighashHex);
+  TEST_ASSERT_TRUE(testutil::eq(sigs[0].pub, expPub.data(), 33));
+  TEST_ASSERT_TRUE(testutil::eq(sigs[0].sighash, expSighash.data(), 32));
+
+  // La firma (nonce RFC6979) puede diferir de embit por el "low-R grinding",
+  // pero debe ser valida: signSegwitP2wpkh ya la autoverifica antes de devolver.
+  if (checkScriptSig) {
+    const std::vector<uint8_t> redeem = testutil::hex(redeemHex);
+    TEST_ASSERT_TRUE(redeem.size() + 1 == sigs[0].scriptSigLen);
+    TEST_ASSERT_EQUAL_UINT(0x16, sigs[0].scriptSig[0]);
+    TEST_ASSERT_TRUE(testutil::eq(sigs[0].scriptSig + 1, redeem.data(), redeem.size()));
+  }
+}
+
+void test_krux_p2wpkh(void) {
+  signAndCheck(P2WPKH_PSBT_HEX, P2WPKH_PUB_HEX, P2WPKH_SIGHASH_HEX, false, nullptr);
+}
+
+void test_krux_p2sh_p2wpkh(void) {
+  signAndCheck(P2SH_P2WPKH_PSBT_HEX, P2SH_P2WPKH_PUB_HEX, P2SH_P2WPKH_SIGHASH_HEX,
+               true, P2SH_P2WPKH_REDEEM_HEX);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_hmac_sha256_rfc4231);
@@ -97,5 +139,7 @@ int main(void) {
   RUN_TEST(test_script_purpose);
   RUN_TEST(test_sign_deterministic);
   RUN_TEST(test_self_test);
+  RUN_TEST(test_krux_p2wpkh);
+  RUN_TEST(test_krux_p2sh_p2wpkh);
   return UNITY_END();
 }

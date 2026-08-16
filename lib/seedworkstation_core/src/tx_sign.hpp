@@ -493,6 +493,7 @@ struct InputSig {
   uint8_t der[73] = {};
   size_t derLen = 0;
   uint8_t pub[33] = {};
+  uint8_t sighash[32] = {};     // BIP143 sighash firmado (para validacion)
   uint8_t scriptSig[40] = {};   // solo para P2SH-P2WPKH (push del redeemScript)
   size_t scriptSigLen = 0;
 };
@@ -623,11 +624,13 @@ inline bool findKeyByAddress(const uint16_t* words, size_t count, uint32_t purpo
   return false;
 }
 
-// Firma todos los inputs (solo P2WPKH / purpose 84, SIGHASH_ALL) y serializa la
-// transaccion segwit final en signedTx.
+// Firma todos los inputs (P2WPKH / P2SH-P2WPKH, SIGHASH_ALL) y serializa la
+// transaccion segwit final en signedTx. Si outSigs != nullptr, devuelve las
+// firmas (DER+sighash, pubkey y scriptSig) para validacion/self-test.
 inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t count,
                              const char* passphrase, std::vector<uint8_t>& signedTx,
-                             std::vector<uint8_t>* finalizedPsbt = nullptr) {
+                             std::vector<uint8_t>* finalizedPsbt = nullptr,
+                             std::vector<InputSig>* outSigs = nullptr) {
   std::vector<InputSig> sigs(tx.inputs.size());
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
     const auto& in = tx.inputs[i];
@@ -703,6 +706,7 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
     if (!sighashSegwit(tx, i, scriptCode, scriptCodeLen, in.amount, sighash)) {
       bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(scriptCode, 25); return false;
     }
+    memcpy(sigs[i].sighash, sighash, 32);
     uint8_t rs[64] = {};
     if (!sign(key, sighash, rs)) {
       bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(sighash, 32); bitcoin_hd::wipe(rs, 64);
@@ -743,6 +747,7 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
   }
   serializeSignedTx(tx, sigs, signedTx);
   if (finalizedPsbt) buildFinalizedPsbt(tx, sigs, *finalizedPsbt);
+  if (outSigs) *outSigs = sigs;
   for (auto& s : sigs) bitcoin_hd::wipe(&s, sizeof(s));
   return !signedTx.empty();
 }
