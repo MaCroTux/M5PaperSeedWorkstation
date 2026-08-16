@@ -220,8 +220,8 @@ inline bool account_key(const uint16_t* words, size_t count, uint32_t purpose,
 
 inline bool self_test_passphrase() {
   uint16_t words[12] = {};
-  const uint16_t abandon = bip39::find_exact("abandon");
-  const uint16_t about = bip39::find_exact("about");
+  const uint16_t abandon = bip39::find_exact("abandon", bip39::Wordlist::English);
+  const uint16_t about = bip39::find_exact("about", bip39::Wordlist::English);
   if (abandon == bip39::kInvalidWord || about == bip39::kInvalidWord) return false;
   for (uint8_t i = 0; i < 11; ++i) words[i] = abandon; words[11] = about;
   static const uint8_t expected[64] = {
@@ -242,8 +242,8 @@ inline bool account_key(const uint16_t* words, size_t count, bool nativeSegwit,
 
 inline bool self_test() {
   uint16_t words[12];
-  const uint16_t abandon = bip39::find_exact("abandon");
-  const uint16_t about = bip39::find_exact("about");
+  const uint16_t abandon = bip39::find_exact("abandon", bip39::Wordlist::English);
+  const uint16_t about = bip39::find_exact("about", bip39::Wordlist::English);
   if (abandon == bip39::kInvalidWord || about == bip39::kInvalidWord) return false;
   for (uint8_t i = 0; i < 11; ++i) words[i] = abandon;
   words[11] = about;

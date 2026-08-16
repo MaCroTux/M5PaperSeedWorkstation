@@ -115,8 +115,8 @@ inline bool derive_from_account(const bitcoin_hd::Node& account, uint32_t purpos
 }
 
 inline bool test_words(uint16_t words[12]) {
-  const uint16_t abandon = bip39::find_exact("abandon");
-  const uint16_t about = bip39::find_exact("about");
+  const uint16_t abandon = bip39::find_exact("abandon", bip39::Wordlist::English);
+  const uint16_t about = bip39::find_exact("about", bip39::Wordlist::English);
   if (abandon == bip39::kInvalidWord || about == bip39::kInvalidWord) return false;
   for (uint8_t i = 0; i < 11; ++i) words[i] = abandon;
   words[11] = about; return true;

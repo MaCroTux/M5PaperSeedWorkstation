@@ -19,7 +19,7 @@ inline bool calculate(const uint16_t* indices, size_t count, uint8_t out[4],
 
 inline bool self_test() {
   uint16_t v[12];
-  const uint16_t a = bip39::find_exact("abandon"), b = bip39::find_exact("about");
+  const uint16_t a = bip39::find_exact("abandon", bip39::Wordlist::English), b = bip39::find_exact("about", bip39::Wordlist::English);
   if (a == bip39::kInvalidWord || b == bip39::kInvalidWord) return false;
   for (size_t i = 0; i < 11; ++i) v[i] = a; v[11] = b;
   uint8_t f[4] = {};

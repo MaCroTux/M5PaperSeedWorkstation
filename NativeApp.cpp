@@ -23,6 +23,8 @@
 #include "ble_provision.hpp"
 #include "ble_provision_client.hpp"
 #include "qr_cam_client.hpp"
+#include "bip85.hpp"
+#include "slip39.hpp"
 #include "wifi_sta.hpp"
 #include "mempool_balance.hpp"
 
@@ -51,9 +53,10 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                      settings_online, online_consent,
                      multisig_confirm, tx_history, ble_key_menu, ble_key_test,
                      twofa_list, twofa_migrate_list, settings_screen,
-                     provision_test, scan_cam_qr,
-                     balance_consent, wifi_select, wifi_password,
-                     balance_checking, balance_result };
+                      provision_test, scan_cam_qr,
+                      balance_consent, wifi_select, wifi_password,
+                      balance_checking, balance_result, tools_menu, bip85_result,
+                      slip39_split, slip39_shares };
 
 struct Rect {
   int x, y, w, h;
@@ -94,11 +97,12 @@ constexpr Rect kDiceLength24{275, 195, 235, 52};
 constexpr Rect kDiceValue[] = {{30, 330, 150, 80}, {195, 330, 150, 80}, {360, 330, 150, 80},
                                {30, 420, 150, 80}, {195, 420, 150, 80}, {360, 420, 150, 80}};
 constexpr Rect kDiceReset{30, 540, 480, 60};
-constexpr Rect kActiveMenu[] = {{40, 150, 460, 58}, {40, 214, 460, 58},
-                                {40, 278, 460, 58}, {40, 342, 460, 58},
-                                {40, 406, 460, 58}, {40, 470, 460, 58},
-                                {40, 534, 460, 58}, {40, 598, 460, 58},
-                                {40, 662, 460, 58}, {40, 726, 460, 58}};
+constexpr Rect kActiveMenu[] = {{40, 150, 460, 52}, {40, 207, 460, 52},
+                                {40, 264, 460, 52}, {40, 321, 460, 52},
+                                {40, 378, 460, 52}, {40, 435, 460, 52},
+                                {40, 492, 460, 52}, {40, 549, 460, 52},
+                                {40, 606, 460, 52}, {40, 663, 460, 52},
+                                {40, 720, 460, 52}};
 constexpr const char* kActiveLabels[] = {"VER CLAVE PUBLICA", "BACKUP SEED",
                                          "PASSPHRASE", "EXPLORAR DIRECCIONES",
                                          "DESCARTAR SEED"};
@@ -184,6 +188,8 @@ int entropyLastY = -1;
 bool fingerprintSelfTest = false;
 bool hdSelfTest = false;
 bool addressBip84SelfTest = false;
+bool bip85SelfTest = false;
+bool slip39SelfTest = false;
 bool fingerprintValid = false;
 char activeFingerprint[14] = "FPR: --------";
 char vaultPassword[25] = {};
@@ -736,8 +742,9 @@ uint8_t menuLogical(uint8_t display) {
 }
 // Menu de semilla activa: saldo=5 y wifi=6 (solo online); cam/ajustes/volver se desplazan.
 uint8_t activeCamIndex() { return static_cast<uint8_t>(5 + (gSettings.onlineEnabled ? 2 : 0)); }
-uint8_t activeSettingsIndex() { return static_cast<uint8_t>(6 + (gSettings.onlineEnabled ? 2 : 0)); }
-uint8_t activeMenuIndex() { return static_cast<uint8_t>(7 + (gSettings.onlineEnabled ? 2 : 0)); }
+uint8_t activeToolsIndex() { return static_cast<uint8_t>(activeCamIndex() + 1); }
+uint8_t activeSettingsIndex() { return static_cast<uint8_t>(activeCamIndex() + 2); }
+uint8_t activeMenuIndex() { return static_cast<uint8_t>(activeCamIndex() + 3); }
 
 const char* activeHint(uint8_t index) {
   if (index == 0) return "Deriva la clave publica (xpub/zpub) para ver solo direcciones";
@@ -749,6 +756,7 @@ const char* activeHint(uint8_t index) {
   if (gSettings.onlineEnabled && index == 5) return "Consulta el saldo online (mempool.space)";
   if (gSettings.onlineEnabled && index == 6) return "Recibe un PSBT o archivo por WiFi para firmar";
   if (index == activeCamIndex()) return "Escanea un QR con la camara externa por BLE";
+  if (index == activeToolsIndex()) return "BIP85, SLIP-39 y utilidades sobre la semilla";
   if (index == activeSettingsIndex()) return "Ajustes del dispositivo";
   return "Vuelve al menu general";
 }
@@ -760,10 +768,10 @@ void drawMenu() {
   static const Icon kMenuIcons[] = {Icon::keyboard, Icon::draw, Icon::lock,
                                     Icon::wifi, Icon::list, Icon::wrench, Icon::lock,
                                     Icon::qr};
-  const uint8_t count = menuCount();
-  for (uint8_t i = 0; i < count; ++i) {
+  for (uint8_t i = 0; i < menuCount(); ++i) {
     const uint8_t logical = menuLogical(i);
-    buttonOn(page, kMenu[i], menuLabel(logical), menuEnabled(logical), focusIndex == i, kMenuIcons[logical]);
+    buttonOn(page, kMenu[i], menuLabel(logical), menuEnabled(logical),
+             focusIndex == i, kMenuIcons[logical]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
   page.drawString(lang::tr(menuHint(menuLogical(focusIndex))), 270, 670);
@@ -1966,6 +1974,8 @@ void drawActiveSeed() {
   }
   buttonOn(page, kActiveMenu[activeCamIndex()], "ESCANEAR QR (CAMARA)", true,
            focusIndex == activeCamIndex(), Icon::qr);
+  buttonOn(page, kActiveMenu[activeToolsIndex()], "HERRAMIENTAS", true,
+           focusIndex == activeToolsIndex(), Icon::memory);
   buttonOn(page, kActiveMenu[activeSettingsIndex()], "AJUSTES", true,
            focusIndex == activeSettingsIndex(), Icon::wrench);
   buttonOn(page, kActiveMenu[activeMenuIndex()], "VOLVER AL MENU", true,
@@ -2484,6 +2494,10 @@ void drawDiagnostics() {
   page.printf("BIP32 xpub/zpub: %s", hdSelfTest ? "OK" : "ERROR");
   page.setCursor(25, 455);
   page.printf(lang::tr("microSD: %s"), SD.cardType() == CARD_NONE ? lang::tr("NO DETECTADA") : "OK");
+  page.setCursor(25, 510);
+  page.printf("BIP85: %s", bip85SelfTest ? "OK" : "ERROR");
+  page.setCursor(25, 565);
+  page.printf("SLIP-39: %s", slip39SelfTest ? "OK" : "ERROR");
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
   fullRefresh();
 }
@@ -2866,6 +2880,156 @@ void exitCamScan() {
 
 void retryCamScan() {
   beginCamScan();
+}
+
+// ---- Herramientas de semilla (BIP85 / SLIP-39) ----
+
+uint16_t bip85Result[24] = {};
+uint8_t bip85ResultCount = 0;
+uint32_t bip85Index = 0;
+char bip85Fpr[9] = {};
+String slip39Shares[16];
+uint8_t slip39ShareCount = 0;
+uint8_t slip39Current = 0;
+uint8_t slip39M = 2;
+uint8_t slip39N = 3;
+
+void drawToolsMenu() {
+  blankPage();
+  title("HERRAMIENTAS", "Utilidades sobre la semilla activa");
+  buttonOn(page, kActiveMenu[0], "BIP85 (SEED HIJA)", fingerprintValid, focusIndex == 0, Icon::key);
+  buttonOn(page, kActiveMenu[1], "SLIP-39 (PARTIR)", fingerprintValid, focusIndex == 1, Icon::shield);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 2);
+  fullRefresh();
+}
+
+void deriveBip85() {
+  bip85ResultCount = targetWords;  // 12 o 24, igual que la semilla activa
+  if (bip85::derive_words(words, targetWords, 0, targetWords, bip85Index, bip85Result)) {
+    uint8_t raw[4] = {};
+    bitcoin_fingerprint::calculate(bip85Result, bip85ResultCount, raw, "");
+    snprintf(bip85Fpr, sizeof(bip85Fpr), "%02X%02X%02X%02X",
+             raw[0], raw[1], raw[2], raw[3]);
+    memset(raw, 0, sizeof(raw));
+    screen = Screen::bip85_result; focusIndex = 1; drawScreen();
+  } else {
+    showToast("Error BIP85");
+  }
+}
+
+void startBip85() {
+  if (!fingerprintValid) { showToast("Sin semilla activa"); return; }
+  bip85Index = 0;
+  deriveBip85();
+}
+
+void changeBip85Index(int delta) {
+  if (delta < 0) { if (bip85Index == 0) return; --bip85Index; }
+  else { if (bip85Index >= 0x7FFFFFFFUL) return; ++bip85Index; }
+  deriveBip85();
+}
+
+void drawBip85Result() {
+  blankPage();
+  char subtitle[48];
+  snprintf(subtitle, sizeof(subtitle), "Indice %u  ·  %u palabras", bip85Index, bip85ResultCount);
+  title("BIP85", subtitle);
+  textStyle(page, 2);
+  page.setCursor(20, 165);
+  page.printf("FPR: %s", bip85Fpr);
+  for (uint8_t i = 0; i < bip85ResultCount; ++i) {
+    const int column = bip85ResultCount == 24 && i >= 12 ? 1 : 0;
+    const int row = bip85ResultCount == 24 ? i % 12 : i;
+    page.setCursor(column ? 280 : 20, 210 + row * 44);
+    page.printf("%02u %-12s", i + 1, bip39::word_at(bip85Result[i]));
+  }
+  textStyle(page, 1);
+  page.setTextDatum(MC_DATUM);
+  page.drawString("Palanca IZQ/DER: cambiar indice", 270, 788);
+  page.setTextDatum(TL_DATUM);
+  textStyle(page, 2);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+  buttonOn(page, kAction, "USAR", true, focusIndex == 1, Icon::check);
+  fullRefresh();
+}
+
+void useBip85Result() {
+  if (fingerprintValid) cacheCurrentSeed();  // preservar la semilla actual en RAM
+  resetPhrase(bip85ResultCount);
+  memcpy(words, bip85Result, bip85ResultCount * sizeof(uint16_t));
+  wordCount = targetWords;
+  updateFingerprint();
+  char label[16];
+  snprintf(label, sizeof(label), "BIP85-%u", bip85Index);
+  cacheCurrentSeed(label, false);  // añadir la semilla hija al listado en RAM
+  screen = Screen::active_seed; focusIndex = 0; drawScreen();
+}
+
+void startSlip39Split() {
+  if (!fingerprintValid) { showToast("Sin semilla activa"); return; }
+  slip39M = 2;
+  slip39N = 3;
+  screen = Screen::slip39_split; focusIndex = 0; drawScreen();
+}
+
+void drawSlip39Split() {
+  blankPage();
+  title("SLIP-39", "Elige umbral (M) y total (N)");
+  char m[24], n[24];
+  snprintf(m, sizeof(m), "UMBRAL M: %u", slip39M);
+  snprintf(n, sizeof(n), "TOTAL N: %u", slip39N);
+  buttonOn(page, kActiveMenu[0], m, true, focusIndex == 0);
+  buttonOn(page, kActiveMenu[1], n, true, focusIndex == 1);
+  buttonOn(page, kActiveMenu[2], "GENERAR SHARES", true, focusIndex == 2);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 3);
+  fullRefresh();
+}
+
+void generateSlip39() {
+  uint8_t entropy[32] = {};
+  if (!bip39::to_entropy(words, targetWords, entropy)) { showToast("Error"); return; }
+  slip39::generate_mnemonics(slip39M, slip39N, entropy, targetWords == 12 ? 16 : 32, "", slip39Shares);
+  encrypted_seed_store::wipe(entropy, sizeof(entropy));
+  slip39ShareCount = slip39N;
+  slip39Current = 0;
+  screen = Screen::slip39_shares; focusIndex = 0; drawScreen();
+}
+
+void drawShareWords(const String& mnemonic) {
+  String words[33];
+  uint8_t count = 0;
+  String s = mnemonic;
+  s.trim();
+  int start = 0;
+  while (start < s.length() && count < 33) {
+    int sp = s.indexOf(' ', start);
+    String w = sp < 0 ? s.substring(start) : s.substring(start, sp);
+    w.trim();
+    if (w.length()) words[count++] = w;
+    if (sp < 0) break;
+    start = sp + 1;
+  }
+  const uint8_t half = (count + 1) / 2;
+  const uint8_t spacing = count <= 20 ? 50 : 36;
+  textStyle(page, 2);
+  for (uint8_t i = 0; i < count; ++i) {
+    const uint8_t col = i < half ? 0 : 1;
+    const uint8_t row = i % half;
+    page.setCursor(col ? 280 : 20, 160 + row * spacing);
+    page.printf("%02u %-10s", i + 1, words[i].c_str());
+  }
+}
+
+void drawSlip39Shares() {
+  blankPage();
+  char subtitle[40];
+  snprintf(subtitle, sizeof(subtitle), "Share %u / %u  ·  %u de %u",
+           slip39Current + 1, slip39ShareCount, slip39M, slip39N);
+  title("SLIP-39 SHARES", subtitle);
+  drawShareWords(slip39Shares[slip39Current]);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
+  buttonOn(page, kAction, "SIGUIENTE", true, focusIndex == 1, Icon::reset);
+  fullRefresh();
 }
 
 qr_wifi::QRWiFiServer wifiServer;
@@ -5153,6 +5317,10 @@ void drawScreen() {
     case Screen::ble_key_test: drawBleKeyTest(); break;
     case Screen::provision_test: drawProvisionTest(); break;
     case Screen::scan_cam_qr: drawScanCamQr(); break;
+    case Screen::tools_menu: drawToolsMenu(); break;
+    case Screen::bip85_result: drawBip85Result(); break;
+    case Screen::slip39_split: drawSlip39Split(); break;
+    case Screen::slip39_shares: drawSlip39Shares(); break;
     case Screen::twofa_list: drawTwoFaList(); break;
     case Screen::twofa_migrate_list: drawTwoFaMigrateList(); break;
     case Screen::balance_consent: drawBalanceConsent(); break;
@@ -5185,6 +5353,9 @@ void updateFocusButton(uint8_t index) {
       } else if (index == activeCamIndex()) {
         updateButton(kActiveMenu[index], "ESCANEAR QR (CAMARA)", true,
                      index == focusIndex, Icon::qr);
+      } else if (index == activeToolsIndex()) {
+        updateButton(kActiveMenu[index], "HERRAMIENTAS", true,
+                     index == focusIndex, Icon::memory);
       } else if (index == activeSettingsIndex()) {
         updateButton(kActiveMenu[index], "AJUSTES", true,
                      index == focusIndex, Icon::wrench);
@@ -5594,6 +5765,29 @@ void updateFocusButton(uint8_t index) {
       }
       break;
     }
+    case Screen::tools_menu:
+      if (index == 0) updateButton(kActiveMenu[0], "BIP85 (SEED HIJA)", fingerprintValid, index == focusIndex, Icon::key);
+      else if (index == 1) updateButton(kActiveMenu[1], "SLIP-39 (PARTIR)", fingerprintValid, index == focusIndex, Icon::shield);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::bip85_result:
+      if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+      else updateButton(kAction, "USAR", true, index == focusIndex, Icon::check);
+      break;
+    case Screen::slip39_split: {
+      char m[24], n[24];
+      snprintf(m, sizeof(m), "UMBRAL M: %u", slip39M);
+      snprintf(n, sizeof(n), "TOTAL N: %u", slip39N);
+      if (index == 0) updateButton(kActiveMenu[0], m, true, index == focusIndex);
+      else if (index == 1) updateButton(kActiveMenu[1], n, true, index == focusIndex);
+      else if (index == 2) updateButton(kActiveMenu[2], "GENERAR SHARES", true, index == focusIndex);
+      else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    }
+    case Screen::slip39_shares:
+      if (index == 0) updateButton(kBack, "VOLVER", true, index == focusIndex);
+      else updateButton(kAction, "SIGUIENTE", true, index == focusIndex, Icon::reset);
+      break;
     case Screen::twofa_list:
       if (index < twoFaCount) {
         char label[17] = {};
@@ -5693,6 +5887,10 @@ void moveFocus(int direction) {
     const auto p = camClient.phase();
     count = (p == qr_cam::Phase::Error) ? 2 : 1;
   }
+  else if (screen == Screen::tools_menu) count = 3;
+  else if (screen == Screen::bip85_result) count = 2;
+  else if (screen == Screen::slip39_split) count = 4;
+  else if (screen == Screen::slip39_shares) count = 2;
   else if (screen == Screen::twofa_list) count = twoFaCount + 1;
   else if (screen == Screen::twofa_migrate_list) count = sessionMetaCount + 1;
   else if (screen == Screen::signed_tx) count = 1;
@@ -5807,6 +6005,9 @@ void click(int x, int y) {
       requestRadioPermission(RadioAction::wifi, Screen::active_seed, 6);
     else if (kActiveMenu[activeCamIndex()].contains(x, y))
       requestRadioPermission(RadioAction::cam, Screen::active_seed, activeCamIndex());
+    else if (kActiveMenu[activeToolsIndex()].contains(x, y)) {
+      screen = Screen::tools_menu; focusIndex = 0; drawScreen();
+    }
     else if (kActiveMenu[activeSettingsIndex()].contains(x, y)) {
       screen = Screen::settings; focusIndex = 0; drawScreen();
     }
@@ -6539,6 +6740,32 @@ void click(int x, int y) {
     } else {
       if (kAction.contains(x, y)) exitCamScan();
     }
+  } else if (screen == Screen::tools_menu) {
+    if (kActiveMenu[0].contains(x, y)) startBip85();
+    else if (kActiveMenu[1].contains(x, y)) startSlip39Split();
+    else if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = activeToolsIndex(); drawScreen(); }
+  } else if (screen == Screen::bip85_result) {
+    if (kBack.contains(x, y)) { screen = Screen::tools_menu; focusIndex = 0; drawScreen(); }
+    else if (kAction.contains(x, y)) useBip85Result();
+  } else if (screen == Screen::slip39_split) {
+    if (kActiveMenu[0].contains(x, y)) {
+      slip39M = slip39M % slip39N + 1;
+      drawSlip39Split();
+    }
+    else if (kActiveMenu[1].contains(x, y)) {
+      slip39N = slip39N % 16 + 1;
+      if (slip39N < slip39M) slip39N = slip39M;
+      drawSlip39Split();
+    }
+    else if (kActiveMenu[2].contains(x, y)) generateSlip39();
+    else if (kBack.contains(x, y)) { screen = Screen::tools_menu; focusIndex = 1; drawScreen(); }
+  } else if (screen == Screen::slip39_shares) {
+    if (kAction.contains(x, y)) {
+      slip39Current = (slip39Current + 1) % slip39ShareCount;
+      drawSlip39Shares();
+    } else if (kBack.contains(x, y)) {
+      screen = Screen::slip39_split; focusIndex = 2; drawScreen();
+    }
   }
 }
 
@@ -6744,6 +6971,21 @@ void activateFocus() {
     const auto p = camClient.phase();
     const Rect& r = (p == qr_cam::Phase::Error) ? (focusIndex == 0 ? kBack : kAction) : kAction;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::tools_menu) {
+    const Rect& r = focusIndex == 0 ? kActiveMenu[0] :
+                    focusIndex == 1 ? kActiveMenu[1] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::bip85_result) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::slip39_split) {
+    const Rect& r = focusIndex == 0 ? kActiveMenu[0] :
+                    focusIndex == 1 ? kActiveMenu[1] :
+                    focusIndex == 2 ? kActiveMenu[2] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::slip39_shares) {
+    const Rect& r = focusIndex == 0 ? kBack : kAction;
+    click(r.x + 5, r.y + 5);
   } else if (screen == Screen::twofa_list) {
     const Rect& r = focusIndex < twoFaCount ? kVaultFiles[focusIndex] : kBack;
     click(r.x + 5, r.y + 5);
@@ -6793,6 +7035,10 @@ void setup() {
   addressBip84SelfTest = bitcoin_address::self_test_bip84();
   Serial.printf("Bitcoin address BIP84 self-test: %s\n",
                 addressBip84SelfTest ? "OK" : "ERROR");
+  bip85SelfTest = bip85::self_test();
+  Serial.printf("BIP85 self-test: %s\n", bip85SelfTest ? "OK" : "ERROR");
+  slip39SelfTest = slip39::self_test();
+  Serial.printf("SLIP-39 self-test: %s\n", slip39SelfTest ? "OK" : "ERROR");
   gSettings = device_settings::load();
   lang::set(gSettings.language == 1 ? lang::Lang::ES : lang::Lang::EN);
   lastUserActivity = millis();
@@ -6993,6 +7239,10 @@ void loop() {
       lastRocker = millis(); lastUserActivity = millis();
       screen = sessionLockReturn; focusIndex = 0; drawScreen();
     }
+  } else if (screen == Screen::bip85_result && millis() - lastRocker >= 120) {
+    if (left == LOW && oldLeft == HIGH) { lastRocker = millis(); lastUserActivity = millis(); changeBip85Index(-1); }
+    else if (right == LOW && oldRight == HIGH) { lastRocker = millis(); lastUserActivity = millis(); changeBip85Index(1); }
+    else if (press == LOW && oldPress == HIGH) { lastRocker = millis(); lastUserActivity = millis(); useBip85Result(); }
   } else if (millis() - lastRocker >= 120) {
     // NOTA: la palanca va "invertida" a proposito: IZQUIERDA avanza y DERECHA
     // retrocede. Es el comportamiento historico del dispositivo; NO "corregir".
