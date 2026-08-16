@@ -1343,6 +1343,7 @@ void beginPassphrase() {
 void warningIcon(M5EPD_Canvas& canvas, int cx, int top);
 void discardActiveSeed();
 void drawActiveSeed();
+void updateBip85ResultDynamic();
 
 char* activeVaultPassword() {
   return vaultConfirmPhase ? vaultConfirmation : vaultPassword;
@@ -2984,7 +2985,7 @@ void toggleWordlistLanguage() {
   drawToolsMenu();
 }
 
-void deriveBip85() {
+bool deriveBip85() {
   bip85ResultCount = targetWords;  // 12 o 24, igual que la semilla activa
   if (bip85::derive_words(words, targetWords, 0, targetWords, bip85Index, bip85Result)) {
     uint8_t raw[4] = {};
@@ -2992,22 +2993,50 @@ void deriveBip85() {
     snprintf(bip85Fpr, sizeof(bip85Fpr), "%02X%02X%02X%02X",
              raw[0], raw[1], raw[2], raw[3]);
     memset(raw, 0, sizeof(raw));
-    screen = Screen::bip85_result; focusIndex = 1; drawScreen();
-  } else {
-    showToast("Error BIP85");
+    return true;
   }
+  return false;
 }
 
 void startBip85() {
   if (!fingerprintValid) { showToast("Sin semilla activa"); return; }
   bip85Index = 0;
-  deriveBip85();
+  if (deriveBip85()) { screen = Screen::bip85_result; focusIndex = 1; drawScreen(); }
+  else showToast("Error BIP85");
 }
 
 void changeBip85Index(int delta) {
   if (delta < 0) { if (bip85Index == 0) return; --bip85Index; }
   else { if (bip85Index >= 0x7FFFFFFFUL) return; ++bip85Index; }
-  deriveBip85();
+  if (deriveBip85()) updateBip85ResultDynamic();
+  else showToast("Error BIP85");
+}
+
+void updateBip85ResultDynamic() {
+  M5EPD_Canvas sub(&M5.EPD);
+  if (sub.createCanvas(400, 30)) {
+    sub.fillCanvas(kWhite); textStyle(sub, 2);
+    char label[48];
+    snprintf(label, sizeof(label), "Indice %u  ·  %u palabras", bip85Index, bip85ResultCount);
+    sub.setCursor(0, 10);
+    sub.print(label);
+    sub.pushCanvas(20, 78, UPDATE_MODE_A2);
+    sub.deleteCanvas();
+  }
+  M5EPD_Canvas body(&M5.EPD);
+  if (body.createCanvas(500, 585)) {
+    body.fillCanvas(kWhite); textStyle(body, 2);
+    body.setCursor(0, 10);
+    body.printf("FPR: %s", bip85Fpr);
+    for (uint8_t i = 0; i < bip85ResultCount; ++i) {
+      const int column = bip85ResultCount == 24 && i >= 12 ? 1 : 0;
+      const int row = bip85ResultCount == 24 ? i % 12 : i;
+      body.setCursor(column ? 260 : 0, 55 + row * 44);
+      body.printf("%02u %-12s", i + 1, bip39::word_at(bip85Result[i]));
+    }
+    body.pushCanvas(20, 155, UPDATE_MODE_A2);
+    body.deleteCanvas();
+  }
 }
 
 void drawBip85Result() {
