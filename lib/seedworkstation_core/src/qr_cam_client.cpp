@@ -58,6 +58,8 @@ void QRCamClient::start() {
   error_ = Error::None;
 
   Serial.println("[CAM] scanning");
+  Serial.printf("[CAM] free heap antes de BLE: %u\n",
+                static_cast<unsigned>(ESP.getFreeHeap()));
   NimBLEDevice::init("M5Paper-QR-CAM-Client");
   bleOn_ = true;
   scan_ = NimBLEDevice::getScan();
