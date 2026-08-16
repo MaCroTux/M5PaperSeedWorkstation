@@ -56,6 +56,8 @@ struct TxInput {
   std::vector<uint32_t> derivPath;    // indices relativos (con bit hardened)
   uint8_t utxoScript[80] = {};        // scriptPubKey del UTXO gastado (witness/non-witness)
   uint8_t utxoScriptLen = 0;
+  uint8_t redeemScript[34] = {};      // redeemScript (clave 0x04, P2SH-P2WPKH)
+  uint8_t redeemScriptLen = 0;
   uint8_t witnessScript[256] = {};    // redeem/witness script (clave 0x05, P2WSH)
   uint8_t witnessScriptLen = 0;
   std::vector<PartialSig> partialSigs;  // firmas parciales ya presentes (clave 0x02)
@@ -290,6 +292,10 @@ inline bool parsePsbt(const std::vector<uint8_t>& data, ParsedTx& tx) {
           si.hasDerivation = true;
           tx.inputs[inIdx].signers.push_back(si);
         }
+      } else if (keyLen >= 1 && key[0] == 0x04 && valLen <= sizeof(tx.inputs[inIdx].redeemScript)) {
+        // redeemScript (P2SH-P2WPKH / P2SH).
+        memcpy(tx.inputs[inIdx].redeemScript, val, static_cast<size_t>(valLen));
+        tx.inputs[inIdx].redeemScriptLen = static_cast<uint8_t>(valLen);
       } else if (keyLen >= 1 && key[0] == 0x05 && valLen <= sizeof(tx.inputs[inIdx].witnessScript)) {
         // witnessScript (P2WSH multisig).
         memcpy(tx.inputs[inIdx].witnessScript, val, static_cast<size_t>(valLen));

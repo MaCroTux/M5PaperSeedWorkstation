@@ -493,6 +493,8 @@ struct InputSig {
   uint8_t der[73] = {};
   size_t derLen = 0;
   uint8_t pub[33] = {};
+  uint8_t scriptSig[40] = {};   // solo para P2SH-P2WPKH (push del redeemScript)
+  size_t scriptSigLen = 0;
 };
 
 inline void serializeSignedTx(const psbt::ParsedTx& tx, const std::vector<InputSig>& sigs,
@@ -501,10 +503,12 @@ inline void serializeSignedTx(const psbt::ParsedTx& tx, const std::vector<InputS
   for (int b = 0; b < 4; ++b) out.push_back((tx.version >> (8 * b)) & 0xff);
   out.push_back(0x00); out.push_back(0x01);  // segwit marker + flag
   pushVarint(out, tx.inputs.size());
-  for (const auto& in : tx.inputs) {
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    const auto& in = tx.inputs[i];
     out.insert(out.end(), in.prevTxid, in.prevTxid + 32);
     for (int b = 0; b < 4; ++b) out.push_back((in.prevVout >> (8 * b)) & 0xff);
-    out.push_back(0x00);  // scriptSig vacio
+    pushVarint(out, sigs[i].scriptSigLen);
+    out.insert(out.end(), sigs[i].scriptSig, sigs[i].scriptSig + sigs[i].scriptSigLen);
     for (int b = 0; b < 4; ++b) out.push_back((in.sequence >> (8 * b)) & 0xff);
   }
   pushVarint(out, tx.outputs.size());
@@ -558,6 +562,11 @@ inline void buildFinalizedPsbt(const psbt::ParsedTx& tx, const std::vector<Input
   out.insert(out.end(), unsignedTx.begin(), unsignedTx.end());
   out.push_back(0x00);
   for (const auto& s : sigs) {
+    if (s.scriptSigLen) {
+      out.push_back(0x01); out.push_back(0x07);  // input map: key 0x07 = final scriptSig
+      pushVarint(out, s.scriptSigLen);
+      out.insert(out.end(), s.scriptSig, s.scriptSig + s.scriptSigLen);
+    }
     std::vector<uint8_t> witness;
     pushVarint(witness, 2);
     pushVarint(witness, s.derLen);
@@ -624,12 +633,20 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
     const auto& in = tx.inputs[i];
     // Identificacion inequivoca del tipo de input (desde el UTXO, no desde los
     // outputs de la nueva transaccion).
-    if (in.utxoScriptLen != 22 || in.utxoScript[0] != 0x00 || in.utxoScript[1] != 0x14) {
+    const bool p2wpkh = (in.utxoScriptLen == 22 && in.utxoScript[0] == 0x00 &&
+                         in.utxoScript[1] == 0x14);
+    const bool p2sh_p2wpkh = (in.utxoScriptLen == 23 && in.utxoScript[0] == 0xa9 &&
+                              in.utxoScript[1] == 0x14 && in.utxoScript[22] == 0x87 &&
+                              in.redeemScriptLen == 22 && in.redeemScript[0] == 0x00 &&
+                              in.redeemScript[1] == 0x14);
+    if (!p2wpkh && !p2sh_p2wpkh) {
       Serial.printf("[SIGN] input=%u type=UNKNOWN\n", static_cast<unsigned>(i));
       return false;
     }
     if (!in.amountKnown) return false;
-    Serial.printf("[SIGN] input=%u\n[SIGN] type=P2WPKH\n", static_cast<unsigned>(i));
+    const uint8_t* witnessProg = p2wpkh ? (in.utxoScript + 2) : (in.redeemScript + 2);
+    Serial.printf("[SIGN] input=%u\n[SIGN] type=%s\n", static_cast<unsigned>(i),
+                  p2wpkh ? "P2WPKH" : "P2SH-P2WPKH");
     logHex("prev_txid", in.prevTxid, 32);
     Serial.printf("[SIGN] prev_vout=%u\n", static_cast<unsigned>(in.prevVout));
     Serial.printf("[SIGN] amount_sat=%llu\n",
@@ -646,7 +663,7 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
       haveKey = deriveKey(words, count, in.derivFpr, in.derivPath, passphrase, key, pub);
     } else {
       // Sin ruta BIP32: buscar la direccion en el espacio de derivacion.
-      haveKey = findKeyByAddress(words, count, 84, in.utxoScript + 2, passphrase, key, pub);
+      haveKey = findKeyByAddress(words, count, p2wpkh ? 84 : 49, witnessProg, passphrase, key, pub);
     }
     if (!haveKey) { bitcoin_hd::wipe(key, 32); return false; }
 
@@ -655,24 +672,35 @@ inline bool signSegwitP2wpkh(psbt::ParsedTx& tx, const uint16_t* words, size_t c
     uint8_t pubHash[20] = {};
     bitcoin_address::hash160(pub, 33, pubHash);
     logHex("pubkey_hash", pubHash, 20);
-    logHex("witness_hash", in.utxoScript + 2, 20);
-    if (memcmp(pubHash, in.utxoScript + 2, 20) != 0) {
+    logHex("witness_hash", witnessProg, 20);
+    if (memcmp(pubHash, witnessProg, 20) != 0) {
       Serial.println("[SIGN] PUBKEY HASH MISMATCH");
       bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(pubHash, 20);
       return false;
     }
     bitcoin_hd::wipe(pubHash, 20);
 
-    // scriptCode P2WPKH: 76a914{20-byte-pubkey-hash}88ac (25 bytes). NO usar el
-    // witness program 0014... directamente como scriptCode.
+    // scriptCode:
+    //   P2WPKH       -> 76a914{20-byte-pubkey-hash}88ac (25 bytes).
+    //   P2SH-P2WPKH  -> redeemScript 0014{20} (22 bytes).
     uint8_t scriptCode[25] = {};
-    scriptCode[0] = 0x76; scriptCode[1] = 0xa9; scriptCode[2] = 0x14;
-    memcpy(scriptCode + 3, in.utxoScript + 2, 20);
-    scriptCode[23] = 0x88; scriptCode[24] = 0xac;
-    logHex("scriptCode", scriptCode, 25);
+    uint8_t scriptCodeLen = 0;
+    if (p2wpkh) {
+      scriptCode[0] = 0x76; scriptCode[1] = 0xa9; scriptCode[2] = 0x14;
+      memcpy(scriptCode + 3, witnessProg, 20);
+      scriptCode[23] = 0x88; scriptCode[24] = 0xac;
+      scriptCodeLen = 25;
+    } else {
+      memcpy(scriptCode, in.redeemScript, in.redeemScriptLen);
+      scriptCodeLen = in.redeemScriptLen;
+      sigs[i].scriptSig[0] = 0x16;  // push 22 bytes (redeemScript)
+      memcpy(sigs[i].scriptSig + 1, in.redeemScript, in.redeemScriptLen);
+      sigs[i].scriptSigLen = 1 + in.redeemScriptLen;
+    }
+    logHex("scriptCode", scriptCode, scriptCodeLen);
 
     uint8_t sighash[32] = {};
-    if (!sighashSegwit(tx, i, scriptCode, 25, in.amount, sighash)) {
+    if (!sighashSegwit(tx, i, scriptCode, scriptCodeLen, in.amount, sighash)) {
       bitcoin_hd::wipe(key, 32); bitcoin_hd::wipe(scriptCode, 25); return false;
     }
     uint8_t rs[64] = {};
