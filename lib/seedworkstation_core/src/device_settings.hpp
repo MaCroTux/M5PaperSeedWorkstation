@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <SD.h>
 #include <string.h>
+#include <mbedtls/sha256.h>
 
 // Configuracion persistente del dispositivo, guardada en la SD.
 // Formato del fichero (17 bytes, version 4):
@@ -67,6 +68,8 @@ struct Settings {
   uint8_t balanceGapLimit;      // gap limit (direcciones vacias consecutivas)
   uint8_t onlineEnabled;        // 0 = billetera fria (por defecto), 1 = billetera online
   uint8_t wordlistLanguage;     // 0 = BIP39 ingles, 1 = BIP39 espanol
+  uint8_t pinEnabled;           // 0 = sin PIN, 1 = PIN de 4 digitos activo
+  uint8_t pinHash[32];          // SHA256 del PIN de 4 digitos (ceros si no hay PIN)
 };
 
 inline Settings defaults() {
@@ -80,7 +83,34 @@ inline Settings defaults() {
   s.balanceGapLimit = 20;
   s.onlineEnabled = 0;  // fria por defecto
   s.wordlistLanguage = 0;  // BIP39 ingles por defecto
+  s.pinEnabled = 0;
+  memset(s.pinHash, 0, sizeof(s.pinHash));
   return s;
+}
+
+// ---- PIN de 4 digitos (primera capa de seguridad) ----
+
+inline void hashPin(const char* pin, uint8_t out[32]) {
+  mbedtls_sha256_ret(reinterpret_cast<const unsigned char*>(pin), strlen(pin), out, 0);
+}
+
+inline bool pinMatches(const Settings& s, const char* pin) {
+  if (!pin || !pin[0]) return false;
+  uint8_t h[32];
+  hashPin(pin, h);
+  return memcmp(h, s.pinHash, 32) == 0;
+}
+
+inline bool setPin(Settings& s, const char* pin) {
+  if (!pin || strlen(pin) != 4) return false;
+  hashPin(pin, s.pinHash);
+  s.pinEnabled = 1;
+  return true;
+}
+
+inline void clearPin(Settings& s) {
+  memset(s.pinHash, 0, sizeof(s.pinHash));
+  s.pinEnabled = 0;
 }
 
 inline bool valid(const Settings& s) {
@@ -104,6 +134,7 @@ inline bool valid(const Settings& s) {
     if (s.balanceGapLimit == kGapOptions[i]) { gapOk = true; break; }
   if (s.onlineEnabled > 1) return false;
   if (s.wordlistLanguage > 1) return false;
+  if (s.pinEnabled > 1) return false;
   return lockOk && cleanOk && screenOk && balanceOk && gapOk;
 }
 
@@ -111,9 +142,9 @@ inline bool save(const Settings& s) {
   if (SD.cardType() == CARD_NONE) return false;
   File f = SD.open(kPath, FILE_WRITE);
   if (!f) return false;
-  uint8_t buf[20];
+  uint8_t buf[53];
   memcpy(buf, "M5CF", 4);
-  buf[4] = 7;
+  buf[4] = 8;
   buf[5] = s.language;
   buf[6] = s.defaultProfile;
   buf[7] = s.lockTimeoutMs & 0xFF;
@@ -129,6 +160,8 @@ inline bool save(const Settings& s) {
   buf[17] = s.balanceGapLimit;
   buf[18] = s.onlineEnabled;
   buf[19] = s.wordlistLanguage;
+  buf[20] = s.pinEnabled;
+  memcpy(buf + 21, s.pinHash, 32);
   const bool ok = f.write(buf, sizeof(buf)) == sizeof(buf);
   f.flush();
   f.close();
@@ -141,7 +174,7 @@ inline Settings load() {
   if (SD.cardType() == CARD_NONE) return s;
   File f = SD.open(kPath, FILE_READ);
   if (!f) return s;
-  uint8_t buf[20] = {};
+  uint8_t buf[53] = {};
   const size_t n = f.read(buf, sizeof(buf));
   f.close();
   if (memcmp(buf, "M5CF", 4) != 0) return s;
@@ -227,6 +260,24 @@ inline Settings load() {
     loaded.balanceGapLimit = buf[17];
     loaded.onlineEnabled = buf[18];
     loaded.wordlistLanguage = buf[19];
+  } else if (buf[4] == 8 && n >= 53) {
+    loaded.language = buf[5];
+    loaded.defaultProfile = buf[6];
+    loaded.lockTimeoutMs = static_cast<uint32_t>(buf[7]) |
+                           (static_cast<uint32_t>(buf[8]) << 8) |
+                           (static_cast<uint32_t>(buf[9]) << 16) |
+                           (static_cast<uint32_t>(buf[10]) << 24);
+    loaded.seedCleanTimeoutMs = static_cast<uint32_t>(buf[11]) |
+                                (static_cast<uint32_t>(buf[12]) << 8) |
+                                (static_cast<uint32_t>(buf[13]) << 16) |
+                                (static_cast<uint32_t>(buf[14]) << 24);
+    loaded.screenCleanEvery = buf[15];
+    loaded.balanceAddrPerSide = buf[16];
+    loaded.balanceGapLimit = buf[17];
+    loaded.onlineEnabled = buf[18];
+    loaded.wordlistLanguage = buf[19];
+    loaded.pinEnabled = buf[20];
+    memcpy(loaded.pinHash, buf + 21, 32);
   } else {
     return s;
   }

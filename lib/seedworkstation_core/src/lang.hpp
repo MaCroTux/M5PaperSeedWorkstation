@@ -568,6 +568,33 @@ inline const char* tr(const char* es) {
     {"semilla para verificarla visualmente.", "seed to verify it visually."},
     {"ENTROPIA: aleatoriedad que genera la", "Entropy: the randomness that generates the"},
     {"semilla dibujando o tirando dados.", "seed by drawing or rolling dice."},
+
+    // Pantalla de arranque
+    {"Inicializando...", "Initializing..."},
+    {"Cargando configuracion...", "Loading settings..."},
+    {"Verificando criptografia...", "Verifying cryptography..."},
+    {"Listo", "Ready"},
+    {"Cartera fria de Bitcoin", "Cold Bitcoin wallet"},
+
+    // PIN de 4 digitos
+    {"PIN", "PIN"},
+    {"PIN DE SEGURIDAD", "Security PIN"},
+    {"PIN activo", "PIN enabled"},
+    {"PIN desactivado", "PIN disabled"},
+    {"CAMBIAR PIN", "Change PIN"},
+    {"DESACTIVAR PIN", "Disable PIN"},
+    {"ACTIVAR PIN", "Enable PIN"},
+    {"NUEVO PIN", "New PIN"},
+    {"CONFIRMAR PIN", "Confirm PIN"},
+    {"Repite el PIN", "Repeat the PIN"},
+    {"Introduce 4 digitos", "Enter 4 digits"},
+    {"PIN no coincide. Intentelo de nuevo", "PINs do not match. Try again"},
+    {"INTRODUCIR PIN", "Enter PIN"},
+    {"PIN incorrecto. Intentelo de nuevo", "Wrong PIN. Try again"},
+    {"Introduce el PIN actual", "Enter the current PIN"},
+    {"Introduce el PIN", "Enter the PIN"},
+    {"PIN activado", "PIN enabled"},
+    {"PIN desactivado", "PIN disabled"},
   };
 
   for (const auto& e : kT) {

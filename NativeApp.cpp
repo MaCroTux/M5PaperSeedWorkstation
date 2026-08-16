@@ -56,7 +56,8 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                       provision_test, scan_cam_qr,
                       balance_consent, wifi_select, wifi_password,
                       balance_checking, balance_result, tools_menu, bip85_result,
-                      slip39_split, slip39_shares, slip39_recover_len };
+                      slip39_split, slip39_shares, slip39_recover_len,
+                      pin_entry, settings_pin, pin_set };
 
 struct Rect {
   int x, y, w, h;
@@ -65,10 +66,16 @@ struct Rect {
   }
 };
 
-constexpr Rect kMenu[] = {{40, 152, 460, 57}, {40, 215, 460, 57},
-                          {40, 278, 460, 57}, {40, 341, 460, 57},
-                          {40, 404, 460, 57}, {40, 467, 460, 57},
-                          {40, 530, 460, 57}, {40, 593, 460, 57}};
+constexpr Rect kMenu[] = {{40, 150, 460, 66}, {40, 222, 460, 66},
+                          {40, 294, 460, 66}, {40, 366, 460, 66},
+                          {40, 438, 460, 66}, {40, 510, 460, 66},
+                          {40, 582, 460, 66}, {40, 654, 460, 66},
+                          {40, 726, 460, 66}};
+// Botones mas grandes para el menu general.
+constexpr Rect kMenuMain[] = {{40, 150, 460, 72}, {40, 236, 460, 72},
+                              {40, 322, 460, 72}, {40, 408, 460, 72},
+                              {40, 494, 460, 72}, {40, 580, 460, 72},
+                              {40, 666, 460, 72}, {40, 752, 460, 72}};
 constexpr const char* kMenuLabels[] = {"INTRODUCIR SEMILLA",
                                        "GENERAR ENTROPIA", "VAULT DE SESION",
                                        "RECIBIR POR WIFI", "HISTORIAL", "AJUSTES",
@@ -158,6 +165,7 @@ uint8_t radioReturnFocus = 0;
 void requestSecurity(Screen target, Screen returnTo);
 void drawScreen();
 void statusBar();
+String settingsPinLabel();
 void finalizeSlip39Share();
 void beginTwoFaEnable();
 void wipeSessionState();
@@ -299,6 +307,15 @@ QRCode addressQr;
 QRCode wifiQr;
 uint8_t wifiQrBuffer[256] = {};
 uint8_t addressQrBuffer[256] = {};
+
+enum class PinPurpose : uint8_t { unlock, set, disable };
+PinPurpose pinPurpose = PinPurpose::unlock;
+char pinEntry[5] = {};
+char pinPending[5] = {};
+bool pinConfirmPhase = false;
+bool pinMismatch = false;
+Screen pinUnlockReturn = Screen::menu;
+uint8_t pinUnlockReturnFocus = 0;
 
 struct PublicProfile {
   const char* title;
@@ -859,11 +876,11 @@ void drawMenu() {
                                     Icon::qr};
   for (uint8_t i = 0; i < menuCount(); ++i) {
     const uint8_t logical = menuLogical(i);
-    buttonOn(page, kMenu[i], menuLabel(logical), menuEnabled(logical),
+    buttonOn(page, kMenuMain[i], menuLabel(logical), menuEnabled(logical),
              focusIndex == i, kMenuIcons[logical]);
   }
   textStyle(page, 1); page.setTextDatum(MC_DATUM);
-  page.drawString(lang::tr(menuHint(menuLogical(focusIndex))), 270, 670);
+  page.drawString(lang::tr(menuHint(menuLogical(focusIndex))), 270, 836);
   // Icono de ayuda (opcion secundaria, abajo a la derecha).
   page.fillCircle(kHelpIcon.x + 32, kHelpIcon.y + 32, 30, kBlack);
   textStyle(page, 3, kWhite, kBlack);
@@ -4980,11 +4997,12 @@ void drawSettings() {
   buttonOn(page, kMenu[4], settingsOnlineLabel().c_str(), true, focusIndex == 4, Icon::wifi);
   buttonOn(page, kMenu[5], "BLE KEY", true, focusIndex == 5, Icon::shield);
   buttonOn(page, kMenu[6], "PANTALLA", true, focusIndex == 6, Icon::reset);
+  buttonOn(page, kMenu[7], settingsPinLabel().c_str(), true, focusIndex == 7, Icon::lock);
   if (gSettings.onlineEnabled) {
-    buttonOn(page, kMenu[7], settingsBalanceLabel().c_str(), true, focusIndex == 7, Icon::eye);
-    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 8);
+    buttonOn(page, kMenu[8], settingsBalanceLabel().c_str(), true, focusIndex == 8, Icon::eye);
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 9);
   } else {
-    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 7);
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 8);
   }
   fullRefresh();
 }
@@ -5156,6 +5174,164 @@ void drawOnlineConsent() {
   buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
   buttonOn(page, kAction, "SI, ACTIVAR", true, focusIndex == 1, Icon::wifi);
   fullRefresh();
+}
+
+// ---- PIN de 4 digitos (primera capa de seguridad) ----
+
+String settingsPinLabel() {
+  return String(lang::tr("PIN")) + ": " +
+      (gSettings.pinEnabled ? lang::tr("SI") : lang::tr("NO"));
+}
+
+void resetPinEntry() {
+  memset(pinEntry, 0, sizeof(pinEntry));
+  memset(pinPending, 0, sizeof(pinPending));
+  pinConfirmPhase = false;
+  pinMismatch = false;
+}
+
+String pinMask() {
+  String s;
+  for (uint8_t i = 0; i < 4; ++i) s += (i < strlen(pinEntry)) ? '*' : '_';
+  return s;
+}
+
+void updatePinDynamic() {
+  M5EPD_Canvas field(&M5.EPD);
+  if (field.createCanvas(500, 52)) {
+    field.fillCanvas(kWhite); field.drawRoundRect(0, 0, 500, 52, 8, kBlack);
+    textStyle(field, 3);
+    field.setTextDatum(MC_DATUM);
+    field.drawString(pinMask(), 250, 26);
+    field.setTextDatum(TL_DATUM);
+    field.pushCanvas(20, 165, UPDATE_MODE_A2); field.deleteCanvas();
+  }
+  updateButton(kDigitDelete, "BORRAR", pinEntry[0], false, Icon::back, UPDATE_MODE_A2);
+}
+
+void drawPinKeypad() {
+  for (uint8_t i = 0; i < 10; ++i)
+    buttonOn(page, kDigitKey[i], String(i == 9 ? 0 : i + 1).c_str());
+  buttonOn(page, kDigitDelete, "BORRAR", pinEntry[0], false, Icon::back);
+}
+
+void drawPinField() {
+  page.drawRoundRect(20, 165, 500, 52, 8, kBlack);
+  textStyle(page, 3);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(pinMask(), kWidth / 2, 191);
+  page.setTextDatum(TL_DATUM);
+  drawPinKeypad();
+}
+
+void processPinComplete();
+
+void pinAddDigit(char digit) {
+  const size_t len = strlen(pinEntry);
+  if (len >= 4) return;
+  pinEntry[len] = digit;
+  pinEntry[len + 1] = '\0';
+  if (strlen(pinEntry) == 4) { processPinComplete(); return; }
+  updatePinDynamic();
+}
+
+void drawSettingsPin() {
+  blankPage();
+  title("PIN DE SEGURIDAD", gSettings.pinEnabled ? lang::tr("PIN activo")
+                                                 : lang::tr("PIN desactivado"));
+  if (gSettings.pinEnabled) {
+    buttonOn(page, kMenu[0], "CAMBIAR PIN", true, focusIndex == 0, Icon::key);
+    buttonOn(page, kMenu[1], "DESACTIVAR PIN", true, focusIndex == 1, Icon::unlock);
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 2);
+  } else {
+    buttonOn(page, kMenu[0], "ACTIVAR PIN", true, focusIndex == 0, Icon::lock);
+    buttonOn(page, kBack, lang::tr("VOLVER"), true, focusIndex == 1);
+  }
+  fullRefresh();
+}
+
+void drawPinSet() {
+  blankPage();
+  const char* sub = pinMismatch ? lang::tr("PIN no coincide. Intentelo de nuevo")
+                                : (pinConfirmPhase ? lang::tr("Repite el PIN")
+                                                   : lang::tr("Introduce 4 digitos"));
+  title(pinConfirmPhase ? "CONFIRMAR PIN" : "NUEVO PIN", sub);
+  drawPinField();
+  buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  fullRefresh();
+}
+
+void drawPinEntry() {
+  blankPage();
+  const char* head = pinPurpose == PinPurpose::disable ? "DESACTIVAR PIN" : "INTRODUCIR PIN";
+  const char* sub = pinMismatch ? lang::tr("PIN incorrecto. Intentelo de nuevo")
+                                : (pinPurpose == PinPurpose::disable
+                                       ? lang::tr("Introduce el PIN actual")
+                                       : lang::tr("Introduce el PIN"));
+  title(head, sub);
+  drawPinField();
+  if (pinPurpose == PinPurpose::disable)
+    buttonOn(page, kBack, "CANCELAR", true, focusIndex == 0);
+  fullRefresh();
+}
+
+void processPinComplete() {
+  if (screen == Screen::pin_set) {
+    if (!pinConfirmPhase) {
+      strncpy(pinPending, pinEntry, sizeof(pinPending) - 1);
+      memset(pinEntry, 0, sizeof(pinEntry));
+      pinConfirmPhase = true;
+      pinMismatch = false;
+      drawPinSet();
+    } else if (strcmp(pinEntry, pinPending) == 0) {
+      if (device_settings::setPin(gSettings, pinEntry) &&
+          device_settings::save(gSettings)) {
+        showToast(lang::tr("PIN activado"));
+      } else {
+        showToast(lang::tr("No se pudo guardar la configuracion"));
+      }
+      resetPinEntry();
+      screen = Screen::settings_pin; focusIndex = 0; drawScreen();
+    } else {
+      pinMismatch = true;
+      memset(pinEntry, 0, sizeof(pinEntry));
+      memset(pinPending, 0, sizeof(pinPending));
+      pinConfirmPhase = false;
+      drawPinSet();
+    }
+  } else if (screen == Screen::pin_entry) {
+    if (device_settings::pinMatches(gSettings, pinEntry)) {
+      if (pinPurpose == PinPurpose::disable) {
+        device_settings::clearPin(gSettings);
+        device_settings::save(gSettings);
+        showToast(lang::tr("PIN desactivado"));
+        resetPinEntry();
+        screen = Screen::settings_pin; focusIndex = 0; drawScreen();
+      } else {
+        resetPinEntry();
+        screen = pinUnlockReturn; focusIndex = pinUnlockReturnFocus; drawScreen();
+      }
+    } else {
+      pinMismatch = true;
+      memset(pinEntry, 0, sizeof(pinEntry));
+      drawPinEntry();
+    }
+  }
+}
+
+void unlockDevice() {
+  if (gSettings.pinEnabled) {
+    pinPurpose = PinPurpose::unlock;
+    resetPinEntry();
+    pinUnlockReturn = (screen == Screen::screensaver) ? screensaverReturn : Screen::menu;
+    pinUnlockReturnFocus = 0;
+    screen = Screen::pin_entry;
+    drawPinEntry();
+  } else {
+    screen = (screen == Screen::screensaver) ? screensaverReturn : Screen::menu;
+    focusIndex = 0;
+    drawScreen();
+  }
 }
 
 // ---- BLE key (llave criptografica) ----
@@ -5503,6 +5679,9 @@ void drawScreen() {
     case Screen::wifi_password: drawWifiPassword(); break;
     case Screen::balance_checking: drawBalanceChecking(); break;
     case Screen::balance_result: drawBalanceResult(); break;
+    case Screen::pin_entry: drawPinEntry(); break;
+    case Screen::settings_pin: drawSettingsPin(); break;
+    case Screen::pin_set: drawPinSet(); break;
   }
 }
 
@@ -5513,7 +5692,7 @@ void updateFocusButton(uint8_t index) {
                                         Icon::wifi, Icon::list, Icon::wrench,
                                         Icon::lock, Icon::qr};
       const uint8_t logical = menuLogical(index);
-      updateButton(kMenu[index], menuLabel(logical), menuEnabled(logical),
+      updateButton(kMenuMain[index], menuLabel(logical), menuEnabled(logical),
                    index == focusIndex, kMenuIcons[logical]); break;
     }
     case Screen::active_seed: {
@@ -5805,11 +5984,29 @@ void updateFocusButton(uint8_t index) {
       else if (index == 4) updateButton(kMenu[4], settingsOnlineLabel().c_str(), true, index == focusIndex, Icon::wifi);
       else if (index == 5) updateButton(kMenu[5], "BLE KEY", true, index == focusIndex, Icon::shield);
       else if (index == 6) updateButton(kMenu[6], "PANTALLA", true, index == focusIndex, Icon::reset);
-      else if (gSettings.onlineEnabled && index == 7)
-        updateButton(kMenu[7], settingsBalanceLabel().c_str(), true, index == focusIndex, Icon::eye);
+      else if (index == 7) updateButton(kMenu[7], settingsPinLabel().c_str(), true, index == focusIndex, Icon::lock);
+      else if (gSettings.onlineEnabled && index == 8)
+        updateButton(kMenu[8], settingsBalanceLabel().c_str(), true, index == focusIndex, Icon::eye);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     }
+    case Screen::settings_pin:
+      if (gSettings.pinEnabled) {
+        if (index == 0) updateButton(kMenu[0], "CAMBIAR PIN", true, index == focusIndex, Icon::key);
+        else if (index == 1) updateButton(kMenu[1], "DESACTIVAR PIN", true, index == focusIndex, Icon::unlock);
+        else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      } else {
+        if (index == 0) updateButton(kMenu[0], "ACTIVAR PIN", true, index == focusIndex, Icon::lock);
+        else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      }
+      break;
+    case Screen::pin_entry:
+      if (pinPurpose == PinPurpose::disable)
+        updateButton(kBack, "CANCELAR", true, index == focusIndex);
+      break;
+    case Screen::pin_set:
+      updateButton(kBack, "CANCELAR", true, index == focusIndex);
+      break;
     case Screen::settings_online:
       if (index == 0)
         updateButton(kAction, gSettings.onlineEnabled ? "DESACTIVAR MODO ONLINE" : "ACTIVAR MODO ONLINE",
@@ -6054,7 +6251,9 @@ void moveFocus(int direction) {
     else count = 1;
   }
   else if (screen == Screen::wifi_mode) count = 4;
-  else if (screen == Screen::settings) count = gSettings.onlineEnabled ? 9 : 8;
+  else if (screen == Screen::settings) count = gSettings.onlineEnabled ? 10 : 9;
+  else if (screen == Screen::settings_pin) count = gSettings.pinEnabled ? 3 : 2;
+  else if (screen == Screen::pin_entry || screen == Screen::pin_set) count = 1;
   else if (screen == Screen::settings_screen) count = device_settings::kScreenCleanOptionCount + 2;
   else if (screen == Screen::settings_lang) count = 3;
   else if (screen == Screen::settings_timeout) count = device_settings::kTimeoutOptionCount + 1;
@@ -6174,7 +6373,7 @@ void click(int x, int y) {
   if (screen == Screen::menu) {
     const uint8_t count = menuCount();
     for (uint8_t i = 0; i < count; ++i) {
-      if (!kMenu[i].contains(x, y)) continue;
+      if (!kMenuMain[i].contains(x, y)) continue;
       const uint8_t logical = menuLogical(i);
       if (logical == 0) {
         if (fingerprintValid) { screen = Screen::active_seed; focusIndex = 0; drawScreen(); }
@@ -6786,10 +6985,45 @@ void click(int x, int y) {
     else if (kMenu[4].contains(x, y)) { screen = Screen::settings_online; focusIndex = 0; drawScreen(); }
     else if (kMenu[5].contains(x, y)) { screen = Screen::ble_key_menu; focusIndex = 0; drawScreen(); }
     else if (kMenu[6].contains(x, y)) { screen = Screen::settings_screen; focusIndex = 0; drawScreen(); }
-    else if (gSettings.onlineEnabled && kMenu[7].contains(x, y)) {
+    else if (kMenu[7].contains(x, y)) { screen = Screen::settings_pin; focusIndex = 0; drawScreen(); }
+    else if (gSettings.onlineEnabled && kMenu[8].contains(x, y)) {
       screen = Screen::settings_balance; focusIndex = 0; drawScreen();
     }
     else if (kBack.contains(x, y)) { screen = Screen::menu; focusIndex = 5; drawScreen(); }
+  } else if (screen == Screen::settings_pin) {
+    if (kMenu[0].contains(x, y)) {
+      pinPurpose = PinPurpose::set; resetPinEntry();
+      screen = Screen::pin_set; focusIndex = 0; drawScreen();
+    } else if (gSettings.pinEnabled && kMenu[1].contains(x, y)) {
+      pinPurpose = PinPurpose::disable; resetPinEntry();
+      screen = Screen::pin_entry; focusIndex = 0; drawScreen();
+    } else if (kBack.contains(x, y)) {
+      screen = Screen::settings; focusIndex = 7; drawScreen();
+    }
+  } else if (screen == Screen::pin_set) {
+    for (uint8_t i = 0; i < 10; ++i) if (kDigitKey[i].contains(x, y)) {
+      pinAddDigit(i == 9 ? '0' : static_cast<char>('1' + i));
+      return;
+    }
+    if (kDigitDelete.contains(x, y) && pinEntry[0]) {
+      pinEntry[strlen(pinEntry) - 1] = '\0';
+      updatePinDynamic();
+    } else if (kBack.contains(x, y)) {
+      resetPinEntry();
+      screen = Screen::settings_pin; focusIndex = 0; drawScreen();
+    }
+  } else if (screen == Screen::pin_entry) {
+    for (uint8_t i = 0; i < 10; ++i) if (kDigitKey[i].contains(x, y)) {
+      pinAddDigit(i == 9 ? '0' : static_cast<char>('1' + i));
+      return;
+    }
+    if (kDigitDelete.contains(x, y) && pinEntry[0]) {
+      pinEntry[strlen(pinEntry) - 1] = '\0';
+      updatePinDynamic();
+    } else if (pinPurpose == PinPurpose::disable && kBack.contains(x, y)) {
+      resetPinEntry();
+      screen = Screen::settings_pin; focusIndex = 0; drawScreen();
+    }
   } else if (screen == Screen::settings_online) {
     if (kAction.contains(x, y)) {
       if (gSettings.onlineEnabled) {
@@ -6820,7 +7054,7 @@ void click(int x, int y) {
         drawSettingsBalance();
         return;
       }
-    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 7; drawScreen(); }
+    if (kBack.contains(x, y)) { screen = Screen::settings; focusIndex = 8; drawScreen(); }
   } else if (screen == Screen::settings_screen) {
     for (uint8_t i = 0; i < device_settings::kScreenCleanOptionCount; ++i)
       if (kMenu[i].contains(x, y)) {
@@ -6990,7 +7224,7 @@ void click(int x, int y) {
 }
 
 void activateFocus() {
-  if (screen == Screen::menu) click(kMenu[focusIndex].x + 5, kMenu[focusIndex].y + 5);
+  if (screen == Screen::menu) click(kMenuMain[focusIndex].x + 5, kMenuMain[focusIndex].y + 5);
   else if (screen == Screen::active_seed) click(kActiveMenu[focusIndex].x + 5, kActiveMenu[focusIndex].y + 5);
   else if (screen == Screen::vault_actions) click(kActiveMenu[focusIndex].x + 5, kActiveMenu[focusIndex].y + 5);
   else if (screen == Screen::seed_switcher) {
@@ -7117,9 +7351,15 @@ void activateFocus() {
     const Rect& r = focusIndex == 0 ? kMenu[0] : focusIndex == 1 ? kMenu[1] :
                     focusIndex == 2 ? kMenu[2] : focusIndex == 3 ? kMenu[3] :
                     focusIndex == 4 ? kMenu[4] : focusIndex == 5 ? kMenu[5] :
-                    focusIndex == 6 ? kMenu[6] :
-                    (gSettings.onlineEnabled && focusIndex == 7) ? kMenu[7] : kBack;
+                    focusIndex == 6 ? kMenu[6] : focusIndex == 7 ? kMenu[7] :
+                    (gSettings.onlineEnabled && focusIndex == 8) ? kMenu[8] : kBack;
     click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::settings_pin) {
+    const Rect& r = focusIndex == 0 ? kMenu[0] :
+                    (focusIndex == 1 && gSettings.pinEnabled) ? kMenu[1] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::pin_entry || screen == Screen::pin_set) {
+    click(kBack.x + 5, kBack.y + 5);
   } else if (screen == Screen::settings_online) {
     const Rect& r = focusIndex == 0 ? kAction : kBack;
     click(r.x + 5, r.y + 5);
@@ -7233,6 +7473,60 @@ void activateFocus() {
   else if (screen == Screen::help) click(kBack.x + 5, kBack.y + 5);
 }
 
+// ---- Pantalla de arranque (splash) ----
+
+void drawBootFrame() {
+  page.fillCanvas(kWhite);
+  const int cx = kWidth / 2;
+
+  textStyle(page, 2);
+  page.setTextDatum(MC_DATUM);
+  page.drawString("M5Paper", cx, 60);
+
+  page.drawCircle(cx, 250, 136, kBlack);
+  page.drawCircle(cx, 250, 118, kBlack);
+  page.fillCircle(cx, 250, 110, kBlack);
+  textStyle(page, 7, kWhite, kBlack);
+  page.setTextDatum(MC_DATUM);
+  page.drawString("B", cx, 250);
+
+  textStyle(page, 3);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr("SEED WORKSTATION"), cx, 478);
+  textStyle(page, 2);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(lang::tr("Cartera fria de Bitcoin"), cx, 528);
+
+  textStyle(page, 1);
+  page.setTextDatum(MC_DATUM);
+  page.drawString(String("Firmware ") + kVersion + "  -  " +
+                  String(M5.getBatteryVoltage()) + " mV", cx, 900);
+  page.drawString(lang::tr("NO USAR FONDOS REALES (DEV)"), cx, 930);
+  page.setTextDatum(TL_DATUM);
+
+  fullRefresh();
+}
+
+void drawBootStatus(uint8_t pct, const char* label, const char* detail) {
+  M5EPD_Canvas c(&M5.EPD);
+  if (!c.createCanvas(kWidth, 150)) return;
+  c.fillCanvas(kWhite);
+  const int cx = kWidth / 2;
+  const int bx = (kWidth - 340) / 2;
+  c.setTextColor(kBlack, kWhite);
+  c.setTextSize(2);
+  c.setTextDatum(MC_DATUM);
+  c.drawString(lang::tr(label), cx, 22);
+  c.drawString(detail, cx, 48);
+  c.setTextColor(kBlack, kWhite);
+  c.drawRoundRect(bx, 62, 340, 34, 8, kBlack);
+  const int w = (pct * 336) / 100;
+  if (w > 4) c.fillRoundRect(bx + 2, 60, w - 4, 30, 6, kBlack);
+  c.setTextDatum(TL_DATUM);
+  c.pushCanvas(0, 585, UPDATE_MODE_A2);
+  c.deleteCanvas();
+}
+
 }  // namespace
 
 void setup() {
@@ -7246,30 +7540,64 @@ void setup() {
   M5.EPD.Clear(true);
   if (!page.createCanvas(kWidth, kHeight)) return;
   Serial.printf("M5Paper Seed Workstation - %s\n", kVersion);
-  fingerprintSelfTest = bitcoin_fingerprint::self_test();
-  Serial.printf("Fingerprint BIP32 self-test: %s\n",
-                fingerprintSelfTest ? "OK" : "ERROR");
-  Serial.printf("PBKDF2-HMAC-SHA256 self-test: %s\n",
-                encrypted_seed_store::self_test() ? "OK" : "ERROR");
-  Serial.printf("PSBT parser self-test: %s\n",
-                psbt::self_test() ? "OK" : "ERROR");
-  Serial.printf("ECDSA (RFC6979) self-test: %s\n",
-                tx_sign::self_test() ? "OK" : "ERROR");
-  hdSelfTest = bitcoin_hd::self_test() && bitcoin_hd::self_test_passphrase();
-  Serial.printf("BIP32 xpub/zpub self-test: %s\n", hdSelfTest ? "OK" : "ERROR");
-  addressBip84SelfTest = bitcoin_address::self_test_bip84();
-  Serial.printf("Bitcoin address BIP84 self-test: %s\n",
-                addressBip84SelfTest ? "OK" : "ERROR");
-  bip85SelfTest = bip85::self_test();
-  Serial.printf("BIP85 self-test: %s\n", bip85SelfTest ? "OK" : "ERROR");
-  slip39SelfTest = slip39::self_test();
-  Serial.printf("SLIP-39 self-test: %s\n", slip39SelfTest ? "OK" : "ERROR");
+
+  // Cargar ajustes antes de dibujar para poder mostrar el idioma correcto
+  // en la pantalla de arranque.
   gSettings = device_settings::load();
   lang::set(gSettings.language == 1 ? lang::Lang::ES : lang::Lang::EN);
   bip39::set_wordlist(gSettings.wordlistLanguage == 1 ? bip39::Wordlist::Spanish
                                                       : bip39::Wordlist::English);
+
+  drawBootFrame();
+  drawBootStatus(8, "Cargando configuracion...", "");
+
+  fingerprintSelfTest = bitcoin_fingerprint::self_test();
+  Serial.printf("Fingerprint BIP32 self-test: %s\n",
+                fingerprintSelfTest ? "OK" : "ERROR");
+  drawBootStatus(15, "Verificando criptografia...", "BIP32 fingerprint");
+
+  Serial.printf("PBKDF2-HMAC-SHA256 self-test: %s\n",
+                encrypted_seed_store::self_test() ? "OK" : "ERROR");
+  drawBootStatus(25, "Verificando criptografia...", "PBKDF2-HMAC-SHA256");
+
+  Serial.printf("PSBT parser self-test: %s\n",
+                psbt::self_test() ? "OK" : "ERROR");
+  drawBootStatus(35, "Verificando criptografia...", "PSBT parser");
+
+  Serial.printf("ECDSA (RFC6979) self-test: %s\n",
+                tx_sign::self_test() ? "OK" : "ERROR");
+  drawBootStatus(45, "Verificando criptografia...", "ECDSA (RFC6979)");
+
+  hdSelfTest = bitcoin_hd::self_test() && bitcoin_hd::self_test_passphrase();
+  Serial.printf("BIP32 xpub/zpub self-test: %s\n", hdSelfTest ? "OK" : "ERROR");
+  drawBootStatus(55, "Verificando criptografia...", "BIP32 xpub/zpub");
+
+  addressBip84SelfTest = bitcoin_address::self_test_bip84();
+  Serial.printf("Bitcoin address BIP84 self-test: %s\n",
+                addressBip84SelfTest ? "OK" : "ERROR");
+  drawBootStatus(70, "Verificando criptografia...", "Bitcoin address BIP84");
+
+  bip85SelfTest = bip85::self_test();
+  Serial.printf("BIP85 self-test: %s\n", bip85SelfTest ? "OK" : "ERROR");
+  drawBootStatus(80, "Verificando criptografia...", "BIP85");
+
+  slip39SelfTest = slip39::self_test();
+  Serial.printf("SLIP-39 self-test: %s\n", slip39SelfTest ? "OK" : "ERROR");
+  drawBootStatus(90, "Verificando criptografia...", "SLIP-39");
+
+  drawBootStatus(100, "Listo", "");
+  delay(350);
   lastUserActivity = millis();
-  drawScreen();
+  if (gSettings.pinEnabled) {
+    pinPurpose = PinPurpose::unlock;
+    resetPinEntry();
+    pinUnlockReturn = Screen::menu;
+    pinUnlockReturnFocus = 0;
+    screen = Screen::pin_entry;
+    drawPinEntry();
+  } else {
+    drawScreen();
+  }
 }
 
 void loop() {
