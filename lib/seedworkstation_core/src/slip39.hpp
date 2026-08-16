@@ -406,6 +406,27 @@ inline bool combine_mnemonics(uint8_t count, const String* mnemonics,
   return true;
 }
 
+// ---- Lookup de la wordlist (para el teclado de entrada de shares) ----
+inline const char* word_at(uint16_t index) {
+  return index < kWordCount ? kWords[index] : "---";
+}
+inline uint16_t find_exact(const String& value) {
+  for (uint16_t i = 0; i < kWordCount; ++i)
+    if (value.equals(kWords[i])) return i;
+  return 0xFFFF;
+}
+inline size_t find_matches(const String& prefix, uint16_t* matches, size_t capacity) {
+  if (!prefix.length()) return 0;
+  size_t total = 0;
+  for (uint16_t i = 0; i < kWordCount; ++i) {
+    if (strncmp(kWords[i], prefix.c_str(), prefix.length()) == 0) {
+      if (total < capacity) matches[total] = i;
+      ++total;
+    }
+  }
+  return total;
+}
+
 inline bool self_test() {
   // 1) Shamir roundtrip 2-of-3, 16 bytes.
   {

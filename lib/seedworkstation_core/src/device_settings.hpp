@@ -66,6 +66,7 @@ struct Settings {
   uint8_t balanceAddrPerSide;   // direcciones por lado a consultar
   uint8_t balanceGapLimit;      // gap limit (direcciones vacias consecutivas)
   uint8_t onlineEnabled;        // 0 = billetera fria (por defecto), 1 = billetera online
+  uint8_t wordlistLanguage;     // 0 = BIP39 ingles, 1 = BIP39 espanol
 };
 
 inline Settings defaults() {
@@ -78,6 +79,7 @@ inline Settings defaults() {
   s.balanceAddrPerSide = 50;
   s.balanceGapLimit = 20;
   s.onlineEnabled = 0;  // fria por defecto
+  s.wordlistLanguage = 0;  // BIP39 ingles por defecto
   return s;
 }
 
@@ -101,6 +103,7 @@ inline bool valid(const Settings& s) {
   for (uint8_t i = 0; i < kGapOptionCount; ++i)
     if (s.balanceGapLimit == kGapOptions[i]) { gapOk = true; break; }
   if (s.onlineEnabled > 1) return false;
+  if (s.wordlistLanguage > 1) return false;
   return lockOk && cleanOk && screenOk && balanceOk && gapOk;
 }
 
@@ -108,9 +111,9 @@ inline bool save(const Settings& s) {
   if (SD.cardType() == CARD_NONE) return false;
   File f = SD.open(kPath, FILE_WRITE);
   if (!f) return false;
-  uint8_t buf[19];
+  uint8_t buf[20];
   memcpy(buf, "M5CF", 4);
-  buf[4] = 6;
+  buf[4] = 7;
   buf[5] = s.language;
   buf[6] = s.defaultProfile;
   buf[7] = s.lockTimeoutMs & 0xFF;
@@ -125,6 +128,7 @@ inline bool save(const Settings& s) {
   buf[16] = s.balanceAddrPerSide;
   buf[17] = s.balanceGapLimit;
   buf[18] = s.onlineEnabled;
+  buf[19] = s.wordlistLanguage;
   const bool ok = f.write(buf, sizeof(buf)) == sizeof(buf);
   f.flush();
   f.close();
@@ -137,7 +141,7 @@ inline Settings load() {
   if (SD.cardType() == CARD_NONE) return s;
   File f = SD.open(kPath, FILE_READ);
   if (!f) return s;
-  uint8_t buf[19] = {};
+  uint8_t buf[20] = {};
   const size_t n = f.read(buf, sizeof(buf));
   f.close();
   if (memcmp(buf, "M5CF", 4) != 0) return s;
@@ -207,6 +211,22 @@ inline Settings load() {
     loaded.balanceAddrPerSide = buf[16];
     loaded.balanceGapLimit = buf[17];
     loaded.onlineEnabled = buf[18];
+  } else if (buf[4] == 7 && n >= 20) {
+    loaded.language = buf[5];
+    loaded.defaultProfile = buf[6];
+    loaded.lockTimeoutMs = static_cast<uint32_t>(buf[7]) |
+                           (static_cast<uint32_t>(buf[8]) << 8) |
+                           (static_cast<uint32_t>(buf[9]) << 16) |
+                           (static_cast<uint32_t>(buf[10]) << 24);
+    loaded.seedCleanTimeoutMs = static_cast<uint32_t>(buf[11]) |
+                                (static_cast<uint32_t>(buf[12]) << 8) |
+                                (static_cast<uint32_t>(buf[13]) << 16) |
+                                (static_cast<uint32_t>(buf[14]) << 24);
+    loaded.screenCleanEvery = buf[15];
+    loaded.balanceAddrPerSide = buf[16];
+    loaded.balanceGapLimit = buf[17];
+    loaded.onlineEnabled = buf[18];
+    loaded.wordlistLanguage = buf[19];
   } else {
     return s;
   }

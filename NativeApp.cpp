@@ -56,7 +56,7 @@ enum class Screen { menu, active_seed, seed_switcher, passphrase_input, backup_s
                       provision_test, scan_cam_qr,
                       balance_consent, wifi_select, wifi_password,
                       balance_checking, balance_result, tools_menu, bip85_result,
-                      slip39_split, slip39_shares };
+                      slip39_split, slip39_shares, slip39_recover_len };
 
 struct Rect {
   int x, y, w, h;
@@ -153,6 +153,7 @@ uint8_t radioReturnFocus = 0;
 void requestSecurity(Screen target, Screen returnTo);
 void drawScreen();
 void statusBar();
+void finalizeSlip39Share();
 void beginTwoFaEnable();
 void wipeSessionState();
 uint8_t focusIndex = 0;
@@ -161,6 +162,10 @@ uint8_t wordCount = 0;
 int8_t editingWord = -1;
 uint16_t words[24] = {};
 String prefix;
+bool slip39EntryMode = false;
+String slip39RecoverMnemonics[16];
+uint8_t slip39RecoverCount = 0;
+uint8_t slip39RecoverThreshold = 1;
 QRCode seedqr;
 uint8_t seedqrBuffer[128] = {};
 uint8_t seedqrRow = 0;
@@ -1076,7 +1081,8 @@ void renderWordRegion(M5EPD_Canvas& region) {
 }
 
 size_t currentSuggestions(uint16_t* matches) {
-  return bip39::find_matches(prefix, matches, 4);
+  return slip39EntryMode ? slip39::find_matches(prefix, matches, 4)
+                         : bip39::find_matches(prefix, matches, 4);
 }
 
 void renderSuggestions(M5EPD_Canvas& region) {
@@ -1090,7 +1096,8 @@ void renderSuggestions(M5EPD_Canvas& region) {
     Rect local{kSuggestion[i].x - 15, kSuggestion[i].y - 590,
                kSuggestion[i].w, kSuggestion[i].h};
     if (i < min(count, static_cast<size_t>(4)))
-      buttonOn(region, local, bip39::word_at(matches[i]));
+      buttonOn(region, local, slip39EntryMode ? slip39::word_at(matches[i])
+                                              : bip39::word_at(matches[i]));
   }
 }
 
@@ -1111,7 +1118,14 @@ void updateKeyboardDynamic() {
 
 void drawKeyboard() {
   blankPage();
-  title("TECLADO BIP39", "Escribe 4 letras y elige");
+  if (slip39EntryMode) {
+    char sub[48];
+    snprintf(sub, sizeof(sub), "Share %u · %u palabras",
+             slip39RecoverCount + 1, targetWords);
+    title("TECLADO SLIP-39", sub);
+  } else {
+    title("TECLADO BIP39", "Escribe 4 letras y elige");
+  }
   drawKeyboardKeys();
   M5EPD_Canvas wordRegion(&M5.EPD);
   wordRegion.createCanvas(510, 120);
@@ -1900,11 +1914,15 @@ void commitWord(uint16_t selected) {
   words[wordCount++] = selected;
   prefix = "";
   if (wordCount == targetWords) {
-    updateFingerprint();
-    if (newSeedIntent == NewSeedIntent::ram_only) cacheCurrentSeed("RAM");
-    requestSecurity(Screen::review,
-                    newSeedIntent != NewSeedIntent::none
-                        ? Screen::session_seed_list : Screen::menu);
+    if (slip39EntryMode) {
+      finalizeSlip39Share();
+    } else {
+      updateFingerprint();
+      if (newSeedIntent == NewSeedIntent::ram_only) cacheCurrentSeed("RAM");
+      requestSecurity(Screen::review,
+                      newSeedIntent != NewSeedIntent::none
+                          ? Screen::session_seed_list : Screen::menu);
+    }
   } else {
     updateKeyboardDynamic();
   }
@@ -2897,10 +2915,23 @@ uint8_t slip39N = 3;
 void drawToolsMenu() {
   blankPage();
   title("HERRAMIENTAS", "Utilidades sobre la semilla activa");
+  char langLabel[32];
+  snprintf(langLabel, sizeof(langLabel), "IDIOMA BIP39: %s",
+           gSettings.wordlistLanguage == 1 ? "ESPANOL" : "INGLES");
   buttonOn(page, kActiveMenu[0], "BIP85 (SEED HIJA)", fingerprintValid, focusIndex == 0, Icon::key);
   buttonOn(page, kActiveMenu[1], "SLIP-39 (PARTIR)", fingerprintValid, focusIndex == 1, Icon::shield);
-  buttonOn(page, kBack, "VOLVER", true, focusIndex == 2);
+  buttonOn(page, kActiveMenu[2], "SLIP-39 (RECUPERAR)", true, focusIndex == 2, Icon::lock);
+  buttonOn(page, kActiveMenu[3], langLabel, true, focusIndex == 3, Icon::list);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 4);
   fullRefresh();
+}
+
+void toggleWordlistLanguage() {
+  gSettings.wordlistLanguage = gSettings.wordlistLanguage == 1 ? 0 : 1;
+  device_settings::save(gSettings);
+  bip39::set_wordlist(gSettings.wordlistLanguage == 1 ? bip39::Wordlist::Spanish
+                                                      : bip39::Wordlist::English);
+  drawToolsMenu();
 }
 
 void deriveBip85() {
@@ -3030,6 +3061,68 @@ void drawSlip39Shares() {
   buttonOn(page, kBack, "VOLVER", true, focusIndex == 0);
   buttonOn(page, kAction, "SIGUIENTE", true, focusIndex == 1, Icon::reset);
   fullRefresh();
+}
+
+void drawSlip39RecoverLen() {
+  blankPage();
+  title("SLIP-39 RECUPERAR", "Cuantas palabras tiene cada share");
+  buttonOn(page, kChoose12, "20 PALABRAS (128 bits)", true, focusIndex == 0);
+  buttonOn(page, kChoose24, "33 PALABRAS (256 bits)", true, focusIndex == 1);
+  buttonOn(page, kBack, "VOLVER", true, focusIndex == 2);
+  fullRefresh();
+}
+
+void startSlip39Recover() {
+  slip39EntryMode = true;
+  slip39RecoverCount = 0;
+  slip39RecoverThreshold = 1;
+  screen = Screen::slip39_recover_len; focusIndex = 0; drawScreen();
+}
+
+void beginSlip39Share(uint8_t count) {
+  resetPhrase(count);
+  screen = Screen::keyboard; focusIndex = 0; drawScreen();
+}
+
+void finalizeSlip39Share() {
+  String mnemonic;
+  for (uint8_t i = 0; i < wordCount; ++i) {
+    if (i) mnemonic += ' ';
+    mnemonic += slip39::word_at(words[i]);
+  }
+  slip39RecoverMnemonics[slip39RecoverCount++] = mnemonic;
+  slip39::Share sh;
+  if (slip39RecoverCount == 1 && slip39::decode_share(mnemonic, sh)) {
+    slip39RecoverThreshold = sh.memberThreshold;
+    encrypted_seed_store::wipe(sh.value, sizeof(sh.value));
+  }
+  if (slip39RecoverCount < slip39RecoverThreshold) {
+    resetPhrase(targetWords);
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Share %u guardada. Siguiente...", slip39RecoverCount);
+    showToast(msg);
+    screen = Screen::keyboard; focusIndex = 0; drawScreen();
+  } else {
+    uint8_t secret[32] = {}; uint8_t secretLen = 0;
+    if (slip39::combine_mnemonics(slip39RecoverThreshold, slip39RecoverMnemonics, "", secret, &secretLen)) {
+      slip39EntryMode = false;
+      uint16_t recovered[24] = {};
+      const uint8_t wc = secretLen == 16 ? 12 : 24;
+      bip39::from_entropy(secret, secretLen, recovered, wc);
+      encrypted_seed_store::wipe(secret, sizeof(secret));
+      if (fingerprintValid) cacheCurrentSeed();
+      resetPhrase(wc);
+      memcpy(words, recovered, wc * sizeof(uint16_t));
+      wordCount = targetWords;
+      updateFingerprint();
+      cacheCurrentSeed("SLIP39", false);
+      screen = Screen::active_seed; focusIndex = 0; drawScreen();
+    } else {
+      slip39EntryMode = false;
+      showToast("Error recuperando");
+      screen = Screen::tools_menu; focusIndex = 1; drawScreen();
+    }
+  }
 }
 
 qr_wifi::QRWiFiServer wifiServer;
@@ -5321,6 +5414,7 @@ void drawScreen() {
     case Screen::bip85_result: drawBip85Result(); break;
     case Screen::slip39_split: drawSlip39Split(); break;
     case Screen::slip39_shares: drawSlip39Shares(); break;
+    case Screen::slip39_recover_len: drawSlip39RecoverLen(); break;
     case Screen::twofa_list: drawTwoFaList(); break;
     case Screen::twofa_migrate_list: drawTwoFaMigrateList(); break;
     case Screen::balance_consent: drawBalanceConsent(); break;
@@ -5768,6 +5862,17 @@ void updateFocusButton(uint8_t index) {
     case Screen::tools_menu:
       if (index == 0) updateButton(kActiveMenu[0], "BIP85 (SEED HIJA)", fingerprintValid, index == focusIndex, Icon::key);
       else if (index == 1) updateButton(kActiveMenu[1], "SLIP-39 (PARTIR)", fingerprintValid, index == focusIndex, Icon::shield);
+      else if (index == 2) updateButton(kActiveMenu[2], "SLIP-39 (RECUPERAR)", true, index == focusIndex, Icon::lock);
+      else if (index == 3) {
+        char langLabel[32];
+        snprintf(langLabel, sizeof(langLabel), "IDIOMA BIP39: %s",
+                 gSettings.wordlistLanguage == 1 ? "ESPANOL" : "INGLES");
+        updateButton(kActiveMenu[3], langLabel, true, index == focusIndex, Icon::list);
+      } else updateButton(kBack, "VOLVER", true, index == focusIndex);
+      break;
+    case Screen::slip39_recover_len:
+      if (index == 0) updateButton(kChoose12, "20 PALABRAS (128 bits)", true, index == focusIndex);
+      else if (index == 1) updateButton(kChoose24, "33 PALABRAS (256 bits)", true, index == focusIndex);
       else updateButton(kBack, "VOLVER", true, index == focusIndex);
       break;
     case Screen::bip85_result:
@@ -5887,7 +5992,8 @@ void moveFocus(int direction) {
     const auto p = camClient.phase();
     count = (p == qr_cam::Phase::Error) ? 2 : 1;
   }
-  else if (screen == Screen::tools_menu) count = 3;
+  else if (screen == Screen::tools_menu) count = 5;
+  else if (screen == Screen::slip39_recover_len) count = 3;
   else if (screen == Screen::bip85_result) count = 2;
   else if (screen == Screen::slip39_split) count = 4;
   else if (screen == Screen::slip39_shares) count = 2;
@@ -6108,23 +6214,31 @@ void click(int x, int y) {
     const char key = keyAt(x, y);
     if (key && prefix.length() < 12) {
       String candidate = prefix + key;
-      if (bip39::has_prefix(candidate)) { prefix = candidate; updateKeyboardDynamic(); }
+      const bool okPrefix = slip39EntryMode
+          ? (slip39::find_matches(candidate, matches, 1) != 0)
+          : bip39::has_prefix(candidate);
+      if (okPrefix) { prefix = candidate; updateKeyboardDynamic(); }
     } else if (kDelete.contains(x, y) && prefix.length()) {
       prefix.remove(prefix.length() - 1); updateKeyboardDynamic();
     } else if (kAdd.contains(x, y)) {
-      uint16_t selected = bip39::find_exact(prefix);
+      uint16_t selected = slip39EntryMode ? slip39::find_exact(prefix)
+                                          : bip39::find_exact(prefix);
       if (selected == bip39::kInvalidWord && count == 1) selected = matches[0];
       commitWord(selected);
     } else if (kBack.contains(x, y)) {
-      if (editingWord >= 0) { editingWord = -1; prefix = ""; screen = Screen::review; }
-      else if (newSeedIntent != NewSeedIntent::none) {
+      if (slip39EntryMode) {
+        slip39EntryMode = false;
+        screen = Screen::tools_menu; focusIndex = 1;
+      } else if (editingWord >= 0) {
+        editingWord = -1; prefix = ""; screen = Screen::review;
+      } else if (newSeedIntent != NewSeedIntent::none) {
         newSeedIntent = NewSeedIntent::none; screen = Screen::session_seed_list;
-      }
-      else screen = Screen::menu;
+      } else screen = Screen::menu;
       focusIndex = 0; drawScreen();
     }
     else if (kAction.contains(x, y)) {
-      requestSecurity(Screen::review, Screen::keyboard);
+      if (slip39EntryMode) finalizeSlip39Share();
+      else requestSecurity(Screen::review, Screen::keyboard);
     }
   } else if (screen == Screen::review) {
     const int selectedWord = reviewWordAt(x, y);
@@ -6743,7 +6857,16 @@ void click(int x, int y) {
   } else if (screen == Screen::tools_menu) {
     if (kActiveMenu[0].contains(x, y)) startBip85();
     else if (kActiveMenu[1].contains(x, y)) startSlip39Split();
+    else if (kActiveMenu[2].contains(x, y)) startSlip39Recover();
+    else if (kActiveMenu[3].contains(x, y)) toggleWordlistLanguage();
     else if (kBack.contains(x, y)) { screen = Screen::active_seed; focusIndex = activeToolsIndex(); drawScreen(); }
+  } else if (screen == Screen::slip39_recover_len) {
+    if (kChoose12.contains(x, y)) beginSlip39Share(20);
+    else if (kChoose24.contains(x, y)) beginSlip39Share(33);
+    else if (kBack.contains(x, y)) {
+      slip39EntryMode = false;
+      screen = Screen::tools_menu; focusIndex = 2; drawScreen();
+    }
   } else if (screen == Screen::bip85_result) {
     if (kBack.contains(x, y)) { screen = Screen::tools_menu; focusIndex = 0; drawScreen(); }
     else if (kAction.contains(x, y)) useBip85Result();
@@ -6973,7 +7096,13 @@ void activateFocus() {
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::tools_menu) {
     const Rect& r = focusIndex == 0 ? kActiveMenu[0] :
-                    focusIndex == 1 ? kActiveMenu[1] : kBack;
+                    focusIndex == 1 ? kActiveMenu[1] :
+                    focusIndex == 2 ? kActiveMenu[2] :
+                    focusIndex == 3 ? kActiveMenu[3] : kBack;
+    click(r.x + 5, r.y + 5);
+  } else if (screen == Screen::slip39_recover_len) {
+    const Rect& r = focusIndex == 0 ? kChoose12 :
+                    focusIndex == 1 ? kChoose24 : kBack;
     click(r.x + 5, r.y + 5);
   } else if (screen == Screen::bip85_result) {
     const Rect& r = focusIndex == 0 ? kBack : kAction;
@@ -7041,6 +7170,8 @@ void setup() {
   Serial.printf("SLIP-39 self-test: %s\n", slip39SelfTest ? "OK" : "ERROR");
   gSettings = device_settings::load();
   lang::set(gSettings.language == 1 ? lang::Lang::ES : lang::Lang::EN);
+  bip39::set_wordlist(gSettings.wordlistLanguage == 1 ? bip39::Wordlist::Spanish
+                                                      : bip39::Wordlist::English);
   lastUserActivity = millis();
   drawScreen();
 }
